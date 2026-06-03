@@ -25,7 +25,7 @@ type Compression int
 const (
 	// CompressionLossless writes a VP8L lossless WebP image.
 	CompressionLossless Compression = iota
-	// CompressionLossy writes a VP8 key frame in a simple lossy WebP image.
+	// CompressionLossy writes a VP8-based lossy WebP image.
 	CompressionLossy
 )
 
@@ -35,6 +35,10 @@ const (
 type Options struct {
 	// Compression selects lossless or lossy WebP encoding.
 	Compression Compression
+	// Quality controls lossy WebP quality from 1 to 100. Values less than or
+	// equal to zero use the default, and values greater than 100 are clamped to
+	// 100. Quality is ignored for lossless encoding.
+	Quality int
 }
 
 // Encoder writes WebP images.
@@ -62,7 +66,7 @@ func Encode(w io.Writer, m image.Image, o *Options) error {
 	case CompressionLossless:
 		return encodeLossless(w, m, bounds, width, height)
 	case CompressionLossy:
-		return encodeLossy(w, m, bounds, width, height)
+		return encodeLossy(w, m, bounds, width, height, lossyQuality(o))
 	default:
 		return fmt.Errorf("webp: unsupported compression mode %d", compression(o))
 	}
@@ -83,16 +87,35 @@ func compression(o *Options) Compression {
 	return o.Compression
 }
 
+func lossyQuality(o *Options) int {
+	if o == nil || o.Quality <= 0 {
+		return defaultLossyQuality
+	}
+	if o.Quality > 100 {
+		return 100
+	}
+	return o.Quality
+}
+
 func writeWebPHeader(w *bufio.Writer, chunk string, riffSize uint32, payloadSize uint32) error {
+	if err := writeRIFFHeader(w, riffSize); err != nil {
+		return err
+	}
+	return writeChunkHeader(w, chunk, payloadSize)
+}
+
+func writeRIFFHeader(w *bufio.Writer, riffSize uint32) error {
 	if _, err := w.WriteString("RIFF"); err != nil {
 		return err
 	}
 	if err := writeUint32LE(w, riffSize); err != nil {
 		return err
 	}
-	if _, err := w.WriteString("WEBP"); err != nil {
-		return err
-	}
+	_, err := w.WriteString("WEBP")
+	return err
+}
+
+func writeChunkHeader(w *bufio.Writer, chunk string, payloadSize uint32) error {
 	if _, err := w.WriteString(chunk); err != nil {
 		return err
 	}
@@ -110,6 +133,16 @@ func writeUint32LE(w *bufio.Writer, v uint32) error {
 		return err
 	}
 	return w.WriteByte(byte(v >> 24))
+}
+
+func writeUint24LE(w *bufio.Writer, v uint32) error {
+	if err := w.WriteByte(byte(v)); err != nil {
+		return err
+	}
+	if err := w.WriteByte(byte(v >> 8)); err != nil {
+		return err
+	}
+	return w.WriteByte(byte(v >> 16))
 }
 
 type imageAnalysis struct {
@@ -158,7 +191,7 @@ func pixelReaderFor(m image.Image) pixelReader {
 	switch img := m.(type) {
 	case *image.NRGBA:
 		return func(x int, y int) color.NRGBA {
-			i := img.PixOffset(x, y)
+			i := (y-img.Rect.Min.Y)*img.Stride + (x-img.Rect.Min.X)*4
 			return color.NRGBA{
 				R: img.Pix[i+0],
 				G: img.Pix[i+1],
@@ -237,16 +270,23 @@ func full8TreeBits(alphabetSize int) uint64 {
 }
 
 func writeVP8L(bits *bitWriter, readPixel pixelReader, bounds image.Rectangle, width int, height int, analysis imageAnalysis) {
+	writeVP8LHeader(bits, width, height, analysis.alpha)
+	writeVP8LImageStream(bits, readPixel, bounds, analysis)
+}
+
+func writeVP8LHeader(bits *bitWriter, width int, height int, alpha bool) {
 	bits.writeBits(0x2f, 8)
 	bits.writeBits(uint32(width-1), 14)
 	bits.writeBits(uint32(height-1), 14)
-	if analysis.alpha {
+	if alpha {
 		bits.writeBits(1, 1)
 	} else {
 		bits.writeBits(0, 1)
 	}
 	bits.writeBits(0, 3)
+}
 
+func writeVP8LImageStream(bits *bitWriter, readPixel pixelReader, bounds image.Rectangle, analysis imageAnalysis) {
 	bits.writeBits(0, 1) // no transforms
 	bits.writeBits(0, 1) // no color cache
 	bits.writeBits(0, 1) // no meta prefix image
@@ -257,6 +297,9 @@ func writeVP8L(bits *bitWriter, readPixel pixelReader, bounds image.Rectangle, w
 	writeChannelTree(bits, analysis.channels[3], nLiteralCodes)
 	writeSimpleTree(bits, 0)
 
+	if analysis.allChannelsConstant() {
+		return
+	}
 	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
 		for x := bounds.Min.X; x < bounds.Max.X; x++ {
 			c := readPixel(x, y)
@@ -266,6 +309,15 @@ func writeVP8L(bits *bitWriter, readPixel pixelReader, bounds image.Rectangle, w
 			writeChannelSymbol(bits, analysis.channels[3], c.A)
 		}
 	}
+}
+
+func (a imageAnalysis) allChannelsConstant() bool {
+	for _, ch := range a.channels {
+		if !ch.constant {
+			return false
+		}
+	}
+	return true
 }
 
 func writeChannelTree(bits *bitWriter, ch channelPlan, alphabetSize int) {
@@ -286,6 +338,19 @@ func writeSimpleTree(bits *bitWriter, symbol uint8) {
 	}
 	bits.writeBits(1, 1)
 	bits.writeBits(uint32(symbol), 8)
+}
+
+func writeTwoSymbolTree(bits *bitWriter, symbol0 uint8, symbol1 uint8) {
+	bits.writeBits(1, 1)
+	bits.writeBits(1, 1)
+	if symbol0 < 2 {
+		bits.writeBits(0, 1)
+		bits.writeBits(uint32(symbol0), 1)
+	} else {
+		bits.writeBits(1, 1)
+		bits.writeBits(uint32(symbol0), 8)
+	}
+	bits.writeBits(uint32(symbol1), 8)
 }
 
 func writeFull8Tree(bits *bitWriter, alphabetSize int) {

@@ -8,7 +8,12 @@ type vp8BoolEncoder struct {
 }
 
 func newVP8BoolEncoder() *vp8BoolEncoder {
+	return newVP8BoolEncoderWithCapacity(0)
+}
+
+func newVP8BoolEncoderWithCapacity(capacity int) *vp8BoolEncoder {
 	return &vp8BoolEncoder{
+		out:      make([]byte, 0, capacity),
 		range_:   255,
 		bitCount: 24,
 	}

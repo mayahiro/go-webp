@@ -106,18 +106,343 @@ func TestEncodeLossyWritesVP8Chunk(t *testing.T) {
 	if len(data) < 30 {
 		t.Fatalf("lossy WebP length = %d, want at least 30", len(data))
 	}
-	if string(data[0:4]) != "RIFF" || string(data[8:12]) != "WEBP" || string(data[12:16]) != "VP8 " {
-		t.Fatalf("unexpected WebP header: %q %q %q", data[0:4], data[8:12], data[12:16])
+	chunks := readWebPChunks(t, data)
+	if len(chunks) != 1 {
+		t.Fatalf("chunk count = %d, want 1", len(chunks))
 	}
-	riffSize := int(binary.LittleEndian.Uint32(data[4:8]))
-	if riffSize+8 != len(data) {
-		t.Fatalf("RIFF size = %d, file length = %d", riffSize, len(data))
+	if chunks[0].name != "VP8 " {
+		t.Fatalf("chunk name = %q, want VP8 ", chunks[0].name)
 	}
-	payloadSize := int(binary.LittleEndian.Uint32(data[16:20]))
-	if 20+payloadSize > len(data) {
-		t.Fatalf("payload size = %d exceeds file length %d", payloadSize, len(data))
+	assertLossyVP8Frame(t, chunks[0].payload, 17, 19)
+}
+
+func TestEncodeLossyQualityOption(t *testing.T) {
+	img := image.NewNRGBA(image.Rect(0, 0, 17, 19))
+	for y := 0; y < img.Rect.Dy(); y++ {
+		for x := 0; x < img.Rect.Dx(); x++ {
+			img.SetNRGBA(x, y, color.NRGBA{
+				R: uint8(x*11 + y*3),
+				G: uint8(y*9 + x*5),
+				B: uint8((x + y) * 7),
+				A: 255,
+			})
+		}
 	}
-	frame := data[20 : 20+payloadSize]
+
+	encode := func(quality int) []byte {
+		t.Helper()
+		var buf bytes.Buffer
+		if err := Encode(&buf, img, &Options{
+			Compression: CompressionLossy,
+			Quality:     quality,
+		}); err != nil {
+			t.Fatalf("Encode lossy quality %d failed: %v", quality, err)
+		}
+		return buf.Bytes()
+	}
+
+	defaultQuality := encode(0)
+	quality100 := encode(100)
+	quality1 := encode(1)
+	qualityOverMax := encode(200)
+	qualityNegative := encode(-1)
+
+	if !bytes.Equal(defaultQuality, quality100) {
+		t.Fatal("default lossy quality differs from Quality 100")
+	}
+	if !bytes.Equal(qualityOverMax, quality100) {
+		t.Fatal("Quality greater than 100 was not clamped to Quality 100")
+	}
+	if !bytes.Equal(qualityNegative, quality100) {
+		t.Fatal("Quality less than or equal to zero did not use the default")
+	}
+	if bytes.Equal(quality1, quality100) {
+		t.Fatal("Quality 1 output equals Quality 100 output")
+	}
+
+	chunks := readWebPChunks(t, quality1)
+	if len(chunks) != 1 {
+		t.Fatalf("chunk count = %d, want 1", len(chunks))
+	}
+	if chunks[0].name != "VP8 " {
+		t.Fatalf("chunk name = %q, want VP8 ", chunks[0].name)
+	}
+	assertLossyVP8Frame(t, chunks[0].payload, 17, 19)
+}
+
+func TestEncodeLossyEnablesSimpleLoopFilter(t *testing.T) {
+	const quality = 25
+
+	img := image.NewNRGBA(image.Rect(0, 0, 17, 19))
+	for y := 0; y < img.Rect.Dy(); y++ {
+		for x := 0; x < img.Rect.Dx(); x++ {
+			img.SetNRGBA(x, y, color.NRGBA{
+				R: uint8(x*13 + y*3),
+				G: uint8(y*11 + x*5),
+				B: uint8((x + y) * 7),
+				A: 255,
+			})
+		}
+	}
+
+	var buf bytes.Buffer
+	if err := Encode(&buf, img, &Options{
+		Compression: CompressionLossy,
+		Quality:     quality,
+	}); err != nil {
+		t.Fatalf("Encode lossy failed: %v", err)
+	}
+
+	chunks := readWebPChunks(t, buf.Bytes())
+	if len(chunks) != 1 {
+		t.Fatalf("chunk count = %d, want 1", len(chunks))
+	}
+	if chunks[0].name != "VP8 " {
+		t.Fatalf("chunk name = %q, want VP8 ", chunks[0].name)
+	}
+
+	got := readVP8LoopFilterHeader(t, chunks[0].payload)
+	want := vp8LoopFilterForIndex(qualityToVP8QIndex(quality))
+	if got != want {
+		t.Fatalf("loop filter = %#v, want %#v", got, want)
+	}
+	if got.level == 0 {
+		t.Fatal("loop filter level = 0, want enabled")
+	}
+}
+
+func TestVP8BlockQuantizationKeepsAC(t *testing.T) {
+	residual := [16]int{
+		64, -64, 64, -64,
+		-64, 64, -64, 64,
+		64, -64, 64, -64,
+		-64, 64, -64, 64,
+	}
+	quant := vp8QuantForIndex(qualityToVP8QIndex(100))
+	coeff := quantizeVP8Block(residual, quant.y1DC, quant.y1AC)
+
+	hasAC := false
+	for _, c := range coeff[1:] {
+		if c != 0 {
+			hasAC = true
+			break
+		}
+	}
+	if !hasAC {
+		t.Fatal("quantized checkerboard residual has no AC coefficients")
+	}
+
+	recon := reconstructVP8Block(filledBlock4(128), coeff, quant.y1DC, quant.y1AC)
+	minV, maxV := recon[0], recon[0]
+	for _, v := range recon[1:] {
+		if v < minV {
+			minV = v
+		}
+		if v > maxV {
+			maxV = v
+		}
+	}
+	if minV == maxV {
+		t.Fatal("AC reconstruction produced a constant block")
+	}
+}
+
+func TestVP8Y16ModeSelectionChoosesVertical(t *testing.T) {
+	img := image.NewNRGBA(image.Rect(0, 0, 16, 32))
+	recY := make([]uint8, 16*32)
+	for x := 0; x < 16; x++ {
+		v := uint8(32 + x*8)
+		recY[15*16+x] = v
+		for y := 16; y < 32; y++ {
+			img.SetNRGBA(x, y, color.NRGBA{R: v, G: v, B: v, A: 255})
+		}
+	}
+
+	mode, score := chooseVP8Y16Mode(pixelReaderFor(img), img.Bounds(), 0, 1, recY, 16)
+	if mode != vp8PredVE {
+		t.Fatalf("Y16 mode = %d, want vertical", mode)
+	}
+	if score != 0 {
+		t.Fatalf("Y16 vertical score = %d, want 0", score)
+	}
+}
+
+func TestEncodeLossyWithAlphaWritesExtendedChunks(t *testing.T) {
+	img := image.NewNRGBA(image.Rect(4, 5, 7, 7))
+	wantAlpha := []byte{255, 128, 0, 64, 200, 255}
+	i := 0
+	for y := img.Rect.Min.Y; y < img.Rect.Max.Y; y++ {
+		for x := img.Rect.Min.X; x < img.Rect.Max.X; x++ {
+			img.SetNRGBA(x, y, color.NRGBA{
+				R: uint8(20 + i*7),
+				G: uint8(40 + i*9),
+				B: uint8(60 + i*11),
+				A: wantAlpha[i],
+			})
+			i++
+		}
+	}
+
+	var buf bytes.Buffer
+	if err := Encode(&buf, img, &Options{Compression: CompressionLossy}); err != nil {
+		t.Fatalf("Encode lossy with alpha failed: %v", err)
+	}
+
+	chunks := readWebPChunks(t, buf.Bytes())
+	if len(chunks) != 3 {
+		t.Fatalf("chunk count = %d, want 3", len(chunks))
+	}
+	if chunks[0].name != "VP8X" {
+		t.Fatalf("first chunk = %q, want VP8X", chunks[0].name)
+	}
+	if len(chunks[0].payload) != vp8xPayloadSize {
+		t.Fatalf("VP8X payload size = %d, want %d", len(chunks[0].payload), vp8xPayloadSize)
+	}
+	if chunks[0].payload[0] != vp8xAlphaFlag {
+		t.Fatalf("VP8X flags = %#02x, want %#02x", chunks[0].payload[0], vp8xAlphaFlag)
+	}
+	if !bytes.Equal(chunks[0].payload[1:4], []byte{0, 0, 0}) {
+		t.Fatalf("VP8X reserved bytes = % x, want 00 00 00", chunks[0].payload[1:4])
+	}
+	if widthMinusOne := readUint24LE(chunks[0].payload[4:7]); widthMinusOne != 2 {
+		t.Fatalf("VP8X width minus one = %d, want 2", widthMinusOne)
+	}
+	if heightMinusOne := readUint24LE(chunks[0].payload[7:10]); heightMinusOne != 1 {
+		t.Fatalf("VP8X height minus one = %d, want 1", heightMinusOne)
+	}
+
+	if chunks[1].name != "ALPH" {
+		t.Fatalf("second chunk = %q, want ALPH", chunks[1].name)
+	}
+	if len(chunks[1].payload) != 1+len(wantAlpha) {
+		t.Fatalf("ALPH payload size = %d, want %d", len(chunks[1].payload), 1+len(wantAlpha))
+	}
+	if chunks[1].payload[0] != 0 {
+		t.Fatalf("ALPH header = %#02x, want 0", chunks[1].payload[0])
+	}
+	if !bytes.Equal(chunks[1].payload[1:], wantAlpha) {
+		t.Fatalf("ALPH data = %v, want %v", chunks[1].payload[1:], wantAlpha)
+	}
+
+	if chunks[2].name != "VP8 " {
+		t.Fatalf("third chunk = %q, want VP8 ", chunks[2].name)
+	}
+	assertLossyVP8Frame(t, chunks[2].payload, 3, 2)
+}
+
+func TestEncodeLossyWithFilteredAlphaWritesCompressedALPH(t *testing.T) {
+	img := image.NewNRGBA(image.Rect(0, 0, 12, 1))
+	for x := 0; x < img.Rect.Dx(); x++ {
+		img.SetNRGBA(x, 0, color.NRGBA{
+			R: uint8(10 + x),
+			G: uint8(20 + x),
+			B: uint8(30 + x),
+			A: uint8((x + 1) * 7),
+		})
+	}
+
+	var buf bytes.Buffer
+	if err := Encode(&buf, img, &Options{Compression: CompressionLossy}); err != nil {
+		t.Fatalf("Encode lossy with filtered alpha failed: %v", err)
+	}
+
+	chunks := readWebPChunks(t, buf.Bytes())
+	if len(chunks) != 3 {
+		t.Fatalf("chunk count = %d, want 3", len(chunks))
+	}
+	if chunks[1].name != "ALPH" {
+		t.Fatalf("second chunk = %q, want ALPH", chunks[1].name)
+	}
+	if chunks[1].payload[0]&0x03 != alphCompressionVP8L {
+		t.Fatalf("ALPH compression = %d, want %d", chunks[1].payload[0]&0x03, alphCompressionVP8L)
+	}
+	if chunks[1].payload[0]>>2&0x03 != alphFilterHorizontal {
+		t.Fatalf("ALPH filter = %d, want %d", chunks[1].payload[0]>>2&0x03, alphFilterHorizontal)
+	}
+	if len(chunks[1].payload) >= 1+img.Rect.Dx()*img.Rect.Dy() {
+		t.Fatalf("compressed ALPH payload size = %d, want smaller than raw %d", len(chunks[1].payload), 1+img.Rect.Dx()*img.Rect.Dy())
+	}
+	assertLossyVP8Frame(t, chunks[2].payload, 12, 1)
+}
+
+func TestEncodeLossyWithBinaryAlphaWritesCompressedALPH(t *testing.T) {
+	img := image.NewNRGBA(image.Rect(0, 0, 16, 1))
+	for x := 0; x < img.Rect.Dx(); x++ {
+		alpha := uint8(0)
+		if x%2 == 0 {
+			alpha = 255
+		}
+		img.SetNRGBA(x, 0, color.NRGBA{
+			R: uint8(100 + x),
+			G: uint8(80 + x),
+			B: uint8(60 + x),
+			A: alpha,
+		})
+	}
+
+	var buf bytes.Buffer
+	if err := Encode(&buf, img, &Options{Compression: CompressionLossy}); err != nil {
+		t.Fatalf("Encode lossy with binary alpha failed: %v", err)
+	}
+
+	chunks := readWebPChunks(t, buf.Bytes())
+	if len(chunks) != 3 {
+		t.Fatalf("chunk count = %d, want 3", len(chunks))
+	}
+	if chunks[1].name != "ALPH" {
+		t.Fatalf("second chunk = %q, want ALPH", chunks[1].name)
+	}
+	if chunks[1].payload[0]&0x03 != alphCompressionVP8L {
+		t.Fatalf("ALPH compression = %d, want %d", chunks[1].payload[0]&0x03, alphCompressionVP8L)
+	}
+	if chunks[1].payload[0]>>2&0x03 != alphFilterNone {
+		t.Fatalf("ALPH filter = %d, want %d", chunks[1].payload[0]>>2&0x03, alphFilterNone)
+	}
+	if len(chunks[1].payload) >= 1+img.Rect.Dx()*img.Rect.Dy() {
+		t.Fatalf("compressed ALPH payload size = %d, want smaller than raw %d", len(chunks[1].payload), 1+img.Rect.Dx()*img.Rect.Dy())
+	}
+	assertLossyVP8Frame(t, chunks[2].payload, 16, 1)
+}
+
+func TestEncodeLossyWithMultiSymbolAlphaWritesCompressedALPH(t *testing.T) {
+	img := image.NewNRGBA(image.Rect(0, 0, 1024, 1))
+	alphaValues := [...]uint8{0, 100, 200}
+	for x := 0; x < img.Rect.Dx(); x++ {
+		alpha := alphaValues[x%len(alphaValues)]
+		img.SetNRGBA(x, 0, color.NRGBA{
+			R: uint8(x),
+			G: uint8(x >> 1),
+			B: uint8(x >> 2),
+			A: alpha,
+		})
+	}
+
+	var buf bytes.Buffer
+	if err := Encode(&buf, img, &Options{Compression: CompressionLossy}); err != nil {
+		t.Fatalf("Encode lossy with multi-symbol alpha failed: %v", err)
+	}
+
+	chunks := readWebPChunks(t, buf.Bytes())
+	if len(chunks) != 3 {
+		t.Fatalf("chunk count = %d, want 3", len(chunks))
+	}
+	if chunks[1].name != "ALPH" {
+		t.Fatalf("second chunk = %q, want ALPH", chunks[1].name)
+	}
+	if chunks[1].payload[0]&0x03 != alphCompressionVP8L {
+		t.Fatalf("ALPH compression = %d, want %d", chunks[1].payload[0]&0x03, alphCompressionVP8L)
+	}
+	if len(chunks[1].payload) >= 1+img.Rect.Dx()*img.Rect.Dy() {
+		t.Fatalf("compressed ALPH payload size = %d, want smaller than raw %d", len(chunks[1].payload), 1+img.Rect.Dx()*img.Rect.Dy())
+	}
+	assertLossyVP8Frame(t, chunks[2].payload, 1024, 1)
+}
+
+func assertLossyVP8Frame(t *testing.T, frame []byte, wantWidth int, wantHeight int) {
+	t.Helper()
+	if len(frame) < 10 {
+		t.Fatalf("VP8 frame length = %d, want at least 10", len(frame))
+	}
 	frameTag := uint32(frame[0]) | uint32(frame[1])<<8 | uint32(frame[2])<<16
 	if frameTag&1 != 0 {
 		t.Fatal("VP8 frame is not a key frame")
@@ -134,9 +459,57 @@ func TestEncodeLossyWritesVP8Chunk(t *testing.T) {
 	}
 	width := int(binary.LittleEndian.Uint16(frame[6:8]) & 0x3fff)
 	height := int(binary.LittleEndian.Uint16(frame[8:10]) & 0x3fff)
-	if width != 17 || height != 19 {
-		t.Fatalf("VP8 dimensions = %dx%d, want 17x19", width, height)
+	if width != wantWidth || height != wantHeight {
+		t.Fatalf("VP8 dimensions = %dx%d, want %dx%d", width, height, wantWidth, wantHeight)
 	}
+}
+
+func readVP8LoopFilterHeader(t *testing.T, frame []byte) vp8LoopFilter {
+	t.Helper()
+	firstPart := readVP8FirstPartition(t, frame)
+	var r testVP8PartitionReader
+	r.init(firstPart)
+
+	colorSpace := r.readUint(128, 1)
+	pixelClamp := r.readUint(128, 1)
+	segmentation := r.readBit(128)
+	simple := r.readBit(128)
+	level := r.readUint(128, 6)
+	sharpness := r.readUint(128, 3)
+	loopFilterDelta := r.readBit(128)
+	if r.unexpectedEOF {
+		t.Fatal("unexpected end of VP8 first partition")
+	}
+	if colorSpace != 0 {
+		t.Fatalf("VP8 color space = %d, want 0", colorSpace)
+	}
+	if pixelClamp != 0 {
+		t.Fatalf("VP8 pixel clamp = %d, want 0", pixelClamp)
+	}
+	if segmentation {
+		t.Fatal("VP8 segmentation is enabled, want disabled")
+	}
+	if loopFilterDelta {
+		t.Fatal("VP8 loop filter delta is enabled, want disabled")
+	}
+	return vp8LoopFilter{
+		simple:    simple,
+		level:     int(level),
+		sharpness: int(sharpness),
+	}
+}
+
+func readVP8FirstPartition(t *testing.T, frame []byte) []byte {
+	t.Helper()
+	if len(frame) < 10 {
+		t.Fatalf("VP8 frame length = %d, want at least 10", len(frame))
+	}
+	frameTag := uint32(frame[0]) | uint32(frame[1])<<8 | uint32(frame[2])<<16
+	firstPartitionLen := int(frameTag >> 5)
+	if firstPartitionLen <= 0 || 10+firstPartitionLen >= len(frame) {
+		t.Fatalf("first partition length = %d, frame length = %d", firstPartitionLen, len(frame))
+	}
+	return frame[10 : 10+firstPartitionLen]
 }
 
 func TestEncodeRejectsInvalidInput(t *testing.T) {
@@ -172,6 +545,57 @@ type failingWriter struct{}
 
 func (failingWriter) Write([]byte) (int, error) {
 	return 0, errFailingWriter
+}
+
+type testWebPChunk struct {
+	name    string
+	payload []byte
+}
+
+func readWebPChunks(t *testing.T, data []byte) []testWebPChunk {
+	t.Helper()
+	if len(data) < 12 {
+		t.Fatalf("WebP length = %d, want at least 12", len(data))
+	}
+	if string(data[0:4]) != "RIFF" || string(data[8:12]) != "WEBP" {
+		t.Fatalf("unexpected WebP header: %q %q", data[0:4], data[8:12])
+	}
+	riffSize := int(binary.LittleEndian.Uint32(data[4:8]))
+	if riffSize+8 != len(data) {
+		t.Fatalf("RIFF size = %d, file length = %d", riffSize, len(data))
+	}
+
+	var chunks []testWebPChunk
+	for offset := 12; offset < len(data); {
+		if offset+8 > len(data) {
+			t.Fatalf("short chunk header at offset %d", offset)
+		}
+		payloadSize := int(binary.LittleEndian.Uint32(data[offset+4 : offset+8]))
+		payloadStart := offset + 8
+		payloadEnd := payloadStart + payloadSize
+		if payloadEnd > len(data) {
+			t.Fatalf("chunk %q payload size = %d exceeds file length %d", data[offset:offset+4], payloadSize, len(data))
+		}
+		chunks = append(chunks, testWebPChunk{
+			name:    string(data[offset : offset+4]),
+			payload: data[payloadStart:payloadEnd],
+		})
+		offset = payloadEnd
+		if payloadSize&1 != 0 {
+			if offset >= len(data) {
+				t.Fatalf("missing padding byte after chunk %q", chunks[len(chunks)-1].name)
+			}
+			if data[offset] != 0 {
+				t.Fatalf("padding byte after chunk %q = %#02x, want 0", chunks[len(chunks)-1].name, data[offset])
+			}
+			offset++
+		}
+	}
+	return chunks
+}
+
+func readUint24LE(b []byte) int {
+	return int(b[0]) | int(b[1])<<8 | int(b[2])<<16
 }
 
 type decodedTree struct {
@@ -385,4 +809,60 @@ func (r *testBitReader) read(n uint8) (uint32, error) {
 	r.bits >>= n
 	r.nBits -= n
 	return v, nil
+}
+
+type testVP8PartitionReader struct {
+	buf           []byte
+	r             int
+	rangeM1       uint32
+	bits          uint32
+	nBits         uint8
+	unexpectedEOF bool
+}
+
+func (p *testVP8PartitionReader) init(buf []byte) {
+	p.buf = buf
+	p.r = 0
+	p.rangeM1 = 254
+	p.bits = 0
+	p.nBits = 0
+	p.unexpectedEOF = false
+}
+
+func (p *testVP8PartitionReader) readBit(prob uint8) bool {
+	if p.nBits < 8 {
+		if p.r >= len(p.buf) {
+			p.unexpectedEOF = true
+			return false
+		}
+		p.bits |= uint32(p.buf[p.r]) << (8 - p.nBits)
+		p.r++
+		p.nBits += 8
+	}
+
+	split := (p.rangeM1*uint32(prob))>>8 + 1
+	bit := p.bits >= split<<8
+	if bit {
+		p.rangeM1 -= split
+		p.bits -= split << 8
+	} else {
+		p.rangeM1 = split - 1
+	}
+	for p.rangeM1 < 127 {
+		p.rangeM1 = p.rangeM1<<1 | 1
+		p.bits <<= 1
+		p.nBits--
+	}
+	return bit
+}
+
+func (p *testVP8PartitionReader) readUint(prob uint8, n uint8) uint32 {
+	var u uint32
+	for n > 0 {
+		n--
+		if p.readBit(prob) {
+			u |= 1 << n
+		}
+	}
+	return u
 }

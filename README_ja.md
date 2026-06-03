@@ -2,7 +2,7 @@
 
 go-webpはGo標準の `image.Image` インターフェイス向けのpure Go WebPエンコーダです
 
-デフォルトではVP8L lossless WebPを書き出し、simple VP8 lossy WebPも書き出せます
+デフォルトではVP8L lossless WebPを書き出し、VP8ベースのlossy WebPも書き出せます
 APIはGo標準の画像パッケージに近く、`io.Writer`、`image.Image`、任意のencoder optionsを受け取ります
 
 ## インストール
@@ -52,13 +52,17 @@ func Encode(w io.Writer, m image.Image, o *Options) error
 `Encode` はlossless WebP画像を `w` に書き込みます
 `Options` がnilの場合はデフォルトのlossless設定を使います
 
-simple lossy WebPを書き出す場合は `CompressionLossy` を指定します
+lossy WebPを書き出す場合は `CompressionLossy` を指定します
 
 ```go
 err := webp.Encode(w, img, &webp.Options{
 	Compression: webp.CompressionLossy,
+	Quality:     80,
 })
 ```
+
+`Quality` はlossy品質を1から100で制御します
+0以下はデフォルト、100を超える値は100に丸められ、lossless encodingでは無視されます
 
 ```go
 type Encoder struct {
@@ -76,7 +80,9 @@ func (enc *Encoder) Encode(w io.Writer, m image.Image) error
 - lossless encodingでは入力画像を2回走査し、変換済み画像全体は保持しません
 - 単一値のチャンネルはsingle-symbol Huffman treeでエンコードします
 - 現在はVP8L transforms、color cache、LZ77 backwards referencesを使わないため、高度に最適化されたWebP encoderより出力が大きくなることがあります
-- lossy encodingは4:2:0 chroma subsampling、DC prediction、DC係数のみを使う低複雑度VP8 key frame encoderです
+- lossy encodingは4:2:0 chroma subsampling、選択されたintra16x16/chroma prediction mode、量子化されたDC/AC係数を使う低複雑度VP8 key frame encoderです。qualityに応じたlevelでsimple VP8 loop filterを有効化します
+- lossy `Quality` は現時点ではVP8 base quantizerを制御し、mode decisionは単純なheuristicです
+- alpha付きのlossy画像はextended WebPとして書き出し、`ALPH` チャンクで透明度を保持します。圧縮したほうが小さい場合はcompressed alphaを使い、それ以外はraw alphaに戻します
 
 ## 制限
 
@@ -84,8 +90,8 @@ func (enc *Encoder) Encode(w io.Writer, m image.Image) error
 - lossless画像サイズは各軸1から16384 pixelsの範囲が必要です
 - lossy画像サイズは各軸1から16383 pixelsの範囲が必要です
 - `image.NRGBA` 以外の画像は `color.NRGBAModel` を通して変換してからエンコードします
-- lossy encodingではalphaを保持しません。alphaが必要な場合はlossless encodingを使ってください
-- lossy出力は意図的に単純な実装のため、高度に最適化されたVP8/WebP encoderよりブロック感が強い、または大きくなることがあります
+- lossy alpha圧縮は意図的に単純な実装で、現時点ではLZ77 referencesを使わず、頻度ベースのalpha residual符号化を使います
+- lossy 4x4 luma prediction mode selectionとnormal loop filteringはまだ未実装のため、細部の多い画像では高度に最適化されたVP8/WebP encoderよりブロック感が強い、または大きくなることがあります
 
 ## 対応環境
 
