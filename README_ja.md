@@ -1,0 +1,93 @@
+# go-webp
+
+go-webpはGo標準の `image.Image` インターフェイス向けのpure Go WebPエンコーダです
+
+現在はVP8L lossless WebPを書き出します
+APIはGo標準の画像パッケージに近く、`io.Writer`、`image.Image`、任意のencoder optionsを受け取ります
+
+## インストール
+
+```sh
+go get github.com/mayahiro/go-webp
+```
+
+## 使い方
+
+```go
+package main
+
+import (
+	"image"
+	"image/color"
+	"os"
+
+	"github.com/mayahiro/go-webp"
+)
+
+func main() {
+	img := image.NewNRGBA(image.Rect(0, 0, 2, 2))
+	img.SetNRGBA(0, 0, color.NRGBA{R: 255, A: 255})
+	img.SetNRGBA(1, 0, color.NRGBA{G: 255, A: 255})
+	img.SetNRGBA(0, 1, color.NRGBA{B: 255, A: 255})
+	img.SetNRGBA(1, 1, color.NRGBA{R: 255, G: 255, B: 255, A: 255})
+
+	f, err := os.Create("out.webp")
+	if err != nil {
+		panic(err)
+	}
+	defer f.Close()
+
+	if err := webp.Encode(f, img, nil); err != nil {
+		panic(err)
+	}
+}
+```
+
+## API
+
+```go
+func Encode(w io.Writer, m image.Image, o *Options) error
+```
+
+`Encode` はlossless WebP画像を `w` に書き込みます
+`Options` がnilの場合はデフォルトのlossless設定を使います
+
+```go
+type Encoder struct {
+	Options *Options
+}
+
+func (enc *Encoder) Encode(w io.Writer, m image.Image) error
+```
+
+`Encoder` は `image/png.Encoder` などに近い形で、将来のoptions追加に備えています
+
+## 性能メモ
+
+- pure Goで実装しておりcgoは使いません
+- 入力画像を2回走査し、変換済み画像全体は保持しません
+- 単一値のチャンネルはsingle-symbol Huffman treeでエンコードします
+- 現在はVP8L transforms、color cache、LZ77 backwards referencesを使わないため、高度に最適化されたWebP encoderより出力が大きくなることがあります
+
+## 制限
+
+- エンコードのみ対応しています
+- lossless WebPのみ対応しています
+- 画像サイズは各軸1から16384 pixelsの範囲が必要です
+- `image.NRGBA` 以外の画像は `color.NRGBAModel` を通して変換してからエンコードします
+
+## 対応環境
+
+- Go 1.25.0以上
+
+## 確認
+
+```sh
+go test ./...
+go vet ./...
+go tool goimports -w .
+```
+
+## ライセンス
+
+MIT
