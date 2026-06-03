@@ -3,9 +3,10 @@
 go-webp is a pure Go WebP encoder for the standard `image.Image`
 interface.
 
-The encoder currently writes VP8L lossless WebP images. It is designed to fit
-the shape of Go's standard image packages: callers pass an `io.Writer`, an
-`image.Image`, and optional encoder options.
+The encoder writes VP8L lossless WebP images by default and can also write a
+simple VP8 lossy WebP image. It is designed to fit the shape of Go's standard
+image packages: callers pass an `io.Writer`, an `image.Image`, and optional
+encoder options.
 
 ## Installation
 
@@ -54,6 +55,14 @@ func Encode(w io.Writer, m image.Image, o *Options) error
 `Encode` writes a lossless WebP image to `w`. A nil `Options` value uses the
 default lossless settings.
 
+Use `CompressionLossy` to write a simple lossy WebP image:
+
+```go
+err := webp.Encode(w, img, &webp.Options{
+	Compression: webp.CompressionLossy,
+})
+```
+
 ```go
 type Encoder struct {
 	Options *Options
@@ -69,19 +78,25 @@ room for future options.
 
 - The encoder is pure Go and does not use cgo.
 - It scans the source image twice and does not keep a full converted image in
-  memory.
+  memory for lossless encoding.
 - Constant channels are encoded with single-symbol Huffman trees.
 - The current encoder does not use VP8L transforms, color cache, or LZ77
   backwards references, so output can be larger than highly optimized WebP
   encoders.
+- Lossy encoding uses a low-complexity VP8 key frame encoder with 4:2:0 chroma
+  subsampling, DC prediction, and DC coefficients only.
 
 ## Limitations
 
 - Encoding only. Decoding is not implemented.
-- Lossless WebP only.
-- Image dimensions must be between 1 and 16384 pixels on each axis.
+- Lossless image dimensions must be between 1 and 16384 pixels on each axis.
+- Lossy image dimensions must be between 1 and 16383 pixels on each axis.
 - Non-`image.NRGBA` images are converted through `color.NRGBAModel` before
   encoding.
+- Lossy encoding does not preserve alpha. Use lossless encoding when alpha must
+  be retained.
+- Lossy output is intentionally simple and can be blockier or larger than
+  output from highly optimized VP8/WebP encoders.
 
 ## Supported Environments
 

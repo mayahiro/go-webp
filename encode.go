@@ -8,22 +8,34 @@ import (
 	"image"
 	"image/color"
 	"io"
-	"math"
 )
 
 const (
 	maxVP8LDimension = 16384
+	maxVP8Dimension  = 16383
 
 	nLiteralCodes  = 256
 	nLengthCodes   = 24
 	nDistanceCodes = 40
 )
 
+// Compression selects the WebP bitstream written by Encode.
+type Compression int
+
+const (
+	// CompressionLossless writes a VP8L lossless WebP image.
+	CompressionLossless Compression = iota
+	// CompressionLossy writes a VP8 key frame in a simple lossy WebP image.
+	CompressionLossy
+)
+
 // Options are the encoding parameters for Encode.
 //
-// The current encoder writes VP8L lossless WebP images. The struct is reserved
-// for future encoder options and may be nil.
-type Options struct{}
+// A nil Options value and the zero value both write VP8L lossless WebP images.
+type Options struct {
+	// Compression selects lossless or lossy WebP encoding.
+	Compression Compression
+}
 
 // Encoder writes WebP images.
 type Encoder struct {
@@ -32,7 +44,7 @@ type Encoder struct {
 	Options *Options
 }
 
-// Encode writes the image m to w in WebP lossless format.
+// Encode writes the image m to w in WebP format.
 func Encode(w io.Writer, m image.Image, o *Options) error {
 	if w == nil {
 		return errors.New("webp: nil writer")
@@ -46,39 +58,17 @@ func Encode(w io.Writer, m image.Image, o *Options) error {
 	if width <= 0 || height <= 0 {
 		return fmt.Errorf("webp: invalid image dimensions %dx%d", width, height)
 	}
-	if width > maxVP8LDimension || height > maxVP8LDimension {
-		return fmt.Errorf("webp: image dimensions %dx%d exceed VP8L limit %dx%d", width, height, maxVP8LDimension, maxVP8LDimension)
+	switch compression(o) {
+	case CompressionLossless:
+		return encodeLossless(w, m, bounds, width, height)
+	case CompressionLossy:
+		return encodeLossy(w, m, bounds, width, height)
+	default:
+		return fmt.Errorf("webp: unsupported compression mode %d", compression(o))
 	}
-
-	readPixel := pixelReaderFor(m)
-	analysis := analyzeImage(readPixel, bounds)
-	payloadBits := vp8lPayloadBits(width, height, analysis)
-	payloadSize := (payloadBits + 7) / 8
-	padding := payloadSize & 1
-	riffSize := uint64(4) + 8 + payloadSize + padding
-	if riffSize > math.MaxUint32 {
-		return fmt.Errorf("webp: encoded image is too large")
-	}
-
-	bw := bufio.NewWriter(w)
-	if err := writeWebPHeader(bw, uint32(riffSize), uint32(payloadSize)); err != nil {
-		return err
-	}
-
-	bits := newBitWriter(bw)
-	writeVP8L(bits, readPixel, bounds, width, height, analysis)
-	if err := bits.flush(); err != nil {
-		return err
-	}
-	if padding != 0 {
-		if err := bw.WriteByte(0); err != nil {
-			return err
-		}
-	}
-	return bw.Flush()
 }
 
-// Encode writes the image m to w in WebP lossless format.
+// Encode writes the image m to w in WebP format.
 func (enc *Encoder) Encode(w io.Writer, m image.Image) error {
 	if enc == nil {
 		return Encode(w, m, nil)
@@ -86,7 +76,14 @@ func (enc *Encoder) Encode(w io.Writer, m image.Image) error {
 	return Encode(w, m, enc.Options)
 }
 
-func writeWebPHeader(w *bufio.Writer, riffSize uint32, payloadSize uint32) error {
+func compression(o *Options) Compression {
+	if o == nil {
+		return CompressionLossless
+	}
+	return o.Compression
+}
+
+func writeWebPHeader(w *bufio.Writer, chunk string, riffSize uint32, payloadSize uint32) error {
 	if _, err := w.WriteString("RIFF"); err != nil {
 		return err
 	}
@@ -96,7 +93,7 @@ func writeWebPHeader(w *bufio.Writer, riffSize uint32, payloadSize uint32) error
 	if _, err := w.WriteString("WEBP"); err != nil {
 		return err
 	}
-	if _, err := w.WriteString("VP8L"); err != nil {
+	if _, err := w.WriteString(chunk); err != nil {
 		return err
 	}
 	return writeUint32LE(w, payloadSize)

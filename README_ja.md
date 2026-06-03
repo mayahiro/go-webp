@@ -2,7 +2,7 @@
 
 go-webpはGo標準の `image.Image` インターフェイス向けのpure Go WebPエンコーダです
 
-現在はVP8L lossless WebPを書き出します
+デフォルトではVP8L lossless WebPを書き出し、simple VP8 lossy WebPも書き出せます
 APIはGo標準の画像パッケージに近く、`io.Writer`、`image.Image`、任意のencoder optionsを受け取ります
 
 ## インストール
@@ -52,6 +52,14 @@ func Encode(w io.Writer, m image.Image, o *Options) error
 `Encode` はlossless WebP画像を `w` に書き込みます
 `Options` がnilの場合はデフォルトのlossless設定を使います
 
+simple lossy WebPを書き出す場合は `CompressionLossy` を指定します
+
+```go
+err := webp.Encode(w, img, &webp.Options{
+	Compression: webp.CompressionLossy,
+})
+```
+
 ```go
 type Encoder struct {
 	Options *Options
@@ -65,16 +73,19 @@ func (enc *Encoder) Encode(w io.Writer, m image.Image) error
 ## 性能メモ
 
 - pure Goで実装しておりcgoは使いません
-- 入力画像を2回走査し、変換済み画像全体は保持しません
+- lossless encodingでは入力画像を2回走査し、変換済み画像全体は保持しません
 - 単一値のチャンネルはsingle-symbol Huffman treeでエンコードします
 - 現在はVP8L transforms、color cache、LZ77 backwards referencesを使わないため、高度に最適化されたWebP encoderより出力が大きくなることがあります
+- lossy encodingは4:2:0 chroma subsampling、DC prediction、DC係数のみを使う低複雑度VP8 key frame encoderです
 
 ## 制限
 
 - エンコードのみ対応しています
-- lossless WebPのみ対応しています
-- 画像サイズは各軸1から16384 pixelsの範囲が必要です
+- lossless画像サイズは各軸1から16384 pixelsの範囲が必要です
+- lossy画像サイズは各軸1から16383 pixelsの範囲が必要です
 - `image.NRGBA` 以外の画像は `color.NRGBAModel` を通して変換してからエンコードします
+- lossy encodingではalphaを保持しません。alphaが必要な場合はlossless encodingを使ってください
+- lossy出力は意図的に単純な実装のため、高度に最適化されたVP8/WebP encoderよりブロック感が強い、または大きくなることがあります
 
 ## 対応環境
 

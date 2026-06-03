@@ -84,6 +84,61 @@ func TestEncoderRoundTripGray(t *testing.T) {
 	}
 }
 
+func TestEncodeLossyWritesVP8Chunk(t *testing.T) {
+	img := image.NewNRGBA(image.Rect(0, 0, 17, 19))
+	for y := 0; y < img.Rect.Dy(); y++ {
+		for x := 0; x < img.Rect.Dx(); x++ {
+			img.SetNRGBA(x, y, color.NRGBA{
+				R: uint8(x * 11),
+				G: uint8(y * 9),
+				B: uint8((x + y) * 5),
+				A: 255,
+			})
+		}
+	}
+
+	var buf bytes.Buffer
+	if err := Encode(&buf, img, &Options{Compression: CompressionLossy}); err != nil {
+		t.Fatalf("Encode lossy failed: %v", err)
+	}
+
+	data := buf.Bytes()
+	if len(data) < 30 {
+		t.Fatalf("lossy WebP length = %d, want at least 30", len(data))
+	}
+	if string(data[0:4]) != "RIFF" || string(data[8:12]) != "WEBP" || string(data[12:16]) != "VP8 " {
+		t.Fatalf("unexpected WebP header: %q %q %q", data[0:4], data[8:12], data[12:16])
+	}
+	riffSize := int(binary.LittleEndian.Uint32(data[4:8]))
+	if riffSize+8 != len(data) {
+		t.Fatalf("RIFF size = %d, file length = %d", riffSize, len(data))
+	}
+	payloadSize := int(binary.LittleEndian.Uint32(data[16:20]))
+	if 20+payloadSize > len(data) {
+		t.Fatalf("payload size = %d exceeds file length %d", payloadSize, len(data))
+	}
+	frame := data[20 : 20+payloadSize]
+	frameTag := uint32(frame[0]) | uint32(frame[1])<<8 | uint32(frame[2])<<16
+	if frameTag&1 != 0 {
+		t.Fatal("VP8 frame is not a key frame")
+	}
+	if frameTag>>4&1 != 1 {
+		t.Fatal("VP8 frame show_frame flag is false")
+	}
+	firstPartitionLen := int(frameTag >> 5)
+	if firstPartitionLen <= 0 || 10+firstPartitionLen >= len(frame) {
+		t.Fatalf("first partition length = %d, frame length = %d", firstPartitionLen, len(frame))
+	}
+	if !bytes.Equal(frame[3:6], []byte{0x9d, 0x01, 0x2a}) {
+		t.Fatalf("invalid VP8 start code: % x", frame[3:6])
+	}
+	width := int(binary.LittleEndian.Uint16(frame[6:8]) & 0x3fff)
+	height := int(binary.LittleEndian.Uint16(frame[8:10]) & 0x3fff)
+	if width != 17 || height != 19 {
+		t.Fatalf("VP8 dimensions = %dx%d, want 17x19", width, height)
+	}
+}
+
 func TestEncodeRejectsInvalidInput(t *testing.T) {
 	var buf bytes.Buffer
 	if err := Encode(&buf, nil, nil); err == nil {
@@ -94,6 +149,12 @@ func TestEncodeRejectsInvalidInput(t *testing.T) {
 	}
 	if err := Encode(nil, image.NewNRGBA(image.Rect(0, 0, 1, 1)), nil); err == nil {
 		t.Fatal("Encode with nil writer succeeded")
+	}
+	if err := Encode(&buf, image.NewNRGBA(image.Rect(0, 0, maxVP8Dimension+1, 1)), &Options{Compression: CompressionLossy}); err == nil {
+		t.Fatal("Encode lossy with too-wide image succeeded")
+	}
+	if err := Encode(&buf, image.NewNRGBA(image.Rect(0, 0, 1, 1)), &Options{Compression: Compression(99)}); err == nil {
+		t.Fatal("Encode with unsupported compression succeeded")
 	}
 }
 
