@@ -25,6 +25,10 @@ const (
 
 	alphaMinBackwardRefLength = 4
 	alphaMaxBackwardRefLength = 4096
+
+	alphaCodeLengthCodeCount     = 19
+	alphaCodeLengthRepeatZero    = 17
+	alphaCodeLengthRepeatZeroBig = 18
 )
 
 func encodeLossy(w io.Writer, m image.Image, bounds image.Rectangle, width int, height int, quality int) error {
@@ -238,19 +242,138 @@ func writeAlphaGreenTree(bits *bitWriter, code alphaCode) {
 }
 
 func writeAlphaNormalTree(bits *bitWriter, lengths [nLiteralCodes + nLengthCodes]uint8) {
+	tokens := alphaCodeLengthTokens(lengths)
+	codes := canonicalAlphaCodeLengthCodes(alphaCodeLengthCodeLengths)
+
 	bits.writeBits(0, 1)
 	bits.writeBits(15, 4)
 	for _, symbol := range normalCodeLengthCodeOrder {
-		length := uint8(0)
-		if symbol <= 15 {
-			length = 4
+		bits.writeBits(uint32(alphaCodeLengthCodeLengths[symbol]), 3)
+	}
+	writeAlphaCodeLengthLimit(bits, len(tokens), len(lengths))
+	for _, token := range tokens {
+		length := alphaCodeLengthCodeLengths[token.symbol]
+		bits.writeBits(uint32(reverseBits(codes[token.symbol], length)), length)
+		bits.writeBits(token.extra, token.extraBits)
+	}
+}
+
+type alphaCodeLengthToken struct {
+	symbol    uint8
+	extraBits uint8
+	extra     uint32
+}
+
+func alphaCodeLengthTokens(lengths [nLiteralCodes + nLengthCodes]uint8) []alphaCodeLengthToken {
+	maxSymbol := alphaCodeLengthLimit(lengths)
+	tokens := make([]alphaCodeLengthToken, 0, maxSymbol)
+	for i := 0; i < maxSymbol; {
+		length := lengths[i]
+		if length != 0 {
+			tokens = append(tokens, alphaCodeLengthToken{symbol: length})
+			i++
+			continue
 		}
-		bits.writeBits(uint32(length), 3)
+		run := 1
+		for i+run < maxSymbol && lengths[i+run] == 0 {
+			run++
+		}
+		tokens = appendAlphaZeroLengthRun(tokens, run)
+		i += run
 	}
-	bits.writeBits(0, 1)
+	return tokens
+}
+
+func alphaCodeLengthLimit(lengths [nLiteralCodes + nLengthCodes]uint8) int {
+	for i := len(lengths) - 1; i >= 0; i-- {
+		if lengths[i] == 0 {
+			continue
+		}
+		if i < 1 {
+			return 2
+		}
+		return i + 1
+	}
+	return 2
+}
+
+func appendAlphaZeroLengthRun(tokens []alphaCodeLengthToken, run int) []alphaCodeLengthToken {
+	for run > 0 {
+		switch {
+		case run >= 11:
+			n := run
+			if n > 138 {
+				n = 138
+			}
+			tokens = append(tokens, alphaCodeLengthToken{
+				symbol:    alphaCodeLengthRepeatZeroBig,
+				extraBits: 7,
+				extra:     uint32(n - 11),
+			})
+			run -= n
+		case run >= 3:
+			n := run
+			if n > 10 {
+				n = 10
+			}
+			tokens = append(tokens, alphaCodeLengthToken{
+				symbol:    alphaCodeLengthRepeatZero,
+				extraBits: 3,
+				extra:     uint32(n - 3),
+			})
+			run -= n
+		default:
+			tokens = append(tokens, alphaCodeLengthToken{symbol: 0})
+			run--
+		}
+	}
+	return tokens
+}
+
+func writeAlphaCodeLengthLimit(bits *bitWriter, maxSymbol int, alphabetSize int) {
+	if maxSymbol >= alphabetSize {
+		bits.writeBits(0, 1)
+		return
+	}
+	if maxSymbol < 2 {
+		maxSymbol = 2
+	}
+	value := maxSymbol - 2
+	nBits := uint8(2)
+	selector := uint32(0)
+	for value >= 1<<nBits {
+		nBits += 2
+		selector++
+	}
+	bits.writeBits(1, 1)
+	bits.writeBits(selector, 3)
+	bits.writeBits(uint32(value), nBits)
+}
+
+func canonicalAlphaCodeLengthCodes(lengths [alphaCodeLengthCodeCount]uint8) [alphaCodeLengthCodeCount]uint16 {
+	var histogram [8]uint16
 	for _, length := range lengths {
-		bits.writeBits(uint32(reverseBits(uint16(length), 4)), 4)
+		if length != 0 {
+			histogram[length]++
+		}
 	}
+
+	code := uint16(0)
+	var nextCodes [8]uint16
+	for length := 1; length < len(nextCodes); length++ {
+		code = (code + histogram[length-1]) << 1
+		nextCodes[length] = code
+	}
+
+	var codes [alphaCodeLengthCodeCount]uint16
+	for symbol, length := range lengths {
+		if length == 0 {
+			continue
+		}
+		codes[symbol] = nextCodes[length]
+		nextCodes[length]++
+	}
+	return codes
 }
 
 func writeAlphaResidualBits(bits *bitWriter, readPixel pixelReader, bounds image.Rectangle, width int, height int, filter byte, code alphaCode) {
@@ -709,6 +832,27 @@ func reverseBits(v uint16, n uint8) uint16 {
 
 var normalCodeLengthCodeOrder = [...]uint8{
 	17, 18, 0, 1, 2, 3, 4, 5, 16, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+}
+
+var alphaCodeLengthCodeLengths = [alphaCodeLengthCodeCount]uint8{
+	0:  4,
+	1:  4,
+	2:  4,
+	3:  4,
+	4:  4,
+	5:  4,
+	6:  4,
+	7:  4,
+	8:  4,
+	9:  4,
+	10: 4,
+	11: 4,
+	12: 4,
+	13: 4,
+	14: 5,
+	15: 5,
+	17: 5,
+	18: 5,
 }
 
 func alphaPredictor(filter byte, x int, y int, left uint8, above uint8, upperLeft uint8) uint8 {

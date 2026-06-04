@@ -740,6 +740,62 @@ func TestEncodeLossyWithAlphaRunsUsesBackwardReferences(t *testing.T) {
 	assertLossyVP8Frame(t, chunks[2].payload, 4096, 1)
 }
 
+func TestAlphaCodeLengthTokensUseZeroRunCodes(t *testing.T) {
+	var lengths [nLiteralCodes + nLengthCodes]uint8
+	lengths[0] = 1
+	lengths[100] = 2
+	lengths[260] = 3
+
+	tokens := alphaCodeLengthTokens(lengths)
+	if len(tokens) >= 261 {
+		t.Fatalf("code length token count = %d, want less than 261", len(tokens))
+	}
+	foundBigZeroRun := false
+	for _, token := range tokens {
+		if token.symbol == alphaCodeLengthRepeatZeroBig {
+			foundBigZeroRun = true
+			break
+		}
+	}
+	if !foundBigZeroRun {
+		t.Fatal("missing long zero-run code length token")
+	}
+
+	got := expandAlphaCodeLengthTokensForTest(tokens, 261)
+	for i, want := range lengths[:261] {
+		if got[i] != want {
+			t.Fatalf("expanded code length at %d = %d, want %d", i, got[i], want)
+		}
+	}
+}
+
+func expandAlphaCodeLengthTokensForTest(tokens []alphaCodeLengthToken, n int) []uint8 {
+	out := make([]uint8, 0, n)
+	for _, token := range tokens {
+		switch token.symbol {
+		case alphaCodeLengthRepeatZero:
+			run := int(token.extra) + 3
+			for i := 0; i < run; i++ {
+				out = append(out, 0)
+			}
+		case alphaCodeLengthRepeatZeroBig:
+			run := int(token.extra) + 11
+			for i := 0; i < run; i++ {
+				out = append(out, 0)
+			}
+		default:
+			out = append(out, token.symbol)
+		}
+	}
+	if len(out) > n {
+		return out[:n]
+	}
+	for len(out) < n {
+		out = append(out, 0)
+	}
+	return out
+}
+
 func assertLossyVP8Frame(t *testing.T, frame []byte, wantWidth int, wantHeight int) {
 	t.Helper()
 	if len(frame) < 10 {
