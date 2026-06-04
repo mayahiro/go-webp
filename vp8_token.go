@@ -401,11 +401,11 @@ func encodeVP8BlockSkipFirstWithProbs(enc *vp8BoolEncoder, probs *vp8TokenProbs,
 }
 
 func vp8BlockBitCost(plane int, context uint8, coeff [16]int) int64 {
-	return vp8BlockBitCostFromWithProbs(nil, plane, context, coeff, 0)
+	return vp8BlockBitCostFromDefault(plane, context, coeff, 0)
 }
 
 func vp8BlockBitCostFrom(plane int, context uint8, coeff [16]int, start int) int64 {
-	return vp8BlockBitCostFromWithProbs(nil, plane, context, coeff, start)
+	return vp8BlockBitCostFromDefault(plane, context, coeff, start)
 }
 
 func vp8BlockBitCostWithProbs(probs *vp8TokenProbs, plane int, context uint8, coeff [16]int) int64 {
@@ -442,6 +442,49 @@ func vp8BlockBitCostFromWithProbs(probs *vp8TokenProbs, plane int, context uint8
 		cost += vp8CoeffValueBitCost(prob, absCoeff)
 		cost += vp8BitCost(128, v < 0)
 		prob = vp8TokenProbFrom(probs, plane, int(vp8Bands[n]), coeffContext(absCoeff))
+		if n == 16 {
+			return cost
+		}
+		if n > last {
+			cost += vp8BitCost(prob[0], false)
+			return cost
+		}
+		cost += vp8BitCost(prob[0], true)
+	}
+
+	return cost
+}
+
+func vp8BlockBitCostFromDefault(plane int, context uint8, coeff [16]int, start int) int64 {
+	if context > 2 {
+		context = 2
+	}
+	n := start
+	prob := vp8DefaultTokenProbs[plane][vp8Bands[n]][context]
+	last := vp8LastNonZeroCoeff(coeff, n)
+	if last < n {
+		return vp8BitCost(prob[0], false)
+	}
+	cost := vp8BitCost(prob[0], true)
+
+	for n != 16 {
+		n++
+		z := int(vp8Zigzag[n-1])
+		v := coeff[z]
+		if v == 0 {
+			cost += vp8BitCost(prob[1], false)
+			prob = vp8DefaultTokenProbs[plane][vp8Bands[n]][0]
+			continue
+		}
+
+		cost += vp8BitCost(prob[1], true)
+		absCoeff := v
+		if absCoeff < 0 {
+			absCoeff = -absCoeff
+		}
+		cost += vp8CoeffValueBitCost(prob, absCoeff)
+		cost += vp8BitCost(128, v < 0)
+		prob = vp8DefaultTokenProbs[plane][vp8Bands[n]][coeffContext(absCoeff)]
 		if n == 16 {
 			return cost
 		}

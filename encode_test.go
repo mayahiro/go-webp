@@ -580,6 +580,32 @@ func TestVP8BlockBitCostAccountsForNonZeroCoefficients(t *testing.T) {
 	}
 }
 
+func TestVP8BlockBitCostDefaultMatchesExplicitDefaultProbs(t *testing.T) {
+	coeff := [16]int{
+		0:  2,
+		3:  -1,
+		9:  5,
+		14: -3,
+	}
+	probs := vp8DefaultTokenProbs
+	for _, tc := range []struct {
+		plane   int
+		context uint8
+		start   int
+	}{
+		{plane: vp8PlaneY1SansY2, context: 0, start: 0},
+		{plane: vp8PlaneY1WithY2, context: 1, start: 1},
+		{plane: vp8PlaneY2, context: 2, start: 0},
+		{plane: vp8PlaneUV, context: 3, start: 0},
+	} {
+		got := vp8BlockBitCostFrom(tc.plane, tc.context, coeff, tc.start)
+		want := vp8BlockBitCostFromWithProbs(&probs, tc.plane, tc.context, coeff, tc.start)
+		if got != want {
+			t.Fatalf("default cost plane=%d context=%d start=%d = %d, want %d", tc.plane, tc.context, tc.start, got, want)
+		}
+	}
+}
+
 func TestVP8LastNonZeroCoeffUsesZigzagOrder(t *testing.T) {
 	var coeff [16]int
 	if got := vp8LastNonZeroCoeff(coeff, 0); got != -1 {
