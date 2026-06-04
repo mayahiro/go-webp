@@ -92,7 +92,8 @@ room for future options.
   subsampling, selected intra16x16, luma4x4, and chroma prediction modes, and
   quantized DC and AC coefficients. It writes residual token probability
   updates when they are estimated to reduce the frame size and enables the
-  simple VP8 loop filter with a quality-scaled filter level.
+  normal VP8 loop filter with quality-scaled sharpness and a mode delta for
+  luma4x4 macroblocks.
 - Lossy `Quality` currently controls the VP8 base quantizer while the encoder
   uses a simple rate-distortion mode decision heuristic.
 - Lossy images with alpha are written as extended WebP files with an `ALPH`
@@ -108,8 +109,8 @@ room for future options.
   encoding.
 - Lossy alpha compression is intentionally simple and currently uses
   frequency-coded alpha residuals without LZ77 references.
-- Lossy normal loop filtering is not implemented yet, so detailed images can
-  still be blockier or larger than optimized VP8/WebP encoders.
+- Lossy loop filter settings are intentionally conservative and are not yet
+  tuned with image-specific perceptual metrics.
 
 ## Supported Environments
 

@@ -591,9 +591,12 @@ type vp8MBMode struct {
 }
 
 type vp8LoopFilter struct {
-	simple    bool
-	level     int
-	sharpness int
+	simple       bool
+	level        int
+	sharpness    int
+	deltaEnabled bool
+	refDeltas    [4]int
+	modeDeltas   [4]int
 }
 
 type vp8EncodeBuffers struct {
@@ -637,10 +640,16 @@ func vp8LoopFilterForIndex(qIndex int) vp8LoopFilter {
 	if level > 24 {
 		level = 24
 	}
+	sharpness := qIndex / 32
+	if sharpness > 3 {
+		sharpness = 3
+	}
 	return vp8LoopFilter{
-		simple:    true,
-		level:     level,
-		sharpness: 0,
+		simple:       false,
+		level:        level,
+		sharpness:    sharpness,
+		deltaEnabled: level > 0,
+		modeDeltas:   [4]int{2, 0, 0, 0},
 	}
 }
 
@@ -656,7 +665,7 @@ func vp8ResidualPartitionCapacity(width int, height int) int {
 }
 
 func vp8FirstPartition(mbw int, mbh int, qIndex int, filter vp8LoopFilter, modes []vp8MBMode, tokenProbs vp8TokenProbs) ([]byte, error) {
-	bitCount := 2 + 1 + 11 + 2 + 12 + 1 + 4*8*3*11*9 + 1 + mbw*mbh*(1+16*7+3)
+	bitCount := 2 + 1 + 11 + 2 + 12 + 1 + 8*8 + 4*8*3*11*9 + 1 + mbw*mbh*(1+16*7+3)
 	capacity := (bitCount+7)/8 + 4
 	if capacity > vp8FirstPartitionMax {
 		capacity = vp8FirstPartitionMax
@@ -668,7 +677,7 @@ func vp8FirstPartition(mbw int, mbh int, qIndex int, filter vp8LoopFilter, modes
 	enc.writeBit(128, filter.simple) // loop filter type
 	writeVP8Literal(enc, uint32(filter.level), 6)
 	writeVP8Literal(enc, uint32(filter.sharpness), 3)
-	enc.writeBit(128, false)                // no loop filter delta
+	writeVP8LoopFilterDeltas(enc, filter)
 	writeVP8Literal(enc, 0, 2)              // one token partition
 	writeVP8Literal(enc, uint32(qIndex), 7) // base quantizer index
 	for i := 0; i < 5; i++ {
@@ -702,6 +711,35 @@ func vp8FirstPartition(mbw int, mbh int, qIndex int, filter vp8LoopFilter, modes
 	firstPart := make([]byte, len(data))
 	copy(firstPart, data)
 	return firstPart, nil
+}
+
+func writeVP8LoopFilterDeltas(enc *vp8BoolEncoder, filter vp8LoopFilter) {
+	enc.writeBit(128, filter.deltaEnabled)
+	if !filter.deltaEnabled {
+		return
+	}
+	enc.writeBit(128, true)
+	for _, delta := range filter.refDeltas {
+		writeVP8LoopFilterDelta(enc, delta)
+	}
+	for _, delta := range filter.modeDeltas {
+		writeVP8LoopFilterDelta(enc, delta)
+	}
+}
+
+func writeVP8LoopFilterDelta(enc *vp8BoolEncoder, delta int) {
+	if delta == 0 {
+		enc.writeBit(128, false)
+		return
+	}
+	enc.writeBit(128, true)
+	if delta < 0 {
+		writeVP8Literal(enc, uint32(-delta), 6)
+		enc.writeBit(128, true)
+		return
+	}
+	writeVP8Literal(enc, uint32(delta), 6)
+	enc.writeBit(128, false)
 }
 
 func writeVP8TokenProbUpdates(enc *vp8BoolEncoder, tokenProbs vp8TokenProbs) {

@@ -170,7 +170,7 @@ func TestEncodeLossyQualityOption(t *testing.T) {
 	assertLossyVP8Frame(t, chunks[0].payload, 17, 19)
 }
 
-func TestEncodeLossyEnablesSimpleLoopFilter(t *testing.T) {
+func TestEncodeLossyEnablesNormalLoopFilterWithDelta(t *testing.T) {
 	const quality = 25
 
 	img := image.NewNRGBA(image.Rect(0, 0, 17, 19))
@@ -208,6 +208,15 @@ func TestEncodeLossyEnablesSimpleLoopFilter(t *testing.T) {
 	}
 	if got.level == 0 {
 		t.Fatal("loop filter level = 0, want enabled")
+	}
+	if got.simple {
+		t.Fatal("loop filter is simple, want normal")
+	}
+	if !got.deltaEnabled {
+		t.Fatal("loop filter delta is disabled")
+	}
+	if got.modeDeltas[0] <= 0 {
+		t.Fatalf("B_PRED mode delta = %d, want positive", got.modeDeltas[0])
 	}
 }
 
@@ -639,7 +648,7 @@ func readVP8LoopFilterHeader(t *testing.T, frame []byte) vp8LoopFilter {
 	simple := r.readBit(128)
 	level := r.readUint(128, 6)
 	sharpness := r.readUint(128, 3)
-	loopFilterDelta := r.readBit(128)
+	deltaEnabled, refDeltas, modeDeltas := readVP8LoopFilterDeltas(t, &r)
 	if r.unexpectedEOF {
 		t.Fatal("unexpected end of VP8 first partition")
 	}
@@ -652,14 +661,47 @@ func readVP8LoopFilterHeader(t *testing.T, frame []byte) vp8LoopFilter {
 	if segmentation {
 		t.Fatal("VP8 segmentation is enabled, want disabled")
 	}
-	if loopFilterDelta {
-		t.Fatal("VP8 loop filter delta is enabled, want disabled")
-	}
 	return vp8LoopFilter{
-		simple:    simple,
-		level:     int(level),
-		sharpness: int(sharpness),
+		simple:       simple,
+		level:        int(level),
+		sharpness:    int(sharpness),
+		deltaEnabled: deltaEnabled,
+		refDeltas:    refDeltas,
+		modeDeltas:   modeDeltas,
 	}
+}
+
+func readVP8LoopFilterDeltas(t *testing.T, r *testVP8PartitionReader) (bool, [4]int, [4]int) {
+	t.Helper()
+	var refDeltas [4]int
+	var modeDeltas [4]int
+	if !r.readBit(128) {
+		return false, refDeltas, modeDeltas
+	}
+	if !r.readBit(128) {
+		return true, refDeltas, modeDeltas
+	}
+	for i := range refDeltas {
+		refDeltas[i] = readVP8LoopFilterDelta(r)
+	}
+	for i := range modeDeltas {
+		modeDeltas[i] = readVP8LoopFilterDelta(r)
+	}
+	if r.unexpectedEOF {
+		t.Fatal("unexpected end while reading loop filter deltas")
+	}
+	return true, refDeltas, modeDeltas
+}
+
+func readVP8LoopFilterDelta(r *testVP8PartitionReader) int {
+	if !r.readBit(128) {
+		return 0
+	}
+	delta := int(r.readUint(128, 6))
+	if r.readBit(128) {
+		return -delta
+	}
+	return delta
 }
 
 func readVP8FirstPartition(t *testing.T, frame []byte) []byte {
@@ -715,7 +757,7 @@ func readVP8FirstPartitionHeaderBeforeTokenProbs(t *testing.T, r *testVP8Partiti
 	r.readBit(128)     // loop filter type
 	r.readUint(128, 6) // loop filter level
 	r.readUint(128, 3) // sharpness
-	r.readBit(128)     // loop filter delta
+	readVP8LoopFilterDeltas(t, r)
 	r.readUint(128, 2) // token partitions
 	r.readUint(128, 7) // base quantizer
 	for i := 0; i < 5; i++ {
