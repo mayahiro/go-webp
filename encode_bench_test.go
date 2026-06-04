@@ -6,6 +6,7 @@ import (
 	"image/color"
 	"math"
 	"testing"
+	"unsafe"
 )
 
 type benchmarkImageKind uint8
@@ -114,6 +115,7 @@ func benchmarkEncodeLossyCase(b *testing.B, tc lossyBenchmarkCase) {
 	inputBytes := img.Bounds().Dx() * img.Bounds().Dy() * 4
 	encoded := encodeBenchmarkWebP(b, img, opts)
 	yPSNR, uvPSNR := lossyYUVPSNRProxy(img, tc.quality)
+	workspace := estimateLossyWorkspace(tc)
 
 	b.SetBytes(int64(inputBytes))
 	b.ReportAllocs()
@@ -130,6 +132,10 @@ func benchmarkEncodeLossyCase(b *testing.B, tc lossyBenchmarkCase) {
 	b.ReportMetric(float64(len(encoded))/float64(inputBytes), "encoded_per_input")
 	b.ReportMetric(yPSNR, "y_psnr_proxy")
 	b.ReportMetric(uvPSNR, "uv_psnr_proxy")
+	b.ReportMetric(float64(workspace.recBytes), "rec_workspace_B")
+	b.ReportMetric(float64(workspace.modeBytes), "mode_workspace_B")
+	b.ReportMetric(float64(workspace.partitionBytes), "partition_workspace_B")
+	b.ReportMetric(float64(workspace.totalBytes), "workspace_est_B")
 }
 
 func encodeBenchmarkWebP(tb testing.TB, img image.Image, opts *Options) []byte {
@@ -172,6 +178,30 @@ func assertLossyBenchmarkWebP(t *testing.T, data []byte, tc lossyBenchmarkCase) 
 
 func (tc lossyBenchmarkCase) hasAlpha() bool {
 	return tc.kind == benchmarkImageAlpha || tc.kind == benchmarkImageAlphaBands
+}
+
+type lossyWorkspaceMetrics struct {
+	recBytes       int
+	modeBytes      int
+	partitionBytes int
+	totalBytes     int
+}
+
+func estimateLossyWorkspace(tc lossyBenchmarkCase) lossyWorkspaceMetrics {
+	mbw := (tc.width + 15) >> 4
+	mbh := (tc.height + 15) >> 4
+	yStride := mbw * 16
+	cStride := mbw * 8
+	qIndex := qualityToVP8QIndex(tc.quality)
+	recBytes := yStride*mbh*16 + cStride*mbh*8*2
+	modeBytes := mbw * mbh * int(unsafe.Sizeof(vp8MBMode{}))
+	partitionBytes := vp8FirstPartitionCapacity(mbw, mbh) + vp8ResidualPartitionCapacity(tc.width, tc.height, qIndex)
+	return lossyWorkspaceMetrics{
+		recBytes:       recBytes,
+		modeBytes:      modeBytes,
+		partitionBytes: partitionBytes,
+		totalBytes:     recBytes + modeBytes + partitionBytes,
+	}
 }
 
 func newBenchmarkImage(width int, height int, alpha bool) *image.NRGBA {

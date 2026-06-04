@@ -1269,13 +1269,17 @@ func vp8ResidualPartitionCapacity(width int, height int, qIndex int) int {
 	return capacity
 }
 
-func vp8FirstPartition(mbw int, mbh int, qIndex int, filter vp8LoopFilter, modes []vp8MBMode, tokenProbs vp8TokenProbs) ([]byte, error) {
+func vp8FirstPartitionCapacity(mbw int, mbh int) int {
 	bitCount := 2 + 1 + 11 + 2 + 12 + 1 + 8*8 + 4*8*3*11*9 + 1 + mbw*mbh*(1+16*7+3)
 	capacity := (bitCount+7)/8 + 4
 	if capacity > vp8FirstPartitionMax {
-		capacity = vp8FirstPartitionMax
+		return vp8FirstPartitionMax
 	}
-	enc := newVP8BoolEncoderWithCapacity(capacity)
+	return capacity
+}
+
+func vp8FirstPartition(mbw int, mbh int, qIndex int, filter vp8LoopFilter, modes []vp8MBMode, tokenProbs vp8TokenProbs) ([]byte, error) {
+	enc := newVP8BoolEncoderWithCapacity(vp8FirstPartitionCapacity(mbw, mbh))
 	writeVP8Literal(enc, 0, 1)       // color space
 	writeVP8Literal(enc, 0, 1)       // pixel clamp
 	enc.writeBit(128, false)         // no segmentation
