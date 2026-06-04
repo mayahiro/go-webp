@@ -2514,6 +2514,47 @@ func chromaSample(readPixel pixelReader, bounds image.Rectangle, x int, y int, c
 }
 
 func chromaSampleFiltered(readPixel pixelReader, bounds image.Rectangle, x int, y int, cb bool) uint8 {
+	if chromaSampleWindowInBounds(bounds, x, y) {
+		return chromaSampleFilteredInBounds(readPixel, bounds.Min.X+x, bounds.Min.Y+y, cb)
+	}
+	return chromaSampleFilteredClamped(readPixel, bounds, x, y, cb)
+}
+
+func chromaSampleWindowInBounds(bounds image.Rectangle, x int, y int) bool {
+	return x > 0 && y > 0 && x+2 < bounds.Dx() && y+2 < bounds.Dy()
+}
+
+func chromaSampleFilteredInBounds(readPixel pixelReader, x int, y int, cb bool) uint8 {
+	centerSum := 0
+	minValue := 256
+	maxValue := -1
+	for yy := 0; yy < 2; yy++ {
+		for xx := 0; xx < 2; xx++ {
+			value := chromaValue(readPixel, x+xx, y+yy, cb)
+			centerSum += value
+			if value < minValue {
+				minValue = value
+			}
+			if value > maxValue {
+				maxValue = value
+			}
+		}
+	}
+	if maxValue-minValue <= 16 {
+		return uint8((centerSum + 2) / 4)
+	}
+
+	filterSum := 0
+	for yy := 0; yy < 4; yy++ {
+		for xx := 0; xx < 4; xx++ {
+			value := chromaValue(readPixel, x+xx-1, y+yy-1, cb)
+			filterSum += chromaSampleFilterWeights[yy*4+xx] * value
+		}
+	}
+	return uint8((filterSum + 18) / 36)
+}
+
+func chromaSampleFilteredClamped(readPixel pixelReader, bounds image.Rectangle, x int, y int, cb bool) uint8 {
 	centerSum := 0
 	minValue := 256
 	maxValue := -1
@@ -2545,6 +2586,15 @@ func chromaSampleFiltered(readPixel pixelReader, bounds image.Rectangle, x int, 
 
 func chromaValueAt(readPixel pixelReader, bounds image.Rectangle, x int, y int, cb bool) int {
 	c := samplePixel(readPixel, bounds, x, y)
+	return chromaValueForPixel(c, cb)
+}
+
+func chromaValue(readPixel pixelReader, x int, y int, cb bool) int {
+	c := readPixel(x, y)
+	return chromaValueForPixel(c, cb)
+}
+
+func chromaValueForPixel(c color.NRGBA, cb bool) int {
 	u, v := rgbToChroma(c.R, c.G, c.B)
 	if cb {
 		return int(u)

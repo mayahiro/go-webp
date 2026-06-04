@@ -284,6 +284,40 @@ func TestChromaSampleFilteredClampsImageEdges(t *testing.T) {
 	}
 }
 
+func TestChromaSampleFilteredInBoundsMatchesClampedPath(t *testing.T) {
+	img := image.NewNRGBA(image.Rect(3, 5, 19, 23))
+	for y := img.Rect.Min.Y; y < img.Rect.Max.Y; y++ {
+		for x := img.Rect.Min.X; x < img.Rect.Max.X; x++ {
+			img.SetNRGBA(x, y, color.NRGBA{
+				R: uint8(x*17 + y*3),
+				G: uint8(y*19 + x*5),
+				B: uint8((x-y)*11 + x*y),
+				A: 255,
+			})
+		}
+	}
+	readPixel := pixelReaderFor(img)
+	bounds := img.Bounds()
+	for _, tc := range []struct {
+		x  int
+		y  int
+		cb bool
+	}{
+		{x: 1, y: 1, cb: true},
+		{x: 1, y: 1, cb: false},
+		{x: 6, y: 7, cb: true},
+		{x: 6, y: 7, cb: false},
+		{x: bounds.Dx() - 3, y: bounds.Dy() - 3, cb: true},
+		{x: bounds.Dx() - 3, y: bounds.Dy() - 3, cb: false},
+	} {
+		got := chromaSampleFiltered(readPixel, bounds, tc.x, tc.y, tc.cb)
+		want := chromaSampleFilteredClamped(readPixel, bounds, tc.x, tc.y, tc.cb)
+		if got != want {
+			t.Fatalf("sample at (%d,%d) cb=%v = %d, want %d", tc.x, tc.y, tc.cb, got, want)
+		}
+	}
+}
+
 func TestEncodeLossyEnablesNormalLoopFilterWithDelta(t *testing.T) {
 	const quality = 25
 
