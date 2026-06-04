@@ -594,6 +594,7 @@ func TestVP8BlockBitCostDefaultMatchesExplicitDefaultProbs(t *testing.T) {
 		3:  -1,
 		9:  5,
 		14: -3,
+		15: 1024,
 	}
 	probs := vp8DefaultTokenProbs
 	for _, tc := range []struct {

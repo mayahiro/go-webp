@@ -372,6 +372,28 @@ var vp8Y1SansY2TokenProb = [8][3][11]uint8{
 
 var vp8DefaultTokenProbs = makeVP8DefaultTokenProbs()
 
+const vp8CoeffValueCostCacheLimit = 256
+
+var vp8DefaultCoeffValueSignBitCosts [4][8][3][vp8CoeffValueCostCacheLimit]int32
+
+func init() {
+	initVP8DefaultCoeffValueSignBitCosts()
+}
+
+func initVP8DefaultCoeffValueSignBitCosts() {
+	signCost := vp8BitCost(128, false)
+	for plane := range vp8DefaultCoeffValueSignBitCosts {
+		for band := range vp8DefaultCoeffValueSignBitCosts[plane] {
+			for context := range vp8DefaultCoeffValueSignBitCosts[plane][band] {
+				prob := vp8StaticTokenProb(plane, band, uint8(context))
+				for v := range vp8DefaultCoeffValueSignBitCosts[plane][band][context] {
+					vp8DefaultCoeffValueSignBitCosts[plane][band][context][v] = int32(vp8CoeffValueBitCost(prob, v) + signCost)
+				}
+			}
+		}
+	}
+}
+
 func makeVP8DefaultTokenProbs() vp8TokenProbs {
 	var probs vp8TokenProbs
 	for plane := range probs {
@@ -460,7 +482,8 @@ func vp8BlockBitCostFromDefault(plane int, context uint8, coeff [16]int, start i
 		context = 2
 	}
 	n := start
-	prob := vp8DefaultTokenProbs[plane][vp8Bands[n]][context]
+	band := int(vp8Bands[n])
+	prob := vp8DefaultTokenProbs[plane][band][context]
 	last := vp8LastNonZeroCoeff(coeff, n)
 	if last < n {
 		return vp8BitCost(prob[0], false)
@@ -473,7 +496,9 @@ func vp8BlockBitCostFromDefault(plane int, context uint8, coeff [16]int, start i
 		v := coeff[z]
 		if v == 0 {
 			cost += vp8BitCost(prob[1], false)
-			prob = vp8DefaultTokenProbs[plane][vp8Bands[n]][0]
+			band = int(vp8Bands[n])
+			context = 0
+			prob = vp8DefaultTokenProbs[plane][band][context]
 			continue
 		}
 
@@ -482,12 +507,17 @@ func vp8BlockBitCostFromDefault(plane int, context uint8, coeff [16]int, start i
 		if absCoeff < 0 {
 			absCoeff = -absCoeff
 		}
-		cost += vp8CoeffValueBitCost(prob, absCoeff)
-		cost += vp8BitCost(128, v < 0)
-		prob = vp8DefaultTokenProbs[plane][vp8Bands[n]][coeffContext(absCoeff)]
+		if absCoeff < vp8CoeffValueCostCacheLimit {
+			cost += int64(vp8DefaultCoeffValueSignBitCosts[plane][band][context][absCoeff])
+		} else {
+			cost += vp8CoeffValueBitCost(prob, absCoeff) + vp8BitCost(128, false)
+		}
+		context = coeffContext(absCoeff)
 		if n == 16 {
 			return cost
 		}
+		band = int(vp8Bands[n])
+		prob = vp8DefaultTokenProbs[plane][band][context]
 		if n > last {
 			cost += vp8BitCost(prob[0], false)
 			return cost
