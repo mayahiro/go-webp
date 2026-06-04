@@ -2695,10 +2695,29 @@ func squareInt(v int) int64 {
 }
 
 func lumaResidualBlock(readPixel pixelReader, bounds image.Rectangle, x int, y int, pred [16]uint8) [16]int {
+	if lumaResidualBlockInBounds(bounds, x, y) {
+		return lumaResidualBlockFast(readPixel, bounds.Min.X+x, bounds.Min.Y+y, pred)
+	}
 	var residual [16]int
 	for yy := 0; yy < 4; yy++ {
 		for xx := 0; xx < 4; xx++ {
 			c := samplePixel(readPixel, bounds, x+xx, y+yy)
+			luma := rgbToLuma(c.R, c.G, c.B)
+			residual[yy*4+xx] = int(luma) - int(pred[yy*4+xx])
+		}
+	}
+	return residual
+}
+
+func lumaResidualBlockInBounds(bounds image.Rectangle, x int, y int) bool {
+	return x >= 0 && y >= 0 && x+4 <= bounds.Dx() && y+4 <= bounds.Dy()
+}
+
+func lumaResidualBlockFast(readPixel pixelReader, x int, y int, pred [16]uint8) [16]int {
+	var residual [16]int
+	for yy := 0; yy < 4; yy++ {
+		for xx := 0; xx < 4; xx++ {
+			c := readPixel(x+xx, y+yy)
 			luma := rgbToLuma(c.R, c.G, c.B)
 			residual[yy*4+xx] = int(luma) - int(pred[yy*4+xx])
 		}

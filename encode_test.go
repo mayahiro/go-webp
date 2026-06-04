@@ -427,6 +427,48 @@ func TestLumaTargetMBMatchesSampledLuma(t *testing.T) {
 	}
 }
 
+func TestLumaResidualBlockMatchesSampledLuma(t *testing.T) {
+	img := image.NewNRGBA(image.Rect(3, 5, 70, 74))
+	for y := img.Rect.Min.Y; y < img.Rect.Max.Y; y++ {
+		for x := img.Rect.Min.X; x < img.Rect.Max.X; x++ {
+			img.SetNRGBA(x, y, color.NRGBA{
+				R: uint8(x*9 + y*5),
+				G: uint8(y*13 + x*3),
+				B: uint8((x-y)*17 + x*y),
+				A: 255,
+			})
+		}
+	}
+
+	var pred [16]uint8
+	for i := range pred {
+		pred[i] = uint8(20 + i*7)
+	}
+
+	readPixel := pixelReaderFor(img)
+	bounds := img.Bounds()
+	for _, pos := range []struct {
+		x int
+		y int
+	}{
+		{x: 4, y: 8},
+		{x: 64, y: 66},
+	} {
+		got := lumaResidualBlock(readPixel, bounds, pos.x, pos.y, pred)
+		var want [16]int
+		for yy := 0; yy < 4; yy++ {
+			for xx := 0; xx < 4; xx++ {
+				c := samplePixel(readPixel, bounds, pos.x+xx, pos.y+yy)
+				luma := rgbToLuma(c.R, c.G, c.B)
+				want[yy*4+xx] = int(luma) - int(pred[yy*4+xx])
+			}
+		}
+		if got != want {
+			t.Fatalf("residual at (%d,%d) = %v, want %v", pos.x, pos.y, got, want)
+		}
+	}
+}
+
 func TestEncodeLossyEnablesNormalLoopFilterWithDelta(t *testing.T) {
 	const quality = 25
 
