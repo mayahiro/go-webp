@@ -80,7 +80,7 @@ func (enc *Encoder) Encode(w io.Writer, m image.Image) error
 - lossless encodingでは入力画像を2回走査し、変換済み画像全体は保持しません
 - 単一値のチャンネルはsingle-symbol Huffman treeでエンコードします
 - 現在はVP8L transforms、color cache、LZ77 backwards referencesを使わないため、高度に最適化されたWebP encoderより出力が大きくなることがあります
-- lossy encodingは4:2:0 chroma subsampling、選択されたintra16x16/luma4x4/chroma prediction mode、量子化されたDC/AC係数を使う低複雑度VP8 key frame encoderです。出力サイズ削減が見込める場合はresidual token probability updateを書き込み、qualityに応じたsharpnessとluma4x4 macroblock向けmode deltaを持つnormal VP8 loop filterを有効化します
+- lossy encodingは4:2:0 chroma subsampling、adaptive chroma downsampling、選択されたintra16x16/luma4x4/chroma prediction mode、量子化されたDC/AC係数を使う低複雑度VP8 key frame encoderです。出力サイズ削減が見込める場合はresidual token probability updateを書き込み、qualityに応じたsharpnessとluma4x4 macroblock向けmode deltaを持つnormal VP8 loop filterを有効化します
 - lossy `Quality` は現時点では非線形mappingでVP8 base quantizerを制御し、quality依存のY2/UV quantizationとloop filter設定を使います。mode decisionは単純なrate-distortion heuristicです
 - alpha付きのlossy画像はextended WebPとして書き出し、`ALPH` チャンクで透明度を保持します。圧縮したほうが小さい場合はcompressed alphaを使い、それ以外はraw alphaに戻します
 

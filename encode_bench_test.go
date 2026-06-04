@@ -17,6 +17,7 @@ const (
 	benchmarkImageLineArt
 	benchmarkImageFlat
 	benchmarkImageAlpha
+	benchmarkImageColorEdge
 )
 
 type lossyBenchmarkCase struct {
@@ -81,6 +82,7 @@ func lossyBenchmarkCases() []lossyBenchmarkCase {
 		{name: "LineArt256Q75", kind: benchmarkImageLineArt, width: 256, height: 256, quality: 75},
 		{name: "Flat128Q75", kind: benchmarkImageFlat, width: 128, height: 128, quality: 75},
 		{name: "Alpha128Q75", kind: benchmarkImageAlpha, width: 128, height: 128, quality: 75},
+		{name: "ColorEdge128Q75", kind: benchmarkImageColorEdge, width: 128, height: 128, quality: 75},
 	}
 }
 
@@ -202,6 +204,11 @@ func benchmarkPixel(kind benchmarkImageKind, x int, y int) color.NRGBA {
 			B: uint8((x+y)*2 + x*y/17),
 			A: uint8(96 + (x*5+y*7)%160),
 		}
+	case benchmarkImageColorEdge:
+		if (x/16+y/16)%2 == 0 {
+			return color.NRGBA{R: 220, G: 36, B: 28, A: 255}
+		}
+		return color.NRGBA{R: 32, G: 56, B: 224, A: 255}
 	default:
 		return color.NRGBA{
 			R: uint8(x*3 + y),

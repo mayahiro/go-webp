@@ -224,6 +224,46 @@ func TestVP8LoopFilterTracksQualityMapping(t *testing.T) {
 	}
 }
 
+func TestChromaSampleFilteredUsesNeighboringPixels(t *testing.T) {
+	img := image.NewNRGBA(image.Rect(0, 0, 4, 4))
+	red := color.NRGBA{R: 255, G: 0, B: 0, A: 255}
+	blue := color.NRGBA{R: 0, G: 0, B: 255, A: 255}
+	for y := 0; y < 4; y++ {
+		for x := 0; x < 4; x++ {
+			img.SetNRGBA(x, y, blue)
+		}
+	}
+	img.SetNRGBA(1, 1, red)
+	img.SetNRGBA(2, 1, red)
+
+	readPixel := pixelReaderFor(img)
+	redCb, redCr := rgbToChroma(red.R, red.G, red.B)
+	blueCb, blueCr := rgbToChroma(blue.R, blue.G, blue.B)
+	simpleCb := uint8((int(redCb)*2 + int(blueCb)*2 + 2) / 4)
+	simpleCr := uint8((int(redCr)*2 + int(blueCr)*2 + 2) / 4)
+	gotCb := chromaSample(readPixel, img.Bounds(), 1, 1, true)
+	gotCr := chromaSample(readPixel, img.Bounds(), 1, 1, false)
+	if gotCb <= simpleCb || gotCb >= blueCb {
+		t.Fatalf("filtered Cb = %d, want between simple %d and blue %d", gotCb, simpleCb, blueCb)
+	}
+	if gotCr >= simpleCr || gotCr <= blueCr {
+		t.Fatalf("filtered Cr = %d, want between blue %d and simple %d", gotCr, blueCr, simpleCr)
+	}
+}
+
+func TestChromaSampleFilteredClampsImageEdges(t *testing.T) {
+	img := image.NewNRGBA(image.Rect(0, 0, 1, 1))
+	img.SetNRGBA(0, 0, color.NRGBA{R: 20, G: 180, B: 80, A: 255})
+	readPixel := pixelReaderFor(img)
+	wantCb, wantCr := rgbToChroma(20, 180, 80)
+	if got := chromaSample(readPixel, img.Bounds(), 0, 0, true); got != wantCb {
+		t.Fatalf("edge Cb = %d, want %d", got, wantCb)
+	}
+	if got := chromaSample(readPixel, img.Bounds(), 0, 0, false); got != wantCr {
+		t.Fatalf("edge Cr = %d, want %d", got, wantCr)
+	}
+}
+
 func TestEncodeLossyEnablesNormalLoopFilterWithDelta(t *testing.T) {
 	const quality = 25
 

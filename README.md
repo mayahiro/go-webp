@@ -89,11 +89,11 @@ room for future options.
   backwards references, so output can be larger than highly optimized WebP
   encoders.
 - Lossy encoding uses a low-complexity VP8 key frame encoder with 4:2:0 chroma
-  subsampling, selected intra16x16, luma4x4, and chroma prediction modes, and
-  quantized DC and AC coefficients. It writes residual token probability
-  updates when they are estimated to reduce the frame size and enables the
-  normal VP8 loop filter with quality-scaled sharpness and a mode delta for
-  luma4x4 macroblocks.
+  subsampling, adaptive chroma downsampling, selected intra16x16, luma4x4, and
+  chroma prediction modes, and quantized DC and AC coefficients. It writes
+  residual token probability updates when they are estimated to reduce the
+  frame size and enables the normal VP8 loop filter with quality-scaled
+  sharpness and a mode delta for luma4x4 macroblocks.
 - Lossy `Quality` currently uses a non-linear mapping to the VP8 base quantizer
   and quality-dependent Y2/UV quantization and loop filter settings. The
   encoder uses a simple rate-distortion mode decision heuristic.
