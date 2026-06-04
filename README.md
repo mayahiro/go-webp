@@ -90,8 +90,9 @@ room for future options.
   encoders.
 - Lossy encoding uses a low-complexity VP8 key frame encoder with 4:2:0 chroma
   subsampling, selected intra16x16, luma4x4, and chroma prediction modes, and
-  quantized DC and AC coefficients. It enables the simple VP8 loop filter with
-  a quality-scaled filter level.
+  quantized DC and AC coefficients. It writes residual token probability
+  updates when they are estimated to reduce the frame size and enables the
+  simple VP8 loop filter with a quality-scaled filter level.
 - Lossy `Quality` currently controls the VP8 base quantizer while the encoder
   uses a simple rate-distortion mode decision heuristic.
 - Lossy images with alpha are written as extended WebP files with an `ALPH`

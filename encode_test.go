@@ -325,7 +325,7 @@ func TestVP8FirstPartitionWritesSelectedY4Modes(t *testing.T) {
 	firstPart, err := vp8FirstPartition(1, 1, qualityToVP8QIndex(75), vp8LoopFilterForIndex(qualityToVP8QIndex(75)), []vp8MBMode{{
 		y4Modes: want,
 		cMode:   vp8PredDC,
-	}})
+	}}, vp8DefaultTokenProbs)
 	if err != nil {
 		t.Fatalf("vp8FirstPartition failed: %v", err)
 	}
@@ -353,6 +353,21 @@ func TestVP8BlockBitCostAccountsForNonZeroCoefficients(t *testing.T) {
 	}
 }
 
+func TestVP8RecordBlockTokensCollectsBranches(t *testing.T) {
+	var coeff [16]int
+	coeff[0] = 1
+	var stats vp8TokenStats
+	if nz := vp8RecordBlockTokens(&stats, vp8PlaneY1SansY2, 0, coeff); nz != 1 {
+		t.Fatalf("non-zero flag = %d, want 1", nz)
+	}
+	if stats[vp8PlaneY1SansY2][0][0][0].one == 0 {
+		t.Fatal("EOB branch count was not recorded")
+	}
+	if stats[vp8PlaneY1SansY2][0][0][1].one == 0 {
+		t.Fatal("non-zero coefficient branch count was not recorded")
+	}
+}
+
 func TestVP8RDLambdaIncreasesWithQuantizer(t *testing.T) {
 	highQuality := newVP8RDConfig(vp8QuantForIndex(qualityToVP8QIndex(90)))
 	lowQuality := newVP8RDConfig(vp8QuantForIndex(qualityToVP8QIndex(10)))
@@ -361,6 +376,57 @@ func TestVP8RDLambdaIncreasesWithQuantizer(t *testing.T) {
 	}
 	if lowQuality.uvLambda <= highQuality.uvLambda {
 		t.Fatalf("low quality chroma lambda = %d, want greater than high quality lambda %d", lowQuality.uvLambda, highQuality.uvLambda)
+	}
+}
+
+func TestVP8TokenProbabilitySelectionKeepsSmallSamples(t *testing.T) {
+	var stats vp8TokenStats
+	stats[vp8PlaneY1SansY2][1][0][0] = vp8TokenBranchCounts{zero: 1, one: 1}
+	probs := chooseVP8TokenProbs(&stats)
+	if probs[vp8PlaneY1SansY2][1][0][0] != vp8DefaultTokenProbs[vp8PlaneY1SansY2][1][0][0] {
+		t.Fatal("small token sample changed probability")
+	}
+}
+
+func TestVP8TokenProbabilitySelectionUpdatesWhenWorthwhile(t *testing.T) {
+	var stats vp8TokenStats
+	current := vp8DefaultTokenProbs[vp8PlaneY1SansY2][1][0][0]
+	if current < 128 {
+		stats[vp8PlaneY1SansY2][1][0][0] = vp8TokenBranchCounts{zero: 1000, one: 1}
+	} else {
+		stats[vp8PlaneY1SansY2][1][0][0] = vp8TokenBranchCounts{zero: 1, one: 1000}
+	}
+	probs := chooseVP8TokenProbs(&stats)
+	got := probs[vp8PlaneY1SansY2][1][0][0]
+	if got == vp8DefaultTokenProbs[vp8PlaneY1SansY2][1][0][0] {
+		t.Fatal("token probability was not updated")
+	}
+	if got != estimateVP8TokenProb(stats[vp8PlaneY1SansY2][1][0][0]) {
+		t.Fatalf("token probability = %d, want estimated probability", got)
+	}
+}
+
+func TestVP8FirstPartitionWritesTokenProbUpdate(t *testing.T) {
+	probs := vp8DefaultTokenProbs
+	probs[vp8PlaneY1SansY2][1][0][0] = 17
+	firstPart, err := vp8FirstPartition(1, 1, qualityToVP8QIndex(75), vp8LoopFilterForIndex(qualityToVP8QIndex(75)), []vp8MBMode{{
+		useY16: true,
+		yMode:  vp8PredDC,
+		cMode:  vp8PredDC,
+	}}, probs)
+	if err != nil {
+		t.Fatalf("vp8FirstPartition failed: %v", err)
+	}
+
+	var r testVP8PartitionReader
+	r.init(firstPart)
+	readVP8FirstPartitionHeaderBeforeTokenProbs(t, &r)
+	got := readVP8FirstPartitionTokenProbs(t, &r)
+	if got[vp8PlaneY1SansY2][1][0][0] != 17 {
+		t.Fatalf("token probability = %d, want 17", got[vp8PlaneY1SansY2][1][0][0])
+	}
+	if got[vp8PlaneY1SansY2][1][0][1] != vp8DefaultTokenProbs[vp8PlaneY1SansY2][1][0][1] {
+		t.Fatal("unchanged token probability did not keep the default value")
 	}
 }
 
@@ -614,28 +680,8 @@ func readVP8FirstPartitionY4Modes(t *testing.T, firstPart []byte) [16]uint8 {
 	var r testVP8PartitionReader
 	r.init(firstPart)
 
-	r.readUint(128, 1) // color space
-	r.readUint(128, 1) // pixel clamp
-	r.readBit(128)     // segmentation
-	r.readBit(128)     // loop filter type
-	r.readUint(128, 6) // loop filter level
-	r.readUint(128, 3) // sharpness
-	r.readBit(128)     // loop filter delta
-	r.readUint(128, 2) // token partitions
-	r.readUint(128, 7) // base quantizer
-	for i := 0; i < 5; i++ {
-		r.readBit(128)
-	}
-	r.readBit(128) // refresh last frame buffer
-	for plane := range vp8TokenProbUpdateProb {
-		for band := range vp8TokenProbUpdateProb[plane] {
-			for context := range vp8TokenProbUpdateProb[plane][band] {
-				for _, prob := range vp8TokenProbUpdateProb[plane][band][context] {
-					r.readBit(prob)
-				}
-			}
-		}
-	}
+	readVP8FirstPartitionHeaderBeforeTokenProbs(t, &r)
+	readVP8FirstPartitionTokenProbs(t, &r)
 	r.readBit(128) // macroblock skip probability
 	if r.unexpectedEOF {
 		t.Fatal("unexpected end before Y4 modes")
@@ -659,6 +705,46 @@ func readVP8FirstPartitionY4Modes(t *testing.T, firstPart []byte) [16]uint8 {
 		t.Fatal("unexpected end while reading Y4 modes")
 	}
 	return modes
+}
+
+func readVP8FirstPartitionHeaderBeforeTokenProbs(t *testing.T, r *testVP8PartitionReader) {
+	t.Helper()
+	r.readUint(128, 1) // color space
+	r.readUint(128, 1) // pixel clamp
+	r.readBit(128)     // segmentation
+	r.readBit(128)     // loop filter type
+	r.readUint(128, 6) // loop filter level
+	r.readUint(128, 3) // sharpness
+	r.readBit(128)     // loop filter delta
+	r.readUint(128, 2) // token partitions
+	r.readUint(128, 7) // base quantizer
+	for i := 0; i < 5; i++ {
+		r.readBit(128)
+	}
+	r.readBit(128) // refresh last frame buffer
+	if r.unexpectedEOF {
+		t.Fatal("unexpected end before token probability updates")
+	}
+}
+
+func readVP8FirstPartitionTokenProbs(t *testing.T, r *testVP8PartitionReader) vp8TokenProbs {
+	t.Helper()
+	probs := vp8DefaultTokenProbs
+	for plane := range vp8TokenProbUpdateProb {
+		for band := range vp8TokenProbUpdateProb[plane] {
+			for context := range vp8TokenProbUpdateProb[plane][band] {
+				for node, updateProb := range vp8TokenProbUpdateProb[plane][band][context] {
+					if r.readBit(updateProb) {
+						probs[plane][band][context][node] = uint8(r.readUint(128, 8))
+					}
+				}
+			}
+		}
+	}
+	if r.unexpectedEOF {
+		t.Fatal("unexpected end while reading token probability updates")
+	}
+	return probs
 }
 
 func readVP8Y4Mode(r *testVP8PartitionReader, prob [9]uint8) uint8 {

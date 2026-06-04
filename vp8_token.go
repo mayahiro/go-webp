@@ -18,6 +18,15 @@ var vp8Bands = [17]uint8{0, 1, 2, 3, 6, 4, 5, 6, 6, 6, 6, 6, 6, 6, 6, 7, 0}
 
 var vp8Zigzag = [16]uint8{0, 1, 4, 8, 5, 2, 3, 6, 9, 12, 13, 10, 7, 11, 14, 15}
 
+type vp8TokenProbs [4][8][3][11]uint8
+
+type vp8TokenBranchCounts struct {
+	zero uint32
+	one  uint32
+}
+
+type vp8TokenStats [4][8][3][11]vp8TokenBranchCounts
+
 var vp8TokenProbUpdateProb = [4][8][3][11]uint8{
 	{
 		{
@@ -361,24 +370,54 @@ var vp8Y1SansY2TokenProb = [8][3][11]uint8{
 	},
 }
 
+var vp8DefaultTokenProbs = makeVP8DefaultTokenProbs()
+
+func makeVP8DefaultTokenProbs() vp8TokenProbs {
+	var probs vp8TokenProbs
+	for plane := range probs {
+		for band := range probs[plane] {
+			for context := range probs[plane][band] {
+				probs[plane][band][context] = vp8StaticTokenProb(plane, band, uint8(context))
+			}
+		}
+	}
+	return probs
+}
+
 func encodeVP8Block(enc *vp8BoolEncoder, plane int, context uint8, coeff [16]int) uint8 {
-	return encodeVP8BlockFrom(enc, plane, context, coeff, 0)
+	return encodeVP8BlockFromWithProbs(enc, nil, plane, context, coeff, 0)
+}
+
+func encodeVP8BlockWithProbs(enc *vp8BoolEncoder, probs *vp8TokenProbs, plane int, context uint8, coeff [16]int) uint8 {
+	return encodeVP8BlockFromWithProbs(enc, probs, plane, context, coeff, 0)
 }
 
 func encodeVP8BlockSkipFirst(enc *vp8BoolEncoder, plane int, context uint8, coeff [16]int) uint8 {
-	return encodeVP8BlockFrom(enc, plane, context, coeff, 1)
+	return encodeVP8BlockFromWithProbs(enc, nil, plane, context, coeff, 1)
+}
+
+func encodeVP8BlockSkipFirstWithProbs(enc *vp8BoolEncoder, probs *vp8TokenProbs, plane int, context uint8, coeff [16]int) uint8 {
+	return encodeVP8BlockFromWithProbs(enc, probs, plane, context, coeff, 1)
 }
 
 func vp8BlockBitCost(plane int, context uint8, coeff [16]int) int64 {
-	return vp8BlockBitCostFrom(plane, context, coeff, 0)
+	return vp8BlockBitCostFromWithProbs(nil, plane, context, coeff, 0)
 }
 
 func vp8BlockBitCostFrom(plane int, context uint8, coeff [16]int, start int) int64 {
+	return vp8BlockBitCostFromWithProbs(nil, plane, context, coeff, start)
+}
+
+func vp8BlockBitCostWithProbs(probs *vp8TokenProbs, plane int, context uint8, coeff [16]int) int64 {
+	return vp8BlockBitCostFromWithProbs(probs, plane, context, coeff, 0)
+}
+
+func vp8BlockBitCostFromWithProbs(probs *vp8TokenProbs, plane int, context uint8, coeff [16]int, start int) int64 {
 	if context > 2 {
 		context = 2
 	}
 	n := start
-	prob := vp8TokenProb(plane, int(vp8Bands[n]), context)
+	prob := vp8TokenProbFrom(probs, plane, int(vp8Bands[n]), context)
 	if !vp8HasNonZeroCoeff(coeff, n) {
 		return vp8BitCost(prob[0], false)
 	}
@@ -390,7 +429,7 @@ func vp8BlockBitCostFrom(plane int, context uint8, coeff [16]int, start int) int
 		v := coeff[z]
 		if v == 0 {
 			cost += vp8BitCost(prob[1], false)
-			prob = vp8TokenProb(plane, int(vp8Bands[n]), 0)
+			prob = vp8TokenProbFrom(probs, plane, int(vp8Bands[n]), 0)
 			continue
 		}
 
@@ -401,7 +440,7 @@ func vp8BlockBitCostFrom(plane int, context uint8, coeff [16]int, start int) int
 		}
 		cost += vp8CoeffValueBitCost(prob, absCoeff)
 		cost += vp8BitCost(128, v < 0)
-		prob = vp8TokenProb(plane, int(vp8Bands[n]), coeffContext(absCoeff))
+		prob = vp8TokenProbFrom(probs, plane, int(vp8Bands[n]), coeffContext(absCoeff))
 		if n == 16 {
 			return cost
 		}
@@ -416,11 +455,15 @@ func vp8BlockBitCostFrom(plane int, context uint8, coeff [16]int, start int) int
 }
 
 func encodeVP8BlockFrom(enc *vp8BoolEncoder, plane int, context uint8, coeff [16]int, start int) uint8 {
+	return encodeVP8BlockFromWithProbs(enc, nil, plane, context, coeff, start)
+}
+
+func encodeVP8BlockFromWithProbs(enc *vp8BoolEncoder, probs *vp8TokenProbs, plane int, context uint8, coeff [16]int, start int) uint8 {
 	if context > 2 {
 		context = 2
 	}
 	n := start
-	prob := vp8TokenProb(plane, int(vp8Bands[n]), context)
+	prob := vp8TokenProbFrom(probs, plane, int(vp8Bands[n]), context)
 	if !vp8HasNonZeroCoeff(coeff, n) {
 		enc.writeBit(prob[0], false)
 		return 0
@@ -433,7 +476,7 @@ func encodeVP8BlockFrom(enc *vp8BoolEncoder, plane int, context uint8, coeff [16
 		v := coeff[z]
 		if v == 0 {
 			enc.writeBit(prob[1], false)
-			prob = vp8TokenProb(plane, int(vp8Bands[n]), 0)
+			prob = vp8TokenProbFrom(probs, plane, int(vp8Bands[n]), 0)
 			continue
 		}
 
@@ -444,7 +487,7 @@ func encodeVP8BlockFrom(enc *vp8BoolEncoder, plane int, context uint8, coeff [16
 		}
 		encodeVP8CoeffValue(enc, prob, absCoeff)
 		enc.writeBit(128, v < 0)
-		prob = vp8TokenProb(plane, int(vp8Bands[n]), coeffContext(absCoeff))
+		prob = vp8TokenProbFrom(probs, plane, int(vp8Bands[n]), coeffContext(absCoeff))
 		if n == 16 {
 			return 1
 		}
@@ -465,6 +508,104 @@ func vp8HasNonZeroCoeff(coeff [16]int, after int) bool {
 		}
 	}
 	return false
+}
+
+func vp8RecordBlockTokens(stats *vp8TokenStats, plane int, context uint8, coeff [16]int) uint8 {
+	return vp8RecordBlockTokensFrom(stats, plane, context, coeff, 0)
+}
+
+func vp8RecordBlockTokensFrom(stats *vp8TokenStats, plane int, context uint8, coeff [16]int, start int) uint8 {
+	if context > 2 {
+		context = 2
+	}
+	n := start
+	band := int(vp8Bands[n])
+	hasNZ := vp8HasNonZeroCoeff(coeff, n)
+	stats.record(plane, band, context, 0, hasNZ)
+	if !hasNZ {
+		return 0
+	}
+
+	for n != 16 {
+		n++
+		z := int(vp8Zigzag[n-1])
+		v := coeff[z]
+		if v == 0 {
+			stats.record(plane, band, context, 1, false)
+			band = int(vp8Bands[n])
+			context = 0
+			continue
+		}
+
+		stats.record(plane, band, context, 1, true)
+		absCoeff := v
+		if absCoeff < 0 {
+			absCoeff = -absCoeff
+		}
+		recordVP8CoeffValue(stats, plane, band, context, absCoeff)
+		context = coeffContext(absCoeff)
+		if n == 16 {
+			return 1
+		}
+
+		band = int(vp8Bands[n])
+		hasNZ = vp8HasNonZeroCoeff(coeff, n)
+		stats.record(plane, band, context, 0, hasNZ)
+		if !hasNZ {
+			return 1
+		}
+	}
+
+	return 1
+}
+
+func recordVP8CoeffValue(stats *vp8TokenStats, plane int, band int, context uint8, v int) {
+	if v <= 1 {
+		stats.record(plane, band, context, 2, false)
+		return
+	}
+
+	stats.record(plane, band, context, 2, true)
+	if v == 2 {
+		stats.record(plane, band, context, 3, false)
+		stats.record(plane, band, context, 4, false)
+		return
+	}
+	if v <= 4 {
+		stats.record(plane, band, context, 3, false)
+		stats.record(plane, band, context, 4, true)
+		stats.record(plane, band, context, 5, v == 4)
+		return
+	}
+
+	stats.record(plane, band, context, 3, true)
+	if v <= 6 {
+		stats.record(plane, band, context, 6, false)
+		stats.record(plane, band, context, 7, false)
+		return
+	}
+	if v <= 10 {
+		stats.record(plane, band, context, 6, false)
+		stats.record(plane, band, context, 7, true)
+		return
+	}
+
+	stats.record(plane, band, context, 6, true)
+	cat, _ := vp8CoeffCategory(v)
+	stats.record(plane, band, context, 8, cat&2 != 0)
+	stats.record(plane, band, context, 9+cat/2, cat&1 != 0)
+}
+
+func (stats *vp8TokenStats) record(plane int, band int, context uint8, node int, bit bool) {
+	if plane < 0 || plane >= len(stats) || band < 0 || band >= len(stats[plane]) || context > 2 || node < 0 || node >= len(stats[plane][band][context]) {
+		return
+	}
+	counts := &stats[plane][band][context][node]
+	if bit {
+		counts.one++
+		return
+	}
+	counts.zero++
 }
 
 func encodeVP8CoeffValue(enc *vp8BoolEncoder, prob [11]uint8, v int) {
@@ -576,6 +717,10 @@ func coeffContext(v int) uint8 {
 }
 
 func vp8TokenProb(plane int, band int, context uint8) [11]uint8 {
+	return vp8TokenProbFrom(nil, plane, band, context)
+}
+
+func vp8TokenProbFrom(probs *vp8TokenProbs, plane int, band int, context uint8) [11]uint8 {
 	if context > 2 {
 		context = 2
 	}
@@ -585,6 +730,13 @@ func vp8TokenProb(plane int, band int, context uint8) [11]uint8 {
 	if band >= len(vp8UVTokenProb) {
 		band = len(vp8UVTokenProb) - 1
 	}
+	if probs != nil {
+		return probs[plane][band][context]
+	}
+	return vp8DefaultTokenProbs[plane][band][context]
+}
+
+func vp8StaticTokenProb(plane int, band int, context uint8) [11]uint8 {
 	switch plane {
 	case vp8PlaneY1WithY2:
 		return vp8Y1WithY2TokenProb[band][context]
@@ -595,4 +747,54 @@ func vp8TokenProb(plane int, band int, context uint8) [11]uint8 {
 	default:
 		return vp8Y1SansY2TokenProb[band][context]
 	}
+}
+
+func chooseVP8TokenProbs(stats *vp8TokenStats) vp8TokenProbs {
+	probs := vp8DefaultTokenProbs
+	for plane := range probs {
+		for band := range probs[plane] {
+			for context := range probs[plane][band] {
+				for node := range probs[plane][band][context] {
+					counts := stats[plane][band][context][node]
+					total := counts.zero + counts.one
+					if total == 0 {
+						continue
+					}
+					current := probs[plane][band][context][node]
+					next := estimateVP8TokenProb(counts)
+					if next == current {
+						continue
+					}
+					updateProb := vp8TokenProbUpdateProb[plane][band][context][node]
+					keepCost := vp8BitCost(updateProb, false) + vp8BranchCountsCost(counts, current)
+					updateCost := vp8BitCost(updateProb, true) + vp8TokenProbLiteralCost(next) + vp8BranchCountsCost(counts, next)
+					if updateCost < keepCost {
+						probs[plane][band][context][node] = next
+					}
+				}
+			}
+		}
+	}
+	return probs
+}
+
+func estimateVP8TokenProb(counts vp8TokenBranchCounts) uint8 {
+	total := uint64(counts.zero) + uint64(counts.one)
+	if total == 0 {
+		return 128
+	}
+	prob := int((uint64(counts.zero)*256 + total/2) / total)
+	return uint8(clipInt(prob, 1, 255))
+}
+
+func vp8BranchCountsCost(counts vp8TokenBranchCounts, prob uint8) int64 {
+	return int64(counts.zero)*vp8BitCost(prob, false) + int64(counts.one)*vp8BitCost(prob, true)
+}
+
+func vp8TokenProbLiteralCost(prob uint8) int64 {
+	var cost int64
+	for i := 7; i >= 0; i-- {
+		cost += vp8BitCost(128, prob&(1<<i) != 0)
+	}
+	return cost
 }
