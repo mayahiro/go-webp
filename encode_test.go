@@ -769,6 +769,40 @@ func TestAlphaCodeLengthTokensUseZeroRunCodes(t *testing.T) {
 	}
 }
 
+func TestHuffmanCodeLengthsFallBackWhenTreeWouldExceedVP8LLimit(t *testing.T) {
+	var counts [nLiteralCodes + nLengthCodes]uint32
+	counts[0], counts[1] = 1, 1
+	for i := 2; i < 46; i++ {
+		counts[i] = counts[i-1] + counts[i-2]
+	}
+
+	lengths, ok := huffmanCodeLengths(counts)
+	if !ok {
+		t.Fatal("huffmanCodeLengths returned false")
+	}
+	for symbol, length := range lengths {
+		if length > 15 {
+			t.Fatalf("code length for symbol %d = %d, want at most 15", symbol, length)
+		}
+	}
+	if got := huffmanKraftSumForTest(lengths); got != 1<<15 {
+		t.Fatalf("Kraft sum = %d, want %d", got, 1<<15)
+	}
+	if lengths[45] > lengths[0] {
+		t.Fatalf("frequent symbol length = %d, rare symbol length = %d", lengths[45], lengths[0])
+	}
+}
+
+func huffmanKraftSumForTest(lengths [nLiteralCodes + nLengthCodes]uint8) int {
+	sum := 0
+	for _, length := range lengths {
+		if length != 0 {
+			sum += 1 << (15 - length)
+		}
+	}
+	return sum
+}
+
 func expandAlphaCodeLengthTokensForTest(tokens []alphaCodeLengthToken, n int) []uint8 {
 	out := make([]uint8, 0, n)
 	for _, token := range tokens {

@@ -8,6 +8,7 @@ import (
 	"image/color"
 	"io"
 	"math"
+	"sort"
 )
 
 const (
@@ -702,6 +703,11 @@ type huffmanNode struct {
 	right  int
 }
 
+type huffmanSymbol struct {
+	count  uint32
+	symbol int
+}
+
 func huffmanCodeLengths(counts [nLiteralCodes + nLengthCodes]uint32) ([nLiteralCodes + nLengthCodes]uint8, bool) {
 	var lengths [nLiteralCodes + nLengthCodes]uint8
 	var nodes []huffmanNode
@@ -746,9 +752,60 @@ func huffmanCodeLengths(counts [nLiteralCodes + nLengthCodes]uint32) ([nLiteralC
 	}
 
 	if !assignHuffmanLengths(lengths[:], nodes, active[0], 0) {
-		return lengths, false
+		return balancedHuffmanCodeLengths(counts)
 	}
 	return lengths, true
+}
+
+func balancedHuffmanCodeLengths(counts [nLiteralCodes + nLengthCodes]uint32) ([nLiteralCodes + nLengthCodes]uint8, bool) {
+	var lengths [nLiteralCodes + nLengthCodes]uint8
+	var symbols []huffmanSymbol
+	for symbol, count := range counts {
+		if count == 0 {
+			continue
+		}
+		symbols = append(symbols, huffmanSymbol{count: count, symbol: symbol})
+	}
+	switch len(symbols) {
+	case 0:
+		return lengths, false
+	case 1:
+		lengths[symbols[0].symbol] = 1
+		return lengths, true
+	case 2:
+		lengths[symbols[0].symbol] = 1
+		lengths[symbols[1].symbol] = 1
+		return lengths, true
+	}
+
+	sort.Slice(symbols, func(i int, j int) bool {
+		if symbols[i].count != symbols[j].count {
+			return symbols[i].count > symbols[j].count
+		}
+		return symbols[i].symbol < symbols[j].symbol
+	})
+
+	longLength := ceilLog2(len(symbols))
+	shortLength := longLength - 1
+	shortCount := (1 << longLength) - len(symbols)
+	for i, sym := range symbols {
+		length := longLength
+		if i < shortCount {
+			length = shortLength
+		}
+		lengths[sym.symbol] = uint8(length)
+	}
+	return lengths, true
+}
+
+func ceilLog2(n int) int {
+	length := 0
+	value := 1
+	for value < n {
+		value <<= 1
+		length++
+	}
+	return length
 }
 
 func twoSmallestHuffmanNodes(nodes []huffmanNode, active []int) (int, int) {
