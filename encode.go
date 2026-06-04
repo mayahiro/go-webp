@@ -190,18 +190,27 @@ func (p *channelPlan) observe(v uint8) {
 func pixelReaderFor(m image.Image) pixelReader {
 	switch img := m.(type) {
 	case *image.NRGBA:
+		pix := img.Pix
+		stride := img.Stride
+		minX := img.Rect.Min.X
+		minY := img.Rect.Min.Y
 		return func(x int, y int) color.NRGBA {
-			i := (y-img.Rect.Min.Y)*img.Stride + (x-img.Rect.Min.X)*4
+			i := (y-minY)*stride + (x-minX)*4
 			return color.NRGBA{
-				R: img.Pix[i+0],
-				G: img.Pix[i+1],
-				B: img.Pix[i+2],
-				A: img.Pix[i+3],
+				R: pix[i+0],
+				G: pix[i+1],
+				B: pix[i+2],
+				A: pix[i+3],
 			}
 		}
 	case *image.RGBA:
+		pix := img.Pix
+		stride := img.Stride
+		minX := img.Rect.Min.X
+		minY := img.Rect.Min.Y
 		return func(x int, y int) color.NRGBA {
-			return color.NRGBAModel.Convert(img.RGBAAt(x, y)).(color.NRGBA)
+			i := (y-minY)*stride + (x-minX)*4
+			return nrgbaFromRGBA(pix[i+0], pix[i+1], pix[i+2], pix[i+3])
 		}
 	case *image.Gray:
 		return func(x int, y int) color.NRGBA {
@@ -226,6 +235,27 @@ func pixelReaderFor(m image.Image) pixelReader {
 			return color.NRGBAModel.Convert(m.At(x, y)).(color.NRGBA)
 		}
 	}
+}
+
+func nrgbaFromRGBA(r uint8, g uint8, b uint8, a uint8) color.NRGBA {
+	if a == 0xff {
+		return color.NRGBA{R: r, G: g, B: b, A: 0xff}
+	}
+	if a == 0 {
+		return color.NRGBA{}
+	}
+	r16 := uint32(r)
+	r16 |= r16 << 8
+	g16 := uint32(g)
+	g16 |= g16 << 8
+	b16 := uint32(b)
+	b16 |= b16 << 8
+	a16 := uint32(a)
+	a16 |= a16 << 8
+	r16 = (r16 * 0xffff) / a16
+	g16 = (g16 * 0xffff) / a16
+	b16 = (b16 * 0xffff) / a16
+	return color.NRGBA{R: uint8(r16 >> 8), G: uint8(g16 >> 8), B: uint8(b16 >> 8), A: a}
 }
 
 func vp8lPayloadBits(width int, height int, analysis imageAnalysis) uint64 {

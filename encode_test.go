@@ -50,6 +50,37 @@ func TestEncodeRoundTripNRGBA(t *testing.T) {
 	}
 }
 
+func TestPixelReaderForFastPaths(t *testing.T) {
+	nrgba := image.NewNRGBA(image.Rect(3, 5, 5, 6))
+	nrgba.SetNRGBA(3, 5, color.NRGBA{R: 1, G: 2, B: 3, A: 4})
+	nrgba.SetNRGBA(4, 5, color.NRGBA{R: 250, G: 251, B: 252, A: 253})
+	readNRGBA := pixelReaderFor(nrgba)
+	if got, want := readNRGBA(3, 5), (color.NRGBA{R: 1, G: 2, B: 3, A: 4}); got != want {
+		t.Fatalf("NRGBA pixel = %#v, want %#v", got, want)
+	}
+	if got, want := readNRGBA(4, 5), (color.NRGBA{R: 250, G: 251, B: 252, A: 253}); got != want {
+		t.Fatalf("NRGBA pixel = %#v, want %#v", got, want)
+	}
+
+	rgba := image.NewRGBA(image.Rect(7, 11, 10, 12))
+	values := []color.RGBA{
+		{R: 0, G: 0, B: 0, A: 0},
+		{R: 32, G: 64, B: 96, A: 128},
+		{R: 9, G: 10, B: 11, A: 255},
+	}
+	for i, c := range values {
+		rgba.SetRGBA(rgba.Rect.Min.X+i, rgba.Rect.Min.Y, c)
+	}
+	readRGBA := pixelReaderFor(rgba)
+	for i := range values {
+		x := rgba.Rect.Min.X + i
+		want := color.NRGBAModel.Convert(rgba.RGBAAt(x, rgba.Rect.Min.Y)).(color.NRGBA)
+		if got := readRGBA(x, rgba.Rect.Min.Y); got != want {
+			t.Fatalf("RGBA pixel %d = %#v, want %#v", i, got, want)
+		}
+	}
+}
+
 func TestEncoderRoundTripGray(t *testing.T) {
 	img := image.NewGray(image.Rect(0, 0, 3, 1))
 	img.SetGray(0, 0, color.Gray{Y: 7})
