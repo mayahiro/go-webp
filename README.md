@@ -100,7 +100,8 @@ room for future options.
 - Lossy images with alpha are written as extended WebP files with an `ALPH`
   chunk. The encoder uses compressed alpha when it is smaller and falls back to
   raw alpha otherwise. Compressed alpha uses frequency-coded residuals and
-  distance-1 backward references for repeated residual runs.
+  backward references for repeated residual runs and previous-row residual
+  matches.
 
 ## Limitations
 
@@ -110,9 +111,9 @@ room for future options.
 - Non-`image.NRGBA` images are converted through `color.NRGBAModel` before
   encoding.
 - Lossy alpha compression is intentionally simple and currently uses one global
-  `ALPH` filter, frequency-coded residuals, and distance-1 backward references
-  for repeated residual runs. It does not yet perform general LZ77 match search
-  or block-adaptive alpha entropy coding.
+  `ALPH` filter, frequency-coded residuals, and limited backward references for
+  repeated residual runs and previous-row residual matches. It does not yet
+  perform general LZ77 match search or block-adaptive alpha entropy coding.
 - Lossy loop filter settings are intentionally conservative and are not yet
   tuned with image-specific perceptual metrics.
 

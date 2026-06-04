@@ -26,6 +26,8 @@ const (
 
 	alphaMinBackwardRefLength = 4
 	alphaMaxBackwardRefLength = 4096
+	alphaDistanceAbove        = 0
+	alphaDistancePrevious     = 1
 
 	alphaCodeLengthCodeCount     = 19
 	alphaCodeLengthRepeatZero    = 17
@@ -173,7 +175,31 @@ func makeAlphaPayload(readPixel pixelReader, bounds image.Rectangle, width int, 
 		if !ok {
 			continue
 		}
-		code.rle = true
+		code.lz77 = true
+		stream, err := encodeAlphaVP8LStream(readPixel, bounds, width, height, byte(filter), code)
+		if err != nil {
+			return alphaPayload{}, err
+		}
+		size := uint64(1 + len(stream))
+		if size < best.size {
+			best = alphaPayload{
+				size:       size,
+				compressed: true,
+				filter:     byte(filter),
+				stream:     stream,
+			}
+		}
+	}
+	for filter, plan := range analysis.lz77Residuals {
+		if !plan.hasRefs || !plan.encodable() {
+			continue
+		}
+		code, ok := alphaCodeFor(plan)
+		if !ok {
+			continue
+		}
+		code.lz77 = true
+		code.rowCopy = true
 		stream, err := encodeAlphaVP8LStream(readPixel, bounds, width, height, byte(filter), code)
 		if err != nil {
 			return alphaPayload{}, err
@@ -214,13 +240,15 @@ func writeAlphaVP8LImageStream(bits *bitWriter, readPixel pixelReader, bounds im
 	writeSimpleTree(bits, 0)
 	writeSimpleTree(bits, 0)
 	writeSimpleTree(bits, 0)
-	if code.rle {
-		writeSimpleTree(bits, 1)
+	if code.lz77 {
+		writeAlphaDistanceTree(bits, code)
 	} else {
 		writeSimpleTree(bits, 0)
 	}
 
-	if code.rle {
+	if code.lz77 && code.rowCopy {
+		writeAlphaLZ77Bits(bits, readPixel, bounds, width, height, filter, code)
+	} else if code.lz77 {
 		writeAlphaRLEBits(bits, readPixel, bounds, width, height, filter, code)
 	} else if code.n != 1 {
 		writeAlphaResidualBits(bits, readPixel, bounds, width, height, filter, code)
@@ -239,6 +267,17 @@ func writeAlphaGreenTree(bits *bitWriter, code alphaCode) {
 		writeTwoSymbolTree(bits, uint8(code.symbols[0]), uint8(code.symbols[1]))
 	default:
 		writeAlphaNormalTree(bits, code.lengths)
+	}
+}
+
+func writeAlphaDistanceTree(bits *bitWriter, code alphaCode) {
+	switch code.distanceN {
+	case 1:
+		writeSimpleTree(bits, code.distanceSymbols[0])
+	case 2:
+		writeTwoSymbolTree(bits, code.distanceSymbols[0], code.distanceSymbols[1])
+	default:
+		writeSimpleTree(bits, 0)
 	}
 }
 
@@ -425,6 +464,35 @@ func writeAlphaRLEBits(bits *bitWriter, readPixel pixelReader, bounds image.Rect
 	run.flush(bits, code)
 }
 
+func writeAlphaLZ77Bits(bits *bitWriter, readPixel pixelReader, bounds image.Rectangle, width int, height int, filter byte, code alphaCode) {
+	var run alphaRun
+	previous := make([]uint8, width)
+	current := make([]uint8, width)
+	previousResidual := make([]uint8, width)
+	currentResidual := make([]uint8, width)
+	for y := 0; y < height; y++ {
+		left := uint8(0)
+		for x := 0; x < width; x++ {
+			alpha := readPixel(bounds.Min.X+x, bounds.Min.Y+y).A
+			above := uint8(0)
+			if y > 0 {
+				above = previous[x]
+			}
+			upperLeft := uint8(0)
+			if x > 0 && y > 0 {
+				upperLeft = previous[x-1]
+			}
+			currentResidual[x] = alpha - alphaPredictor(filter, x, y, left, above, upperLeft)
+			current[x] = alpha
+			left = alpha
+		}
+		run.writeRow(bits, code, currentResidual, previousResidual, y > 0)
+		previous, current = current, previous
+		previousResidual, currentResidual = currentResidual, previousResidual
+	}
+	run.flush(bits, code)
+}
+
 func writeAlphaSymbol(bits *bitWriter, code alphaCode, symbol int) {
 	if code.normal {
 		if code.n == 1 {
@@ -449,10 +517,31 @@ func writeAlphaSymbol(bits *bitWriter, code alphaCode, symbol int) {
 	}
 }
 
-func writeAlphaCopy(bits *bitWriter, code alphaCode, length int) {
-	prefix := vp8lPrefixCode(length)
-	writeAlphaSymbol(bits, code, nLiteralCodes+prefix.code)
-	bits.writeBits(prefix.extra, prefix.extraBits)
+func writeAlphaDistanceSymbol(bits *bitWriter, code alphaCode, symbol uint8) {
+	switch code.distanceN {
+	case 1:
+		return
+	case 2:
+		if symbol == code.distanceSymbols[0] {
+			bits.writeBits(0, 1)
+		} else {
+			bits.writeBits(1, 1)
+		}
+	}
+}
+
+func writeAlphaLZ77Copy(bits *bitWriter, code alphaCode, length int, distanceSymbol uint8) {
+	for length > 0 {
+		n := length
+		if n > alphaMaxBackwardRefLength {
+			n = alphaMaxBackwardRefLength
+		}
+		prefix := vp8lPrefixCode(n)
+		writeAlphaSymbol(bits, code, nLiteralCodes+prefix.code)
+		bits.writeBits(prefix.extra, prefix.extraBits)
+		writeAlphaDistanceSymbol(bits, code, distanceSymbol)
+		length -= n
+	}
 }
 
 func writeAlphaChunk(w *bufio.Writer, readPixel pixelReader, bounds image.Rectangle, payload alphaPayload) error {
@@ -484,17 +573,21 @@ func writeAlphaChunk(w *bufio.Writer, readPixel pixelReader, bounds image.Rectan
 }
 
 type lossyAlphaAnalysis struct {
-	hasAlpha     bool
-	residuals    [4]alphaResidualPlan
-	rleResiduals [4]alphaResidualPlan
+	hasAlpha      bool
+	residuals     [4]alphaResidualPlan
+	rleResiduals  [4]alphaResidualPlan
+	lz77Residuals [4]alphaResidualPlan
 }
 
 type alphaResidualPlan struct {
-	n       int
-	symbols [2]uint16
-	counts  [nLiteralCodes + nLengthCodes]uint32
-	hasRefs bool
-	run     alphaRun
+	n               int
+	symbols         [2]uint16
+	counts          [nLiteralCodes + nLengthCodes]uint32
+	distanceN       int
+	distanceSymbols [2]uint8
+	distanceCounts  [nDistanceCodes]uint32
+	hasRefs         bool
+	run             alphaRun
 }
 
 type alphaRun struct {
@@ -507,6 +600,12 @@ func analyzeLossyAlpha(readPixel pixelReader, bounds image.Rectangle, width int,
 	var analysis lossyAlphaAnalysis
 	previous := make([]uint8, width)
 	current := make([]uint8, width)
+	var previousResiduals [4][]uint8
+	var currentResiduals [4][]uint8
+	for filter := range previousResiduals {
+		previousResiduals[filter] = make([]uint8, width)
+		currentResiduals[filter] = make([]uint8, width)
+	}
 	for y := 0; y < height; y++ {
 		left := uint8(0)
 		for x := 0; x < width; x++ {
@@ -534,13 +633,22 @@ func analyzeLossyAlpha(readPixel pixelReader, bounds image.Rectangle, width int,
 			analysis.rleResiduals[alphFilterHorizontal].observeRLE(horizontal)
 			analysis.rleResiduals[alphFilterVertical].observeRLE(vertical)
 			analysis.rleResiduals[alphFilterGradient].observeRLE(gradient)
+			currentResiduals[alphFilterNone][x] = none
+			currentResiduals[alphFilterHorizontal][x] = horizontal
+			currentResiduals[alphFilterVertical][x] = vertical
+			currentResiduals[alphFilterGradient][x] = gradient
 			current[x] = alpha
 			left = alpha
+		}
+		for filter := range currentResiduals {
+			analysis.lz77Residuals[filter].observeLZ77Row(currentResiduals[filter], previousResiduals[filter], y > 0)
+			previousResiduals[filter], currentResiduals[filter] = currentResiduals[filter], previousResiduals[filter]
 		}
 		previous, current = current, previous
 	}
 	for i := range analysis.rleResiduals {
 		analysis.rleResiduals[i].flushRLE()
+		analysis.lz77Residuals[i].flushRLE()
 	}
 	return analysis
 }
@@ -553,6 +661,30 @@ func (p *alphaResidualPlan) observe(symbol int) {
 		p.n++
 	}
 	p.counts[symbol]++
+}
+
+func (p *alphaResidualPlan) observeLZ77Row(current []uint8, previous []uint8, hasPrevious bool) {
+	for x := 0; x < len(current); {
+		if hasPrevious {
+			match := alphaMatchLength(current, previous, x)
+			if match >= alphaMinBackwardRefLength {
+				p.flushRLE()
+				p.observeCopy(match, alphaDistanceAbove)
+				x += match
+				continue
+			}
+		}
+		p.observeRLE(current[x])
+		x++
+	}
+}
+
+func alphaMatchLength(current []uint8, previous []uint8, start int) int {
+	n := 0
+	for start+n < len(current) && current[start+n] == previous[start+n] {
+		n++
+	}
+	return n
 }
 
 func (p *alphaResidualPlan) observeRLE(value uint8) {
@@ -575,21 +707,52 @@ func (p *alphaResidualPlan) flushRLE() {
 	p.observe(int(p.run.value))
 	remaining := p.run.length - 1
 	if remaining >= alphaMinBackwardRefLength {
-		for remaining > 0 {
-			length := remaining
-			if length > alphaMaxBackwardRefLength {
-				length = alphaMaxBackwardRefLength
-			}
-			p.observe(nLiteralCodes + vp8lPrefixCode(length).code)
-			p.hasRefs = true
-			remaining -= length
-		}
+		p.observeCopy(remaining, alphaDistancePrevious)
 	} else {
 		for ; remaining > 0; remaining-- {
 			p.observe(int(p.run.value))
 		}
 	}
 	p.run = alphaRun{}
+}
+
+func (p *alphaResidualPlan) observeCopy(length int, distanceSymbol uint8) {
+	for length > 0 {
+		n := length
+		if n > alphaMaxBackwardRefLength {
+			n = alphaMaxBackwardRefLength
+		}
+		p.observe(nLiteralCodes + vp8lPrefixCode(n).code)
+		p.observeDistance(distanceSymbol)
+		p.hasRefs = true
+		length -= n
+	}
+}
+
+func (p *alphaResidualPlan) observeDistance(symbol uint8) {
+	if p.distanceCounts[symbol] == 0 {
+		if p.distanceN < len(p.distanceSymbols) {
+			p.distanceSymbols[p.distanceN] = symbol
+		}
+		p.distanceN++
+	}
+	p.distanceCounts[symbol]++
+}
+
+func (r *alphaRun) writeRow(bits *bitWriter, code alphaCode, current []uint8, previous []uint8, hasPrevious bool) {
+	for x := 0; x < len(current); {
+		if hasPrevious {
+			match := alphaMatchLength(current, previous, x)
+			if match >= alphaMinBackwardRefLength {
+				r.flush(bits, code)
+				writeAlphaLZ77Copy(bits, code, match, alphaDistanceAbove)
+				x += match
+				continue
+			}
+		}
+		r.write(bits, code, current[x])
+		x++
+	}
 }
 
 func (r *alphaRun) write(bits *bitWriter, code alphaCode, value uint8) {
@@ -612,14 +775,7 @@ func (r *alphaRun) flush(bits *bitWriter, code alphaCode) {
 	writeAlphaSymbol(bits, code, int(r.value))
 	remaining := r.length - 1
 	if remaining >= alphaMinBackwardRefLength {
-		for remaining > 0 {
-			length := remaining
-			if length > alphaMaxBackwardRefLength {
-				length = alphaMaxBackwardRefLength
-			}
-			writeAlphaCopy(bits, code, length)
-			remaining -= length
-		}
+		writeAlphaLZ77Copy(bits, code, remaining, alphaDistancePrevious)
 	} else {
 		for ; remaining > 0; remaining-- {
 			writeAlphaSymbol(bits, code, int(r.value))
@@ -663,12 +819,15 @@ func (p alphaResidualPlan) encodable() bool {
 }
 
 type alphaCode struct {
-	n       int
-	symbols [2]uint16
-	lengths [nLiteralCodes + nLengthCodes]uint8
-	codes   [nLiteralCodes + nLengthCodes]uint16
-	rle     bool
-	normal  bool
+	n               int
+	symbols         [2]uint16
+	lengths         [nLiteralCodes + nLengthCodes]uint8
+	codes           [nLiteralCodes + nLengthCodes]uint16
+	distanceN       int
+	distanceSymbols [2]uint8
+	lz77            bool
+	rowCopy         bool
+	normal          bool
 }
 
 func alphaCodeFor(plan alphaResidualPlan) (alphaCode, bool) {
@@ -693,7 +852,14 @@ func alphaCodeFor(plan alphaResidualPlan) (alphaCode, bool) {
 		return alphaCode{}, false
 	}
 	codes := canonicalCodes(lengths)
-	return alphaCode{n: plan.n, lengths: lengths, codes: codes, normal: true}, true
+	return alphaCode{
+		n:               plan.n,
+		lengths:         lengths,
+		codes:           codes,
+		distanceN:       plan.distanceN,
+		distanceSymbols: plan.distanceSymbols,
+		normal:          true,
+	}, true
 }
 
 type huffmanNode struct {

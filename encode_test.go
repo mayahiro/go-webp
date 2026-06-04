@@ -793,6 +793,25 @@ func TestHuffmanCodeLengthsFallBackWhenTreeWouldExceedVP8LLimit(t *testing.T) {
 	}
 }
 
+func TestAlphaLZ77PlanUsesPreviousRowDistance(t *testing.T) {
+	row := []uint8{4, 9, 16, 25, 36, 49, 64, 81}
+	var plan alphaResidualPlan
+	plan.observeLZ77Row(row, nil, false)
+	plan.observeLZ77Row(row, row, true)
+	plan.flushRLE()
+
+	if plan.distanceCounts[alphaDistanceAbove] == 0 {
+		t.Fatal("missing previous-row distance reference")
+	}
+	if plan.distanceCounts[alphaDistancePrevious] != 0 {
+		t.Fatalf("previous-pixel distance references = %d, want 0", plan.distanceCounts[alphaDistancePrevious])
+	}
+	prefix := vp8lPrefixCode(len(row))
+	if got := plan.counts[nLiteralCodes+prefix.code]; got == 0 {
+		t.Fatalf("missing copy length prefix code %d", prefix.code)
+	}
+}
+
 func huffmanKraftSumForTest(lengths [nLiteralCodes + nLengthCodes]uint8) int {
 	sum := 0
 	for _, length := range lengths {
