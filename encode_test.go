@@ -1029,7 +1029,7 @@ func TestAlphaCodeLengthTokensUseZeroRunCodes(t *testing.T) {
 	lengths[100] = 2
 	lengths[260] = 3
 
-	tokens := alphaCodeLengthTokens(lengths)
+	tokens := alphaCodeLengthTokens(lengths[:])
 	if len(tokens) >= 261 {
 		t.Fatalf("code length token count = %d, want less than 261", len(tokens))
 	}
@@ -1092,6 +1092,51 @@ func TestAlphaLZ77PlanUsesPreviousRowDistance(t *testing.T) {
 	prefix := vp8lPrefixCode(len(row))
 	if got := plan.counts[nLiteralCodes+prefix.code]; got == 0 {
 		t.Fatalf("missing copy length prefix code %d", prefix.code)
+	}
+}
+
+func TestAlphaLZ77PlanUsesPreviousRowNeighborhoodDistances(t *testing.T) {
+	previous := []uint8{10, 20, 30, 40, 50, 60, 70, 80, 90}
+
+	topLeft := []uint8{99, 10, 20, 30, 40, 50, 60, 70, 80}
+	var topLeftPlan alphaResidualPlan
+	topLeftPlan.observeLZ77Row(topLeft, previous, true)
+	topLeftPlan.flushRLE()
+	if topLeftPlan.distanceCounts[alphaDistanceTopLeft] == 0 {
+		t.Fatal("missing top-left distance reference")
+	}
+
+	topRight := []uint8{20, 30, 40, 50, 60, 70, 80, 90, 99}
+	var topRightPlan alphaResidualPlan
+	topRightPlan.observeLZ77Row(topRight, previous, true)
+	topRightPlan.flushRLE()
+	if topRightPlan.distanceCounts[alphaDistanceTopRight] == 0 {
+		t.Fatal("missing top-right distance reference")
+	}
+}
+
+func TestAlphaDistanceCodeUsesNormalTreeForNeighborhoodDistances(t *testing.T) {
+	var plan alphaResidualPlan
+	plan.observeCopy(alphaMinBackwardRefLength, alphaDistanceAbove)
+	plan.observeCopy(alphaMinBackwardRefLength, alphaDistancePrevious)
+	plan.observeCopy(alphaMinBackwardRefLength, alphaDistanceTopLeft)
+	plan.observeCopy(alphaMinBackwardRefLength, alphaDistanceTopRight)
+	code, ok := alphaCodeFor(plan)
+	if !ok {
+		t.Fatal("alphaCodeFor returned false")
+	}
+	if !code.distanceNormal {
+		t.Fatal("distance tree is not normal")
+	}
+	for _, symbol := range []uint8{
+		alphaDistanceAbove,
+		alphaDistancePrevious,
+		alphaDistanceTopLeft,
+		alphaDistanceTopRight,
+	} {
+		if code.distanceLengths[symbol] == 0 {
+			t.Fatalf("distance symbol %d has zero code length", symbol)
+		}
 	}
 }
 

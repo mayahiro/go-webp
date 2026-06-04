@@ -85,9 +85,9 @@ room for future options.
 - It scans the source image twice and does not keep a full converted image in
   memory for lossless encoding.
 - Constant channels are encoded with single-symbol Huffman trees.
-- The current encoder does not use VP8L transforms, color cache, or LZ77
-  backwards references, so output can be larger than highly optimized WebP
-  encoders.
+- The lossless encoder does not use VP8L transforms, color cache, or LZ77
+  backwards references, so lossless output can be larger than highly optimized
+  WebP encoders.
 - Lossy encoding uses a low-complexity VP8 key frame encoder with 4:2:0 chroma
   subsampling, adaptive chroma downsampling, selected intra16x16, luma4x4, and
   chroma prediction modes, and quantized DC and AC coefficients. It writes
@@ -100,8 +100,8 @@ room for future options.
 - Lossy images with alpha are written as extended WebP files with an `ALPH`
   chunk. The encoder uses compressed alpha when it is smaller and falls back to
   raw alpha otherwise. Compressed alpha uses frequency-coded residuals and
-  backward references for repeated residual runs and previous-row residual
-  matches.
+  backward references for repeated residual runs, previous-row residual
+  matches, and neighboring previous-row residual matches.
 
 ## Limitations
 
@@ -112,8 +112,9 @@ room for future options.
   encoding.
 - Lossy alpha compression is intentionally simple and currently uses one global
   `ALPH` filter, frequency-coded residuals, and limited backward references for
-  repeated residual runs and previous-row residual matches. It does not yet
-  perform general LZ77 match search or block-adaptive alpha entropy coding.
+  repeated residual runs, previous-row residual matches, and neighboring
+  previous-row residual matches. It does not yet perform general LZ77 match
+  search or block-adaptive alpha entropy coding.
 - Lossy loop filter settings are intentionally conservative and are not yet
   tuned with image-specific perceptual metrics.
 

@@ -28,6 +28,8 @@ const (
 	alphaMaxBackwardRefLength = 4096
 	alphaDistanceAbove        = 0
 	alphaDistancePrevious     = 1
+	alphaDistanceTopLeft      = 2
+	alphaDistanceTopRight     = 3
 
 	alphaCodeLengthCodeCount     = 19
 	alphaCodeLengthRepeatZero    = 17
@@ -257,7 +259,7 @@ func writeAlphaVP8LImageStream(bits *bitWriter, readPixel pixelReader, bounds im
 
 func writeAlphaGreenTree(bits *bitWriter, code alphaCode) {
 	if code.normal {
-		writeAlphaNormalTree(bits, code.lengths)
+		writeAlphaNormalTree(bits, code.lengths[:])
 		return
 	}
 	switch code.n {
@@ -266,11 +268,15 @@ func writeAlphaGreenTree(bits *bitWriter, code alphaCode) {
 	case 2:
 		writeTwoSymbolTree(bits, uint8(code.symbols[0]), uint8(code.symbols[1]))
 	default:
-		writeAlphaNormalTree(bits, code.lengths)
+		writeAlphaNormalTree(bits, code.lengths[:])
 	}
 }
 
 func writeAlphaDistanceTree(bits *bitWriter, code alphaCode) {
+	if code.distanceNormal {
+		writeAlphaNormalTree(bits, code.distanceLengths[:])
+		return
+	}
 	switch code.distanceN {
 	case 1:
 		writeSimpleTree(bits, code.distanceSymbols[0])
@@ -281,7 +287,7 @@ func writeAlphaDistanceTree(bits *bitWriter, code alphaCode) {
 	}
 }
 
-func writeAlphaNormalTree(bits *bitWriter, lengths [nLiteralCodes + nLengthCodes]uint8) {
+func writeAlphaNormalTree(bits *bitWriter, lengths []uint8) {
 	tokens := alphaCodeLengthTokens(lengths)
 	codes := canonicalAlphaCodeLengthCodes(alphaCodeLengthCodeLengths)
 
@@ -304,7 +310,7 @@ type alphaCodeLengthToken struct {
 	extra     uint32
 }
 
-func alphaCodeLengthTokens(lengths [nLiteralCodes + nLengthCodes]uint8) []alphaCodeLengthToken {
+func alphaCodeLengthTokens(lengths []uint8) []alphaCodeLengthToken {
 	maxSymbol := alphaCodeLengthLimit(lengths)
 	tokens := make([]alphaCodeLengthToken, 0, maxSymbol)
 	for i := 0; i < maxSymbol; {
@@ -324,7 +330,7 @@ func alphaCodeLengthTokens(lengths [nLiteralCodes + nLengthCodes]uint8) []alphaC
 	return tokens
 }
 
-func alphaCodeLengthLimit(lengths [nLiteralCodes + nLengthCodes]uint8) int {
+func alphaCodeLengthLimit(lengths []uint8) int {
 	for i := len(lengths) - 1; i >= 0; i-- {
 		if lengths[i] == 0 {
 			continue
@@ -514,6 +520,11 @@ func writeAlphaSymbol(bits *bitWriter, code alphaCode, symbol int) {
 }
 
 func writeAlphaDistanceSymbol(bits *bitWriter, code alphaCode, symbol uint8) {
+	if code.distanceNormal {
+		length := code.distanceLengths[symbol]
+		bits.writeBits(uint32(reverseBits(code.distanceCodes[symbol], length)), length)
+		return
+	}
 	switch code.distanceN {
 	case 1:
 		return
@@ -671,23 +682,47 @@ func (p *alphaResidualPlan) observe(symbol int) {
 
 func (p *alphaResidualPlan) observeLZ77Row(current []uint8, previous []uint8, hasPrevious bool) {
 	for x := 0; x < len(current); {
-		if hasPrevious {
-			match := alphaMatchLength(current, previous, x)
-			if match >= alphaMinBackwardRefLength {
-				p.flushRLE()
-				p.observeCopy(match, alphaDistanceAbove)
-				x += match
-				continue
-			}
+		match := alphaBestSpatialMatch(current, previous, x, hasPrevious)
+		if match.length >= alphaMinBackwardRefLength {
+			p.flushRLE()
+			p.observeCopy(match.length, match.distanceSymbol)
+			x += match.length
+			continue
 		}
 		p.observeRLE(current[x])
 		x++
 	}
 }
 
-func alphaMatchLength(current []uint8, previous []uint8, start int) int {
+type alphaSpatialMatch struct {
+	length         int
+	distanceSymbol uint8
+}
+
+func alphaBestSpatialMatch(current []uint8, previous []uint8, start int, hasPrevious bool) alphaSpatialMatch {
+	if !hasPrevious {
+		return alphaSpatialMatch{}
+	}
+	best := alphaSpatialMatch{
+		length:         alphaMatchLength(current, previous, start, start),
+		distanceSymbol: alphaDistanceAbove,
+	}
+	if start > 0 {
+		if match := alphaMatchLength(current, previous, start, start-1); match > best.length {
+			best = alphaSpatialMatch{length: match, distanceSymbol: alphaDistanceTopLeft}
+		}
+	}
+	if start+1 < len(previous) {
+		if match := alphaMatchLength(current, previous, start, start+1); match > best.length {
+			best = alphaSpatialMatch{length: match, distanceSymbol: alphaDistanceTopRight}
+		}
+	}
+	return best
+}
+
+func alphaMatchLength(current []uint8, previous []uint8, currentStart int, previousStart int) int {
 	n := 0
-	for start+n < len(current) && current[start+n] == previous[start+n] {
+	for currentStart+n < len(current) && previousStart+n < len(previous) && current[currentStart+n] == previous[previousStart+n] {
 		n++
 	}
 	return n
@@ -747,14 +782,12 @@ func (p *alphaResidualPlan) observeDistance(symbol uint8) {
 
 func (r *alphaRun) writeRow(bits *bitWriter, code alphaCode, current []uint8, previous []uint8, hasPrevious bool) {
 	for x := 0; x < len(current); {
-		if hasPrevious {
-			match := alphaMatchLength(current, previous, x)
-			if match >= alphaMinBackwardRefLength {
-				r.flush(bits, code)
-				writeAlphaLZ77Copy(bits, code, match, alphaDistanceAbove)
-				x += match
-				continue
-			}
+		match := alphaBestSpatialMatch(current, previous, x, hasPrevious)
+		if match.length >= alphaMinBackwardRefLength {
+			r.flush(bits, code)
+			writeAlphaLZ77Copy(bits, code, match.length, match.distanceSymbol)
+			x += match.length
+			continue
 		}
 		r.write(bits, code, current[x])
 		x++
@@ -831,9 +864,12 @@ type alphaCode struct {
 	codes           [nLiteralCodes + nLengthCodes]uint16
 	distanceN       int
 	distanceSymbols [2]uint8
+	distanceLengths [nDistanceCodes]uint8
+	distanceCodes   [nDistanceCodes]uint16
 	lz77            bool
 	rowCopy         bool
 	normal          bool
+	distanceNormal  bool
 }
 
 func alphaCodeFor(plan alphaResidualPlan) (alphaCode, bool) {
@@ -858,14 +894,32 @@ func alphaCodeFor(plan alphaResidualPlan) (alphaCode, bool) {
 		return alphaCode{}, false
 	}
 	codes := canonicalCodes(lengths)
+	distanceN, distanceSymbols, distanceLengths, distanceCodes, distanceNormal, ok := alphaDistanceCodeFor(plan)
+	if !ok {
+		return alphaCode{}, false
+	}
 	return alphaCode{
 		n:               plan.n,
 		lengths:         lengths,
 		codes:           codes,
-		distanceN:       plan.distanceN,
-		distanceSymbols: plan.distanceSymbols,
+		distanceN:       distanceN,
+		distanceSymbols: distanceSymbols,
+		distanceLengths: distanceLengths,
+		distanceCodes:   distanceCodes,
 		normal:          true,
+		distanceNormal:  distanceNormal,
 	}, true
+}
+
+func alphaDistanceCodeFor(plan alphaResidualPlan) (int, [2]uint8, [nDistanceCodes]uint8, [nDistanceCodes]uint16, bool, bool) {
+	if plan.distanceN <= 2 {
+		return plan.distanceN, plan.distanceSymbols, [nDistanceCodes]uint8{}, [nDistanceCodes]uint16{}, false, true
+	}
+	lengths, ok := huffmanDistanceCodeLengths(plan.distanceCounts)
+	if !ok {
+		return 0, [2]uint8{}, [nDistanceCodes]uint8{}, [nDistanceCodes]uint16{}, false, false
+	}
+	return plan.distanceN, plan.distanceSymbols, lengths, canonicalDistanceCodes(lengths), true, true
 }
 
 type huffmanNode struct {
@@ -882,6 +936,15 @@ type huffmanSymbol struct {
 
 func huffmanCodeLengths(counts [nLiteralCodes + nLengthCodes]uint32) ([nLiteralCodes + nLengthCodes]uint8, bool) {
 	var lengths [nLiteralCodes + nLengthCodes]uint8
+	return lengths, huffmanCodeLengthsInto(lengths[:], counts[:])
+}
+
+func huffmanDistanceCodeLengths(counts [nDistanceCodes]uint32) ([nDistanceCodes]uint8, bool) {
+	var lengths [nDistanceCodes]uint8
+	return lengths, huffmanCodeLengthsInto(lengths[:], counts[:])
+}
+
+func huffmanCodeLengthsInto(lengths []uint8, counts []uint32) bool {
 	var nodes []huffmanNode
 	var active []int
 	for symbol, count := range counts {
@@ -892,16 +955,16 @@ func huffmanCodeLengths(counts [nLiteralCodes + nLengthCodes]uint32) ([nLiteralC
 		active = append(active, len(nodes)-1)
 	}
 	if len(active) == 0 {
-		return lengths, false
+		return false
 	}
 	if len(active) == 1 {
 		lengths[nodes[active[0]].symbol] = 1
-		return lengths, true
+		return true
 	}
 	if len(active) == 2 {
 		lengths[nodes[active[0]].symbol] = 1
 		lengths[nodes[active[1]].symbol] = 1
-		return lengths, true
+		return true
 	}
 
 	for len(active) > 1 {
@@ -924,13 +987,17 @@ func huffmanCodeLengths(counts [nLiteralCodes + nLengthCodes]uint32) ([nLiteralC
 	}
 
 	if !assignHuffmanLengths(lengths[:], nodes, active[0], 0) {
-		return balancedHuffmanCodeLengths(counts)
+		return balancedHuffmanCodeLengthsInto(lengths, counts)
 	}
-	return lengths, true
+	return true
 }
 
 func balancedHuffmanCodeLengths(counts [nLiteralCodes + nLengthCodes]uint32) ([nLiteralCodes + nLengthCodes]uint8, bool) {
 	var lengths [nLiteralCodes + nLengthCodes]uint8
+	return lengths, balancedHuffmanCodeLengthsInto(lengths[:], counts[:])
+}
+
+func balancedHuffmanCodeLengthsInto(lengths []uint8, counts []uint32) bool {
 	var symbols []huffmanSymbol
 	for symbol, count := range counts {
 		if count == 0 {
@@ -940,14 +1007,14 @@ func balancedHuffmanCodeLengths(counts [nLiteralCodes + nLengthCodes]uint32) ([n
 	}
 	switch len(symbols) {
 	case 0:
-		return lengths, false
+		return false
 	case 1:
 		lengths[symbols[0].symbol] = 1
-		return lengths, true
+		return true
 	case 2:
 		lengths[symbols[0].symbol] = 1
 		lengths[symbols[1].symbol] = 1
-		return lengths, true
+		return true
 	}
 
 	sort.Slice(symbols, func(i int, j int) bool {
@@ -967,7 +1034,7 @@ func balancedHuffmanCodeLengths(counts [nLiteralCodes + nLengthCodes]uint32) ([n
 		}
 		lengths[sym.symbol] = uint8(length)
 	}
-	return lengths, true
+	return true
 }
 
 func ceilLog2(n int) int {
@@ -1040,6 +1107,32 @@ func canonicalCodes(lengths [nLiteralCodes + nLengthCodes]uint8) [nLiteralCodes 
 	}
 
 	var codes [nLiteralCodes + nLengthCodes]uint16
+	for symbol, length := range lengths {
+		if length == 0 {
+			continue
+		}
+		codes[symbol] = nextCodes[length]
+		nextCodes[length]++
+	}
+	return codes
+}
+
+func canonicalDistanceCodes(lengths [nDistanceCodes]uint8) [nDistanceCodes]uint16 {
+	var histogram [16]uint16
+	for _, length := range lengths {
+		if length != 0 {
+			histogram[length]++
+		}
+	}
+
+	code := uint16(0)
+	var nextCodes [16]uint16
+	for length := 1; length < len(nextCodes); length++ {
+		code = (code + histogram[length-1]) << 1
+		nextCodes[length] = code
+	}
+
+	var codes [nDistanceCodes]uint16
 	for symbol, length := range lengths {
 		if length == 0 {
 			continue

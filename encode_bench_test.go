@@ -19,6 +19,7 @@ const (
 	benchmarkImageFlat
 	benchmarkImageAlpha
 	benchmarkImageAlphaBands
+	benchmarkImageAlphaNeighborhood
 	benchmarkImageColorEdge
 )
 
@@ -54,6 +55,16 @@ func BenchmarkEncodeLossyAlphaBands512(b *testing.B) {
 	benchmarkEncodeLossyCase(b, lossyBenchmarkCase{
 		name:    "AlphaBands512Q75",
 		kind:    benchmarkImageAlphaBands,
+		width:   512,
+		height:  512,
+		quality: 75,
+	})
+}
+
+func BenchmarkEncodeLossyAlphaNeighborhood512(b *testing.B) {
+	benchmarkEncodeLossyCase(b, lossyBenchmarkCase{
+		name:    "AlphaNeighborhood512Q75",
+		kind:    benchmarkImageAlphaNeighborhood,
 		width:   512,
 		height:  512,
 		quality: 75,
@@ -105,6 +116,7 @@ func lossyBenchmarkCases() []lossyBenchmarkCase {
 		{name: "Flat128Q75", kind: benchmarkImageFlat, width: 128, height: 128, quality: 75},
 		{name: "Alpha128Q75", kind: benchmarkImageAlpha, width: 128, height: 128, quality: 75},
 		{name: "AlphaBands512Q75", kind: benchmarkImageAlphaBands, width: 512, height: 512, quality: 75},
+		{name: "AlphaNeighborhood512Q75", kind: benchmarkImageAlphaNeighborhood, width: 512, height: 512, quality: 75},
 		{name: "ColorEdge128Q75", kind: benchmarkImageColorEdge, width: 128, height: 128, quality: 75},
 	}
 }
@@ -177,7 +189,7 @@ func assertLossyBenchmarkWebP(t *testing.T, data []byte, tc lossyBenchmarkCase) 
 }
 
 func (tc lossyBenchmarkCase) hasAlpha() bool {
-	return tc.kind == benchmarkImageAlpha || tc.kind == benchmarkImageAlphaBands
+	return tc.kind == benchmarkImageAlpha || tc.kind == benchmarkImageAlphaBands || tc.kind == benchmarkImageAlphaNeighborhood
 }
 
 type lossyWorkspaceMetrics struct {
@@ -267,6 +279,15 @@ func benchmarkPixel(kind benchmarkImageKind, x int, y int) color.NRGBA {
 			B: uint8((x+y)*2 + x*y/17),
 			A: alpha,
 		}
+	case benchmarkImageAlphaNeighborhood:
+		index := positiveMod(x+alphaNeighborhoodShift(y), 512)
+		alpha := uint8(32 + (index*37)%191)
+		return color.NRGBA{
+			R: uint8(x*3 + y),
+			G: uint8(y*5 + x/2),
+			B: uint8((x+y)*2 + x*y/17),
+			A: alpha,
+		}
 	case benchmarkImageColorEdge:
 		if (x/16+y/16)%2 == 0 {
 			return color.NRGBA{R: 220, G: 36, B: 28, A: 255}
@@ -280,6 +301,21 @@ func benchmarkPixel(kind benchmarkImageKind, x int, y int) color.NRGBA {
 			A: 255,
 		}
 	}
+}
+
+func alphaNeighborhoodShift(y int) int {
+	if y%2 == 0 {
+		return 0
+	}
+	return -1
+}
+
+func positiveMod(v int, n int) int {
+	v %= n
+	if v < 0 {
+		return v + n
+	}
+	return v
 }
 
 func lossyYUVPSNRProxy(m image.Image, quality int) (float64, float64) {
