@@ -1746,8 +1746,6 @@ func analyzeVP8Modes(readPixel pixelReader, bounds image.Rectangle, mbw int, mbh
 			mode := vp8MBMode{
 				cMode: chooseVP8ChromaMode(readPixel, bounds, mbx, mby, recCb, recCr, cStride, quant, rd, &leftUV, &upUV[mbx]),
 			}
-			var savedLuma [256]uint8
-			saveLumaMB(recY, yStride, mbx, mby, &savedLuma)
 			savedLeftPred := leftPred
 			savedUpPred := upPred[mbx]
 			savedLeftY := leftY
@@ -1758,7 +1756,6 @@ func analyzeVP8Modes(readPixel pixelReader, bounds image.Rectangle, mbw int, mbh
 			y16Mode, y16Score := chooseVP8Y16Mode(readPixel, bounds, mbx, mby, recY, yStride, quant, rd, &leftY, &upY[mbx], &leftY16, &upY16[mbx])
 			y4Score := chooseVP8Y4Modes(readPixel, bounds, mbx, mby, recY, yStride, quant, rd, &leftPred, &upPred[mbx], &leftY, &upY[mbx], &mode)
 			if y16Score <= y4Score {
-				restoreLumaMB(recY, yStride, mbx, mby, &savedLuma)
 				leftPred = savedLeftPred
 				upPred[mbx] = savedUpPred
 				leftY = savedLeftY
@@ -1778,22 +1775,6 @@ func analyzeVP8Modes(readPixel pixelReader, bounds image.Rectangle, mbw int, mbh
 		}
 	}
 	return modes
-}
-
-func saveLumaMB(recY []uint8, stride int, mbx int, mby int, dst *[256]uint8) {
-	x0 := mbx * 16
-	y0 := mby * 16
-	for y := 0; y < 16; y++ {
-		copy(dst[y*16:y*16+16], recY[(y0+y)*stride+x0:(y0+y)*stride+x0+16])
-	}
-}
-
-func restoreLumaMB(recY []uint8, stride int, mbx int, mby int, src *[256]uint8) {
-	x0 := mbx * 16
-	y0 := mby * 16
-	for y := 0; y < 16; y++ {
-		copy(recY[(y0+y)*stride+x0:(y0+y)*stride+x0+16], src[y*16:y*16+16])
-	}
 }
 
 func collectVP8TokenStats(readPixel pixelReader, bounds image.Rectangle, mbw int, mbh int, quant vp8Quant, modes []vp8MBMode, work *vp8EncodeBuffers) vp8TokenStats {
