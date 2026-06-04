@@ -1747,6 +1747,7 @@ func analyzeVP8Modes(readPixel pixelReader, bounds image.Rectangle, mbw int, mbh
 		var leftY16 uint8
 		for mbx := 0; mbx < mbw; mbx++ {
 			lumaTarget := makeLumaTargetMB(readPixel, bounds, mbx, mby)
+			lumaBlocks := makeLumaTargetBlocks(&lumaTarget)
 			mode := vp8MBMode{
 				cMode: chooseVP8ChromaMode(readPixel, bounds, mbx, mby, recCb, recCr, cStride, quant, rd, &leftUV, &upUV[mbx]),
 			}
@@ -1757,8 +1758,8 @@ func analyzeVP8Modes(readPixel pixelReader, bounds image.Rectangle, mbw int, mbh
 			savedLeftY16 := leftY16
 			savedUpY16 := upY16[mbx]
 
-			y16Mode, y16Score := chooseVP8Y16Mode(&lumaTarget, mbx, mby, recY, yStride, quant, rd, &leftY, &upY[mbx], &leftY16, &upY16[mbx])
-			y4Score := chooseVP8Y4Modes(&lumaTarget, mbx, mby, recY, yStride, quant, rd, &leftPred, &upPred[mbx], &leftY, &upY[mbx], &mode)
+			y16Mode, y16Score := chooseVP8Y16Mode(&lumaBlocks, mbx, mby, recY, yStride, quant, rd, &leftY, &upY[mbx], &leftY16, &upY16[mbx])
+			y4Score := chooseVP8Y4Modes(&lumaBlocks, mbx, mby, recY, yStride, quant, rd, &leftPred, &upPred[mbx], &leftY, &upY[mbx], &mode)
 			if y16Score <= y4Score {
 				leftPred = savedLeftPred
 				upPred[mbx] = savedUpPred
@@ -2005,7 +2006,7 @@ func processVP8ChromaPlane(enc *vp8BoolEncoder, target []uint8, mbx int, mby int
 	}
 }
 
-func chooseVP8Y4Modes(target *lumaTargetMB, mbx int, mby int, recY []uint8, stride int, quant vp8Quant, rd vp8RDConfig, leftPred *[4]uint8, upPred *[4]uint8, leftNZ *[4]uint8, upNZ *[4]uint8, mode *vp8MBMode) int64 {
+func chooseVP8Y4Modes(target *lumaTargetBlocks, mbx int, mby int, recY []uint8, stride int, quant vp8Quant, rd vp8RDConfig, leftPred *[4]uint8, upPred *[4]uint8, leftNZ *[4]uint8, upNZ *[4]uint8, mode *vp8MBMode) int64 {
 	score := rd.lumaScore(0, vp8BitCost(145, false))
 	for by := 0; by < 4; by++ {
 		p := leftPred[by]
@@ -2013,7 +2014,7 @@ func chooseVP8Y4Modes(target *lumaTargetMB, mbx int, mby int, recY []uint8, stri
 		for bx := 0; bx < 4; bx++ {
 			x := mbx*16 + bx*4
 			y := mby*16 + by*4
-			luma := lumaTargetBlock(target, bx, by)
+			luma := &(*target)[by*4+bx]
 			blockMode, blockScore, blockNZ := chooseVP8Y4Mode(luma, x, y, recY, stride, quant, rd, upPred[bx], p, nz+upNZ[bx])
 			mode.y4Modes[by*4+bx] = blockMode
 			pred := predictLuma4(recY, stride, x, y, blockMode)
@@ -2033,7 +2034,7 @@ func chooseVP8Y4Modes(target *lumaTargetMB, mbx int, mby int, recY []uint8, stri
 	return score
 }
 
-func chooseVP8Y4Mode(target [16]uint8, x int, y int, recY []uint8, stride int, quant vp8Quant, rd vp8RDConfig, topPred uint8, leftPred uint8, context uint8) (uint8, int64, uint8) {
+func chooseVP8Y4Mode(target *[16]uint8, x int, y int, recY []uint8, stride int, quant vp8Quant, rd vp8RDConfig, topPred uint8, leftPred uint8, context uint8) (uint8, int64, uint8) {
 	bestMode := uint8(vp8PredDC)
 	bestScore := int64(1<<63 - 1)
 	bestNZ := uint8(0)
@@ -2118,7 +2119,7 @@ func vp8BitCost(prob uint8, bit bool) int64 {
 	return vp8BitCostTable[prob][0]
 }
 
-func chooseVP8Y16Mode(target *lumaTargetMB, mbx int, mby int, recY []uint8, stride int, quant vp8Quant, rd vp8RDConfig, left *[4]uint8, up *[4]uint8, leftY16 *uint8, upY16 *uint8) (uint8, int64) {
+func chooseVP8Y16Mode(target *lumaTargetBlocks, mbx int, mby int, recY []uint8, stride int, quant vp8Quant, rd vp8RDConfig, left *[4]uint8, up *[4]uint8, leftY16 *uint8, upY16 *uint8) (uint8, int64) {
 	bestMode := vp8PredDC
 	bestScore := int64(1<<63 - 1)
 	modes, nModes := vp8CandidatePredModes(mbx, mby)
@@ -2133,16 +2134,16 @@ func chooseVP8Y16Mode(target *lumaTargetMB, mbx int, mby int, recY []uint8, stri
 	return bestMode, bestScore
 }
 
-func scoreLuma16RD(target *lumaTargetMB, mbx int, mby int, recY []uint8, stride int, quant vp8Quant, rd vp8RDConfig, left *[4]uint8, up *[4]uint8, y16Context uint8, mode uint8) int64 {
+func scoreLuma16RD(target *lumaTargetBlocks, mbx int, mby int, recY []uint8, stride int, quant vp8Quant, rd vp8RDConfig, left *[4]uint8, up *[4]uint8, y16Context uint8, mode uint8) int64 {
 	pred16 := predictLuma16(recY, stride, mbx, mby, mode)
 	var transformed [16][16]int
 	var y2Input [16]int
 	for by := 0; by < 4; by++ {
 		for bx := 0; bx < 4; bx++ {
-			pred := subLuma16Block(pred16, bx, by)
-			residual := lumaResidualBlockFromTarget(lumaTargetBlock(target, bx, by), pred)
-			block := forwardDCT4(residual)
 			index := by*4 + bx
+			pred := subLuma16Block(pred16, bx, by)
+			residual := lumaResidualBlockFromTarget(&(*target)[index], pred)
+			block := forwardDCT4(residual)
 			transformed[index] = block
 			y2Input[index] = block[0]
 		}
@@ -2164,7 +2165,7 @@ func scoreLuma16RD(target *lumaTargetMB, mbx int, mby int, recY []uint8, stride 
 			reconCoeff := dequantizeVP8Block(coeff, 0, quant.y1AC)
 			reconCoeff[0] = y2Recon[index]
 			recon := inverseDCT4(subLuma16Block(pred16, bx, by), reconCoeff)
-			distortion += scoreLuma4FromTarget(lumaTargetBlock(target, bx, by), recon)
+			distortion += scoreLuma4FromTarget(&(*target)[index], recon)
 			if hasNonZeroBlockCoeffFrom(coeff, 1) {
 				nz = 1
 				localUp[bx] = 1
@@ -2470,6 +2471,8 @@ type lumaTargetMB struct {
 	y [256]uint8
 }
 
+type lumaTargetBlocks [16][16]uint8
+
 func makeLumaTargetMB(readPixel pixelReader, bounds image.Rectangle, mbx int, mby int) lumaTargetMB {
 	var target lumaTargetMB
 	baseX := mbx * 16
@@ -2498,15 +2501,20 @@ func lumaTargetMBInBounds(bounds image.Rectangle, baseX int, baseY int) bool {
 	return baseX >= 0 && baseY >= 0 && baseX+16 <= bounds.Dx() && baseY+16 <= bounds.Dy()
 }
 
-func lumaTargetBlock(target *lumaTargetMB, bx int, by int) [16]uint8 {
-	var block [16]uint8
-	for y := 0; y < 4; y++ {
-		copy(block[y*4:y*4+4], target.y[(by*4+y)*16+bx*4:(by*4+y)*16+bx*4+4])
+func makeLumaTargetBlocks(target *lumaTargetMB) lumaTargetBlocks {
+	var blocks lumaTargetBlocks
+	for by := 0; by < 4; by++ {
+		for bx := 0; bx < 4; bx++ {
+			block := &blocks[by*4+bx]
+			for y := 0; y < 4; y++ {
+				copy(block[y*4:y*4+4], target.y[(by*4+y)*16+bx*4:(by*4+y)*16+bx*4+4])
+			}
+		}
 	}
-	return block
+	return blocks
 }
 
-func lumaResidualBlockFromTarget(target [16]uint8, pred [16]uint8) [16]int {
+func lumaResidualBlockFromTarget(target *[16]uint8, pred [16]uint8) [16]int {
 	var residual [16]int
 	for i := range residual {
 		residual[i] = int(target[i]) - int(pred[i])
@@ -2514,7 +2522,7 @@ func lumaResidualBlockFromTarget(target [16]uint8, pred [16]uint8) [16]int {
 	return residual
 }
 
-func scoreLuma4FromTarget(target [16]uint8, block [16]uint8) int64 {
+func scoreLuma4FromTarget(target *[16]uint8, block [16]uint8) int64 {
 	var score int64
 	for i := range block {
 		score += squareInt(int(target[i]) - int(block[i]))

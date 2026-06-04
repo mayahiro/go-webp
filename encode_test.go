@@ -529,7 +529,8 @@ func TestVP8Y16ModeSelectionChoosesVertical(t *testing.T) {
 	var left, up [4]uint8
 	var leftY16, upY16 uint8
 	target := makeLumaTargetMB(pixelReaderFor(img), img.Bounds(), 0, 1)
-	mode, score := chooseVP8Y16Mode(&target, 0, 1, recY, 16, quant, rd, &left, &up, &leftY16, &upY16)
+	blocks := makeLumaTargetBlocks(&target)
+	mode, score := chooseVP8Y16Mode(&blocks, 0, 1, recY, 16, quant, rd, &left, &up, &leftY16, &upY16)
 	if mode != vp8PredVE {
 		t.Fatalf("Y16 mode = %d, want vertical", mode)
 	}
@@ -575,7 +576,7 @@ func TestVP8Y4ModeSelectionChoosesVertical(t *testing.T) {
 			target[yy*4+xx] = rgbToLuma(c.R, c.G, c.B)
 		}
 	}
-	mode, score, nz := chooseVP8Y4Mode(target, x, y, recY, stride, quant, rd, vp8PredVE, vp8PredVE, 0)
+	mode, score, nz := chooseVP8Y4Mode(&target, x, y, recY, stride, quant, rd, vp8PredVE, vp8PredVE, 0)
 	if mode != vp8PredVE {
 		t.Fatalf("Y4 mode = %d, want vertical", mode)
 	}
