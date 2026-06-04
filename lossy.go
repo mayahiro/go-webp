@@ -1186,6 +1186,7 @@ type vp8LoopFilter struct {
 }
 
 type vp8EncodeBuffers struct {
+	rec   []uint8
 	recY  []uint8
 	recCb []uint8
 	recCr []uint8
@@ -1208,17 +1209,19 @@ const (
 func newVP8EncodeBuffers(mbw int, mbh int) *vp8EncodeBuffers {
 	yStride := mbw * 16
 	cStride := mbw * 8
+	ySize := yStride * mbh * 16
+	cSize := cStride * mbh * 8
+	rec := make([]uint8, ySize+2*cSize)
 	return &vp8EncodeBuffers{
-		recY:  make([]uint8, yStride*mbh*16),
-		recCb: make([]uint8, cStride*mbh*8),
-		recCr: make([]uint8, cStride*mbh*8),
+		rec:   rec,
+		recY:  rec[:ySize],
+		recCb: rec[ySize : ySize+cSize],
+		recCr: rec[ySize+cSize:],
 	}
 }
 
 func (b *vp8EncodeBuffers) clear() {
-	clear(b.recY)
-	clear(b.recCb)
-	clear(b.recCr)
+	clear(b.rec)
 }
 
 func vp8LoopFilterForIndex(qIndex int) vp8LoopFilter {
