@@ -1246,8 +1246,20 @@ func vp8LoopFilterForQuant(quant vp8Quant) vp8LoopFilter {
 	}
 }
 
-func vp8ResidualPartitionCapacity(width int, height int) int {
-	capacity := width * height
+func vp8ResidualPartitionCapacity(width int, height int, qIndex int) int {
+	pixels := width * height
+	divisor := 2
+	switch {
+	case qIndex <= 8:
+		divisor = 1
+	case qIndex <= 32:
+		divisor = 2
+	case qIndex <= 64:
+		divisor = 3
+	default:
+		divisor = 4
+	}
+	capacity := pixels / divisor
 	if capacity < 1024 {
 		return 1024
 	}
@@ -1808,7 +1820,7 @@ func encodeVP8Residuals(readPixel pixelReader, bounds image.Rectangle, width int
 	recCb := work.recCb
 	recCr := work.recCr
 
-	enc := newVP8BoolEncoderWithCapacity(vp8ResidualPartitionCapacity(width, height))
+	enc := newVP8BoolEncoderWithCapacity(vp8ResidualPartitionCapacity(width, height, quant.qIndex))
 	upY := make([][4]uint8, mbw)
 	upUV := make([][4]uint8, mbw)
 	upY16 := make([]uint8, mbw)

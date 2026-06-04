@@ -224,6 +224,26 @@ func TestVP8LoopFilterTracksQualityMapping(t *testing.T) {
 	}
 }
 
+func TestVP8ResidualPartitionCapacityTracksQualityAndBounds(t *testing.T) {
+	if got := vp8ResidualPartitionCapacity(8, 8, qualityToVP8QIndex(75)); got != 1024 {
+		t.Fatalf("small image capacity = %d, want 1024", got)
+	}
+	if got := vp8ResidualPartitionCapacity(1024, 1024, qualityToVP8QIndex(100)); got != 1<<20 {
+		t.Fatalf("high quality capacity = %d, want %d", got, 1<<20)
+	}
+	medium := vp8ResidualPartitionCapacity(1024, 1024, qualityToVP8QIndex(75))
+	low := vp8ResidualPartitionCapacity(1024, 1024, qualityToVP8QIndex(25))
+	if medium != 1<<19 {
+		t.Fatalf("medium quality capacity = %d, want %d", medium, 1<<19)
+	}
+	if low >= medium {
+		t.Fatalf("low quality capacity = %d, want less than medium quality %d", low, medium)
+	}
+	if got := vp8ResidualPartitionCapacity(maxVP8Dimension, maxVP8Dimension, qualityToVP8QIndex(100)); got != 1<<20 {
+		t.Fatalf("large image capacity = %d, want capped at %d", got, 1<<20)
+	}
+}
+
 func TestChromaSampleFilteredUsesNeighboringPixels(t *testing.T) {
 	img := image.NewNRGBA(image.Rect(0, 0, 4, 4))
 	red := color.NRGBA{R: 255, G: 0, B: 0, A: 255}
