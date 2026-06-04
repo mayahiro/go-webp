@@ -318,6 +318,45 @@ func TestChromaSampleFilteredInBoundsMatchesClampedPath(t *testing.T) {
 	}
 }
 
+func TestChromaTargetMBMatchesChromaSamples(t *testing.T) {
+	img := image.NewNRGBA(image.Rect(3, 5, 30, 36))
+	for y := img.Rect.Min.Y; y < img.Rect.Max.Y; y++ {
+		for x := img.Rect.Min.X; x < img.Rect.Max.X; x++ {
+			img.SetNRGBA(x, y, color.NRGBA{
+				R: uint8(x*13 + y*7),
+				G: uint8(y*17 + x*3),
+				B: uint8((x+y)*11 + x*y),
+				A: 255,
+			})
+		}
+	}
+
+	readPixel := pixelReaderFor(img)
+	bounds := img.Bounds()
+	for _, tc := range []struct {
+		mbx int
+		mby int
+	}{
+		{mbx: 0, mby: 0},
+		{mbx: 1, mby: 1},
+	} {
+		target := makeChromaTargetMB(readPixel, bounds, tc.mbx, tc.mby)
+		for y := 0; y < 8; y++ {
+			for x := 0; x < 8; x++ {
+				sampleX := tc.mbx*16 + x*2
+				sampleY := tc.mby*16 + y*2
+				i := y*8 + x
+				if got, want := target.cb[i], chromaSample(readPixel, bounds, sampleX, sampleY, true); got != want {
+					t.Fatalf("target Cb mb=(%d,%d) xy=(%d,%d) = %d, want %d", tc.mbx, tc.mby, x, y, got, want)
+				}
+				if got, want := target.cr[i], chromaSample(readPixel, bounds, sampleX, sampleY, false); got != want {
+					t.Fatalf("target Cr mb=(%d,%d) xy=(%d,%d) = %d, want %d", tc.mbx, tc.mby, x, y, got, want)
+				}
+			}
+		}
+	}
+}
+
 func TestEncodeLossyEnablesNormalLoopFilterWithDelta(t *testing.T) {
 	const quality = 25
 

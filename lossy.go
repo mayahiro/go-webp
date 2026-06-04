@@ -1950,16 +1950,18 @@ func processVP8Luma16MB(enc *vp8BoolEncoder, readPixel pixelReader, bounds image
 }
 
 func reconstructVP8ChromaMB(readPixel pixelReader, bounds image.Rectangle, mbx int, mby int, recCb []uint8, recCr []uint8, stride int, quant vp8Quant, mode vp8MBMode) {
-	processVP8ChromaPlane(nil, readPixel, bounds, mbx, mby, recCb, stride, quant, nil, nil, mode.cMode, true, nil, nil)
-	processVP8ChromaPlane(nil, readPixel, bounds, mbx, mby, recCr, stride, quant, nil, nil, mode.cMode, false, nil, nil)
+	target := makeChromaTargetMB(readPixel, bounds, mbx, mby)
+	processVP8ChromaPlane(nil, target.cb[:], mbx, mby, recCb, stride, quant, nil, nil, mode.cMode, true, nil, nil)
+	processVP8ChromaPlane(nil, target.cr[:], mbx, mby, recCr, stride, quant, nil, nil, mode.cMode, false, nil, nil)
 }
 
 func processVP8ChromaMB(enc *vp8BoolEncoder, readPixel pixelReader, bounds image.Rectangle, mbx int, mby int, recCb []uint8, recCr []uint8, stride int, quant vp8Quant, mode vp8MBMode, left *[4]uint8, up *[4]uint8, tokenProbs *vp8TokenProbs, stats *vp8TokenStats) {
-	processVP8ChromaPlane(enc, readPixel, bounds, mbx, mby, recCb, stride, quant, left, up, mode.cMode, true, tokenProbs, stats)
-	processVP8ChromaPlane(enc, readPixel, bounds, mbx, mby, recCr, stride, quant, left, up, mode.cMode, false, tokenProbs, stats)
+	target := makeChromaTargetMB(readPixel, bounds, mbx, mby)
+	processVP8ChromaPlane(enc, target.cb[:], mbx, mby, recCb, stride, quant, left, up, mode.cMode, true, tokenProbs, stats)
+	processVP8ChromaPlane(enc, target.cr[:], mbx, mby, recCr, stride, quant, left, up, mode.cMode, false, tokenProbs, stats)
 }
 
-func processVP8ChromaPlane(enc *vp8BoolEncoder, readPixel pixelReader, bounds image.Rectangle, mbx int, mby int, rec []uint8, stride int, quant vp8Quant, left *[4]uint8, up *[4]uint8, mode uint8, cb bool, tokenProbs *vp8TokenProbs, stats *vp8TokenStats) {
+func processVP8ChromaPlane(enc *vp8BoolEncoder, target []uint8, mbx int, mby int, rec []uint8, stride int, quant vp8Quant, left *[4]uint8, up *[4]uint8, mode uint8, cb bool, tokenProbs *vp8TokenProbs, stats *vp8TokenStats) {
 	var localLeft [4]uint8
 	var localUp [4]uint8
 	if left == nil {
@@ -1979,7 +1981,7 @@ func processVP8ChromaPlane(enc *vp8BoolEncoder, readPixel pixelReader, bounds im
 			x := mbx*8 + bx*4
 			y := mby*8 + by*4
 			pred := subChroma8Block(pred8, bx, by)
-			residual := chromaResidualBlock(readPixel, bounds, mbx*16+bx*8, mby*16+by*8, pred, cb)
+			residual := chromaResidualBlockFromTarget(target, bx, by, pred)
 			coeff := quantizeVP8Block(residual, quant.uvDC, quant.uvAC)
 			blockNZ := uint8(0)
 			context := nz + up[base+bx]
@@ -2189,9 +2191,10 @@ func chooseVP8ChromaMode(readPixel pixelReader, bounds image.Rectangle, mbx int,
 	bestMode := vp8PredDC
 	bestScore := int64(1<<63 - 1)
 	modes, nModes := vp8CandidatePredModes(mbx, mby)
+	target := makeChromaTargetMB(readPixel, bounds, mbx, mby)
 	for i := 0; i < nModes; i++ {
 		mode := modes[i]
-		score := scoreChromaRD(readPixel, bounds, mbx, mby, recCb, recCr, stride, quant, rd, left, up, mode)
+		score := scoreChromaRD(&target, mbx, mby, recCb, recCr, stride, quant, rd, left, up, mode)
 		if score < bestScore {
 			bestScore = score
 			bestMode = mode
@@ -2200,16 +2203,16 @@ func chooseVP8ChromaMode(readPixel pixelReader, bounds image.Rectangle, mbx int,
 	return bestMode
 }
 
-func scoreChromaRD(readPixel pixelReader, bounds image.Rectangle, mbx int, mby int, recCb []uint8, recCr []uint8, stride int, quant vp8Quant, rd vp8RDConfig, left *[4]uint8, up *[4]uint8, mode uint8) int64 {
+func scoreChromaRD(target *chromaTargetMB, mbx int, mby int, recCb []uint8, recCr []uint8, stride int, quant vp8Quant, rd vp8RDConfig, left *[4]uint8, up *[4]uint8, mode uint8) int64 {
 	localLeft := *left
 	localUp := *up
 	bitCost := vp8ChromaModeCost(mode)
-	distortion, cbBits := scoreChromaPlaneRD(readPixel, bounds, mbx, mby, recCb, stride, quant, &localLeft, &localUp, mode, true)
-	crDistortion, crBits := scoreChromaPlaneRD(readPixel, bounds, mbx, mby, recCr, stride, quant, &localLeft, &localUp, mode, false)
+	distortion, cbBits := scoreChromaPlaneRD(target.cb[:], mbx, mby, recCb, stride, quant, &localLeft, &localUp, mode, true)
+	crDistortion, crBits := scoreChromaPlaneRD(target.cr[:], mbx, mby, recCr, stride, quant, &localLeft, &localUp, mode, false)
 	return rd.chromaScore(distortion+crDistortion, bitCost+cbBits+crBits)
 }
 
-func scoreChromaPlaneRD(readPixel pixelReader, bounds image.Rectangle, mbx int, mby int, rec []uint8, stride int, quant vp8Quant, left *[4]uint8, up *[4]uint8, mode uint8, cb bool) (int64, int64) {
+func scoreChromaPlaneRD(target []uint8, mbx int, mby int, rec []uint8, stride int, quant vp8Quant, left *[4]uint8, up *[4]uint8, mode uint8, cb bool) (int64, int64) {
 	base := 0
 	if !cb {
 		base = 2
@@ -2221,11 +2224,11 @@ func scoreChromaPlaneRD(readPixel pixelReader, bounds image.Rectangle, mbx int, 
 		nz := left[base+by]
 		for bx := 0; bx < 2; bx++ {
 			pred := subChroma8Block(pred8, bx, by)
-			residual := chromaResidualBlock(readPixel, bounds, mbx*16+bx*8, mby*16+by*8, pred, cb)
+			residual := chromaResidualBlockFromTarget(target, bx, by, pred)
 			coeff := quantizeVP8Block(residual, quant.uvDC, quant.uvAC)
 			bitCost += vp8BlockBitCost(vp8PlaneUV, nz+up[base+bx], coeff)
 			recon := reconstructVP8Block(pred, coeff, quant.uvDC, quant.uvAC)
-			distortion += scoreChroma4(readPixel, bounds, mbx*16+bx*8, mby*16+by*8, recon, cb)
+			distortion += scoreChroma4FromTarget(target, bx, by, recon)
 			if hasNonZeroBlockCoeff(coeff) {
 				nz = 1
 				up[base+bx] = 1
@@ -2239,11 +2242,11 @@ func scoreChromaPlaneRD(readPixel pixelReader, bounds image.Rectangle, mbx int, 
 	return distortion, bitCost
 }
 
-func scoreChroma4(readPixel pixelReader, bounds image.Rectangle, x int, y int, block [16]uint8, cb bool) int64 {
+func scoreChroma4FromTarget(target []uint8, bx int, by int, block [16]uint8) int64 {
 	var score int64
 	for yy := 0; yy < 4; yy++ {
 		for xx := 0; xx < 4; xx++ {
-			got := chromaSample(readPixel, bounds, x+xx*2, y+yy*2, cb)
+			got := target[(by*4+yy)*8+bx*4+xx]
 			score += squareInt(int(got) - int(block[yy*4+xx]))
 		}
 	}
@@ -2483,6 +2486,37 @@ func chromaResidualBlock(readPixel pixelReader, bounds image.Rectangle, x int, y
 	return residual
 }
 
+type chromaTargetMB struct {
+	cb [64]uint8
+	cr [64]uint8
+}
+
+func makeChromaTargetMB(readPixel pixelReader, bounds image.Rectangle, mbx int, mby int) chromaTargetMB {
+	var target chromaTargetMB
+	baseX := mbx * 16
+	baseY := mby * 16
+	for y := 0; y < 8; y++ {
+		for x := 0; x < 8; x++ {
+			cb, cr := chromaSamplePair(readPixel, bounds, baseX+x*2, baseY+y*2)
+			i := y*8 + x
+			target.cb[i] = cb
+			target.cr[i] = cr
+		}
+	}
+	return target
+}
+
+func chromaResidualBlockFromTarget(target []uint8, bx int, by int, pred [16]uint8) [16]int {
+	var residual [16]int
+	for yy := 0; yy < 4; yy++ {
+		for xx := 0; xx < 4; xx++ {
+			targetValue := target[(by*4+yy)*8+bx*4+xx]
+			residual[yy*4+xx] = int(targetValue) - int(pred[yy*4+xx])
+		}
+	}
+	return residual
+}
+
 var chromaSampleFilterWeights = [16]int{
 	1, 2, 2, 1,
 	2, 4, 4, 2,
@@ -2492,6 +2526,53 @@ var chromaSampleFilterWeights = [16]int{
 
 func chromaSample(readPixel pixelReader, bounds image.Rectangle, x int, y int, cb bool) uint8 {
 	return chromaSampleFiltered(readPixel, bounds, x, y, cb)
+}
+
+func chromaSamplePair(readPixel pixelReader, bounds image.Rectangle, x int, y int) (uint8, uint8) {
+	if chromaSampleWindowInBounds(bounds, x, y) {
+		return chromaSamplePairInBounds(readPixel, bounds.Min.X+x, bounds.Min.Y+y)
+	}
+	return chromaSamplePairClamped(readPixel, bounds, x, y)
+}
+
+func chromaSamplePairInBounds(readPixel pixelReader, x int, y int) (uint8, uint8) {
+	centerCb, centerCr, cbMin, cbMax, crMin, crMax := chromaCenterStatsInBounds(readPixel, x, y)
+	cbSimple := cbMax-cbMin <= 16
+	crSimple := crMax-crMin <= 16
+	cb := uint8((centerCb + 2) / 4)
+	cr := uint8((centerCr + 2) / 4)
+	if cbSimple && crSimple {
+		return cb, cr
+	}
+
+	filterCb, filterCr := chromaFilterSumsInBounds(readPixel, x, y)
+	if !cbSimple {
+		cb = uint8((filterCb + 18) / 36)
+	}
+	if !crSimple {
+		cr = uint8((filterCr + 18) / 36)
+	}
+	return cb, cr
+}
+
+func chromaSamplePairClamped(readPixel pixelReader, bounds image.Rectangle, x int, y int) (uint8, uint8) {
+	centerCb, centerCr, cbMin, cbMax, crMin, crMax := chromaCenterStatsClamped(readPixel, bounds, x, y)
+	cbSimple := cbMax-cbMin <= 16
+	crSimple := crMax-crMin <= 16
+	cb := uint8((centerCb + 2) / 4)
+	cr := uint8((centerCr + 2) / 4)
+	if cbSimple && crSimple {
+		return cb, cr
+	}
+
+	filterCb, filterCr := chromaFilterSumsClamped(readPixel, bounds, x, y)
+	if !cbSimple {
+		cb = uint8((filterCb + 18) / 36)
+	}
+	if !crSimple {
+		cr = uint8((filterCr + 18) / 36)
+	}
+	return cb, cr
 }
 
 func chromaSampleFiltered(readPixel pixelReader, bounds image.Rectangle, x int, y int, cb bool) uint8 {
@@ -2506,63 +2587,97 @@ func chromaSampleWindowInBounds(bounds image.Rectangle, x int, y int) bool {
 }
 
 func chromaSampleFilteredInBounds(readPixel pixelReader, x int, y int, cb bool) uint8 {
-	centerSum := 0
-	minValue := 256
-	maxValue := -1
-	for yy := 0; yy < 2; yy++ {
-		for xx := 0; xx < 2; xx++ {
-			value := chromaValue(readPixel, x+xx, y+yy, cb)
-			centerSum += value
-			if value < minValue {
-				minValue = value
-			}
-			if value > maxValue {
-				maxValue = value
-			}
+	centerCb, centerCr, cbMin, cbMax, crMin, crMax := chromaCenterStatsInBounds(readPixel, x, y)
+	if cb {
+		if cbMax-cbMin <= 16 {
+			return uint8((centerCb + 2) / 4)
 		}
+		filterCb, _ := chromaFilterSumsInBounds(readPixel, x, y)
+		return uint8((filterCb + 18) / 36)
 	}
-	if maxValue-minValue <= 16 {
-		return uint8((centerSum + 2) / 4)
+	if crMax-crMin <= 16 {
+		return uint8((centerCr + 2) / 4)
 	}
-
-	filterSum := 0
-	for yy := 0; yy < 4; yy++ {
-		for xx := 0; xx < 4; xx++ {
-			value := chromaValue(readPixel, x+xx-1, y+yy-1, cb)
-			filterSum += chromaSampleFilterWeights[yy*4+xx] * value
-		}
-	}
-	return uint8((filterSum + 18) / 36)
+	_, filterCr := chromaFilterSumsInBounds(readPixel, x, y)
+	return uint8((filterCr + 18) / 36)
 }
 
 func chromaSampleFilteredClamped(readPixel pixelReader, bounds image.Rectangle, x int, y int, cb bool) uint8 {
-	centerSum := 0
-	minValue := 256
-	maxValue := -1
+	centerCb, centerCr, cbMin, cbMax, crMin, crMax := chromaCenterStatsClamped(readPixel, bounds, x, y)
+	if cb {
+		if cbMax-cbMin <= 16 {
+			return uint8((centerCb + 2) / 4)
+		}
+		filterCb, _ := chromaFilterSumsClamped(readPixel, bounds, x, y)
+		return uint8((filterCb + 18) / 36)
+	}
+	if crMax-crMin <= 16 {
+		return uint8((centerCr + 2) / 4)
+	}
+	_, filterCr := chromaFilterSumsClamped(readPixel, bounds, x, y)
+	return uint8((filterCr + 18) / 36)
+}
+
+func chromaCenterStatsInBounds(readPixel pixelReader, x int, y int) (int, int, int, int, int, int) {
+	cbSum, crSum := 0, 0
+	cbMin, crMin := 256, 256
+	cbMax, crMax := -1, -1
 	for yy := 0; yy < 2; yy++ {
 		for xx := 0; xx < 2; xx++ {
-			value := chromaValueAt(readPixel, bounds, x+xx, y+yy, cb)
-			centerSum += value
-			if value < minValue {
-				minValue = value
-			}
-			if value > maxValue {
-				maxValue = value
-			}
+			cb, cr := chromaPair(readPixel, x+xx, y+yy)
+			cbSum += int(cb)
+			crSum += int(cr)
+			cbMin = minInt(cbMin, int(cb))
+			cbMax = maxInt(cbMax, int(cb))
+			crMin = minInt(crMin, int(cr))
+			crMax = maxInt(crMax, int(cr))
 		}
 	}
-	if maxValue-minValue <= 16 {
-		return uint8((centerSum + 2) / 4)
-	}
+	return cbSum, crSum, cbMin, cbMax, crMin, crMax
+}
 
-	filterSum := 0
+func chromaCenterStatsClamped(readPixel pixelReader, bounds image.Rectangle, x int, y int) (int, int, int, int, int, int) {
+	cbSum, crSum := 0, 0
+	cbMin, crMin := 256, 256
+	cbMax, crMax := -1, -1
+	for yy := 0; yy < 2; yy++ {
+		for xx := 0; xx < 2; xx++ {
+			cb, cr := chromaPairAt(readPixel, bounds, x+xx, y+yy)
+			cbSum += int(cb)
+			crSum += int(cr)
+			cbMin = minInt(cbMin, int(cb))
+			cbMax = maxInt(cbMax, int(cb))
+			crMin = minInt(crMin, int(cr))
+			crMax = maxInt(crMax, int(cr))
+		}
+	}
+	return cbSum, crSum, cbMin, cbMax, crMin, crMax
+}
+
+func chromaFilterSumsInBounds(readPixel pixelReader, x int, y int) (int, int) {
+	filterCb, filterCr := 0, 0
 	for yy := 0; yy < 4; yy++ {
 		for xx := 0; xx < 4; xx++ {
-			value := chromaValueAt(readPixel, bounds, x+xx-1, y+yy-1, cb)
-			filterSum += chromaSampleFilterWeights[yy*4+xx] * value
+			cb, cr := chromaPair(readPixel, x+xx-1, y+yy-1)
+			weight := chromaSampleFilterWeights[yy*4+xx]
+			filterCb += weight * int(cb)
+			filterCr += weight * int(cr)
 		}
 	}
-	return uint8((filterSum + 18) / 36)
+	return filterCb, filterCr
+}
+
+func chromaFilterSumsClamped(readPixel pixelReader, bounds image.Rectangle, x int, y int) (int, int) {
+	filterCb, filterCr := 0, 0
+	for yy := 0; yy < 4; yy++ {
+		for xx := 0; xx < 4; xx++ {
+			cb, cr := chromaPairAt(readPixel, bounds, x+xx-1, y+yy-1)
+			weight := chromaSampleFilterWeights[yy*4+xx]
+			filterCb += weight * int(cb)
+			filterCr += weight * int(cr)
+		}
+	}
+	return filterCb, filterCr
 }
 
 func chromaValueAt(readPixel pixelReader, bounds image.Rectangle, x int, y int, cb bool) int {
@@ -2581,6 +2696,16 @@ func chromaValueForPixel(c color.NRGBA, cb bool) int {
 		return int(u)
 	}
 	return int(v)
+}
+
+func chromaPair(readPixel pixelReader, x int, y int) (uint8, uint8) {
+	c := readPixel(x, y)
+	return rgbToChroma(c.R, c.G, c.B)
+}
+
+func chromaPairAt(readPixel pixelReader, bounds image.Rectangle, x int, y int) (uint8, uint8) {
+	c := samplePixel(readPixel, bounds, x, y)
+	return rgbToChroma(c.R, c.G, c.B)
 }
 
 func samplePixel(readPixel pixelReader, bounds image.Rectangle, x int, y int) color.NRGBA {
