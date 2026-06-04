@@ -2474,6 +2474,17 @@ func makeLumaTargetMB(readPixel pixelReader, bounds image.Rectangle, mbx int, mb
 	var target lumaTargetMB
 	baseX := mbx * 16
 	baseY := mby * 16
+	if lumaTargetMBInBounds(bounds, baseX, baseY) {
+		absX := bounds.Min.X + baseX
+		absY := bounds.Min.Y + baseY
+		for y := 0; y < 16; y++ {
+			for x := 0; x < 16; x++ {
+				c := readPixel(absX+x, absY+y)
+				target.y[y*16+x] = rgbToLuma(c.R, c.G, c.B)
+			}
+		}
+		return target
+	}
 	for y := 0; y < 16; y++ {
 		for x := 0; x < 16; x++ {
 			c := samplePixel(readPixel, bounds, baseX+x, baseY+y)
@@ -2481,6 +2492,10 @@ func makeLumaTargetMB(readPixel pixelReader, bounds image.Rectangle, mbx int, mb
 		}
 	}
 	return target
+}
+
+func lumaTargetMBInBounds(bounds image.Rectangle, baseX int, baseY int) bool {
+	return baseX >= 0 && baseY >= 0 && baseX+16 <= bounds.Dx() && baseY+16 <= bounds.Dy()
 }
 
 func lumaTargetBlock(target *lumaTargetMB, bx int, by int) [16]uint8 {
@@ -2527,6 +2542,19 @@ func makeChromaTargetMB(readPixel pixelReader, bounds image.Rectangle, mbx int, 
 	var target chromaTargetMB
 	baseX := mbx * 16
 	baseY := mby * 16
+	if chromaTargetMBInBounds(bounds, baseX, baseY) {
+		absX := bounds.Min.X + baseX
+		absY := bounds.Min.Y + baseY
+		for y := 0; y < 8; y++ {
+			for x := 0; x < 8; x++ {
+				cb, cr := chromaSamplePairInBounds(readPixel, absX+x*2, absY+y*2)
+				i := y*8 + x
+				target.cb[i] = cb
+				target.cr[i] = cr
+			}
+		}
+		return target
+	}
 	for y := 0; y < 8; y++ {
 		for x := 0; x < 8; x++ {
 			cb, cr := chromaSamplePair(readPixel, bounds, baseX+x*2, baseY+y*2)
@@ -2536,6 +2564,10 @@ func makeChromaTargetMB(readPixel pixelReader, bounds image.Rectangle, mbx int, 
 		}
 	}
 	return target
+}
+
+func chromaTargetMBInBounds(bounds image.Rectangle, baseX int, baseY int) bool {
+	return baseX > 0 && baseY > 0 && baseX+16 < bounds.Dx() && baseY+16 < bounds.Dy()
 }
 
 func chromaResidualBlockFromTarget(target []uint8, bx int, by int, pred [16]uint8) [16]int {

@@ -350,7 +350,7 @@ func TestChromaSampleFilteredInBoundsMatchesClampedPath(t *testing.T) {
 }
 
 func TestChromaTargetMBMatchesChromaSamples(t *testing.T) {
-	img := image.NewNRGBA(image.Rect(3, 5, 30, 36))
+	img := image.NewNRGBA(image.Rect(3, 5, 70, 74))
 	for y := img.Rect.Min.Y; y < img.Rect.Max.Y; y++ {
 		for x := img.Rect.Min.X; x < img.Rect.Max.X; x++ {
 			img.SetNRGBA(x, y, color.NRGBA{
@@ -370,6 +370,7 @@ func TestChromaTargetMBMatchesChromaSamples(t *testing.T) {
 	}{
 		{mbx: 0, mby: 0},
 		{mbx: 1, mby: 1},
+		{mbx: 3, mby: 3},
 	} {
 		target := makeChromaTargetMB(readPixel, bounds, tc.mbx, tc.mby)
 		for y := 0; y < 8; y++ {
@@ -382,6 +383,44 @@ func TestChromaTargetMBMatchesChromaSamples(t *testing.T) {
 				}
 				if got, want := target.cr[i], chromaSample(readPixel, bounds, sampleX, sampleY, false); got != want {
 					t.Fatalf("target Cr mb=(%d,%d) xy=(%d,%d) = %d, want %d", tc.mbx, tc.mby, x, y, got, want)
+				}
+			}
+		}
+	}
+}
+
+func TestLumaTargetMBMatchesSampledLuma(t *testing.T) {
+	img := image.NewNRGBA(image.Rect(3, 5, 70, 74))
+	for y := img.Rect.Min.Y; y < img.Rect.Max.Y; y++ {
+		for x := img.Rect.Min.X; x < img.Rect.Max.X; x++ {
+			img.SetNRGBA(x, y, color.NRGBA{
+				R: uint8(x*5 + y*19),
+				G: uint8(y*7 + x*11),
+				B: uint8((x-y)*13 + x*y),
+				A: 255,
+			})
+		}
+	}
+
+	readPixel := pixelReaderFor(img)
+	bounds := img.Bounds()
+	for _, tc := range []struct {
+		mbx int
+		mby int
+	}{
+		{mbx: 0, mby: 0},
+		{mbx: 1, mby: 1},
+		{mbx: 3, mby: 3},
+	} {
+		target := makeLumaTargetMB(readPixel, bounds, tc.mbx, tc.mby)
+		for y := 0; y < 16; y++ {
+			for x := 0; x < 16; x++ {
+				sampleX := tc.mbx*16 + x
+				sampleY := tc.mby*16 + y
+				c := samplePixel(readPixel, bounds, sampleX, sampleY)
+				want := rgbToLuma(c.R, c.G, c.B)
+				if got := target.y[y*16+x]; got != want {
+					t.Fatalf("target Y mb=(%d,%d) xy=(%d,%d) = %d, want %d", tc.mbx, tc.mby, x, y, got, want)
 				}
 			}
 		}
