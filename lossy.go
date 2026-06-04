@@ -417,8 +417,7 @@ func canonicalAlphaCodeLengthCodes(lengths [alphaCodeLengthCodeCount]uint8) [alp
 }
 
 func writeAlphaResidualBits(bits *bitWriter, readPixel pixelReader, bounds image.Rectangle, width int, height int, filter byte, code alphaCode) {
-	previous := make([]uint8, width)
-	current := make([]uint8, width)
+	previous, current := makeAlphaRowPair(width)
 	for y := 0; y < height; y++ {
 		left := uint8(0)
 		for x := 0; x < width; x++ {
@@ -441,8 +440,7 @@ func writeAlphaResidualBits(bits *bitWriter, readPixel pixelReader, bounds image
 
 func writeAlphaRLEBits(bits *bitWriter, readPixel pixelReader, bounds image.Rectangle, width int, height int, filter byte, code alphaCode) {
 	var run alphaRun
-	previous := make([]uint8, width)
-	current := make([]uint8, width)
+	previous, current := makeAlphaRowPair(width)
 	for y := 0; y < height; y++ {
 		left := uint8(0)
 		for x := 0; x < width; x++ {
@@ -466,10 +464,8 @@ func writeAlphaRLEBits(bits *bitWriter, readPixel pixelReader, bounds image.Rect
 
 func writeAlphaLZ77Bits(bits *bitWriter, readPixel pixelReader, bounds image.Rectangle, width int, height int, filter byte, code alphaCode) {
 	var run alphaRun
-	previous := make([]uint8, width)
-	current := make([]uint8, width)
-	previousResidual := make([]uint8, width)
-	currentResidual := make([]uint8, width)
+	previous, current := makeAlphaRowPair(width)
+	previousResidual, currentResidual := makeAlphaRowPair(width)
 	for y := 0; y < height; y++ {
 		left := uint8(0)
 		for x := 0; x < width; x++ {
@@ -596,16 +592,26 @@ type alphaRun struct {
 	length int
 }
 
+func makeAlphaRowPair(width int) ([]uint8, []uint8) {
+	rows := make([]uint8, width*2)
+	return rows[:width], rows[width:]
+}
+
+func makeAlphaFilterRows(previous [][]uint8, current [][]uint8, width int) {
+	rows := make([]uint8, len(previous)*width*2)
+	for i := range previous {
+		start := i * width * 2
+		previous[i] = rows[start : start+width]
+		current[i] = rows[start+width : start+width*2]
+	}
+}
+
 func analyzeLossyAlpha(readPixel pixelReader, bounds image.Rectangle, width int, height int) lossyAlphaAnalysis {
 	var analysis lossyAlphaAnalysis
-	previous := make([]uint8, width)
-	current := make([]uint8, width)
+	previous, current := makeAlphaRowPair(width)
 	var previousResiduals [4][]uint8
 	var currentResiduals [4][]uint8
-	for filter := range previousResiduals {
-		previousResiduals[filter] = make([]uint8, width)
-		currentResiduals[filter] = make([]uint8, width)
-	}
+	makeAlphaFilterRows(previousResiduals[:], currentResiduals[:], width)
 	for y := 0; y < height; y++ {
 		left := uint8(0)
 		for x := 0; x < width; x++ {

@@ -59,6 +59,16 @@ func BenchmarkEncodeLossyAlphaBands512(b *testing.B) {
 	})
 }
 
+func BenchmarkEncodeLossyGradient1024(b *testing.B) {
+	benchmarkEncodeLossyCase(b, lossyBenchmarkCase{
+		name:    "Gradient1024Q75",
+		kind:    benchmarkImageGradient,
+		width:   1024,
+		height:  1024,
+		quality: 75,
+	})
+}
+
 func BenchmarkEncodeLossyFixtures(b *testing.B) {
 	for _, tc := range lossyBenchmarkCases() {
 		b.Run(tc.name, func(b *testing.B) {
