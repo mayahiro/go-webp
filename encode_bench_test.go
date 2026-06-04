@@ -70,7 +70,11 @@ func TestEncodeLossyBenchmarkFixtures(t *testing.T) {
 
 func lossyBenchmarkCases() []lossyBenchmarkCase {
 	return []lossyBenchmarkCase{
+		{name: "Gradient128Q1", kind: benchmarkImageGradient, width: 128, height: 128, quality: 1},
+		{name: "Gradient128Q50", kind: benchmarkImageGradient, width: 128, height: 128, quality: 50},
 		{name: "Gradient128Q75", kind: benchmarkImageGradient, width: 128, height: 128, quality: 75},
+		{name: "Gradient128Q90", kind: benchmarkImageGradient, width: 128, height: 128, quality: 90},
+		{name: "Gradient128Q100", kind: benchmarkImageGradient, width: 128, height: 128, quality: 100},
 		{name: "Gradient512Q75", kind: benchmarkImageGradient, width: 512, height: 512, quality: 75},
 		{name: "PhotoLike256Q75", kind: benchmarkImagePhotoLike, width: 256, height: 256, quality: 75},
 		{name: "Checker128Q75", kind: benchmarkImageChecker, width: 128, height: 128, quality: 75},

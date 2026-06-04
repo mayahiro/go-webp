@@ -170,6 +170,60 @@ func TestEncodeLossyQualityOption(t *testing.T) {
 	assertLossyVP8Frame(t, chunks[0].payload, 17, 19)
 }
 
+func TestVP8QualityToQIndexMapping(t *testing.T) {
+	cases := []struct {
+		quality int
+		want    int
+	}{
+		{quality: 100, want: 0},
+		{quality: 90, want: 7},
+		{quality: 75, want: 20},
+		{quality: 50, want: 48},
+		{quality: 1, want: 127},
+	}
+	for _, tc := range cases {
+		if got := qualityToVP8QIndex(tc.quality); got != tc.want {
+			t.Fatalf("qualityToVP8QIndex(%d) = %d, want %d", tc.quality, got, tc.want)
+		}
+	}
+	if qualityToVP8QIndex(90) >= qualityToVP8QIndex(75) {
+		t.Fatal("higher quality did not produce a lower qIndex")
+	}
+	if qualityToVP8QIndex(75) >= qualityToVP8QIndex(50) {
+		t.Fatal("quality 75 did not produce a lower qIndex than quality 50")
+	}
+}
+
+func TestVP8QuantUsesQualityDependentDeltas(t *testing.T) {
+	high := vp8QuantForIndex(qualityToVP8QIndex(90))
+	medium := vp8QuantForIndex(qualityToVP8QIndex(75))
+	low := vp8QuantForIndex(qualityToVP8QIndex(10))
+	if high.uvAC > high.y1AC {
+		t.Fatalf("high quality uvAC = %d, want <= y1AC %d", high.uvAC, high.y1AC)
+	}
+	if medium.y2AC <= medium.y1AC {
+		t.Fatalf("medium quality y2AC = %d, want > y1AC %d", medium.y2AC, medium.y1AC)
+	}
+	if low.uvAC > low.y1AC {
+		t.Fatalf("low quality uvAC = %d, want <= y1AC %d", low.uvAC, low.y1AC)
+	}
+}
+
+func TestVP8LoopFilterTracksQualityMapping(t *testing.T) {
+	high := vp8LoopFilterForIndex(qualityToVP8QIndex(90))
+	medium := vp8LoopFilterForIndex(qualityToVP8QIndex(75))
+	low := vp8LoopFilterForIndex(qualityToVP8QIndex(10))
+	if high.level >= medium.level {
+		t.Fatalf("high quality loop filter level = %d, want less than medium %d", high.level, medium.level)
+	}
+	if medium.level >= low.level {
+		t.Fatalf("medium quality loop filter level = %d, want less than low %d", medium.level, low.level)
+	}
+	if high.sharpness > low.sharpness {
+		t.Fatalf("high quality sharpness = %d, want <= low quality sharpness %d", high.sharpness, low.sharpness)
+	}
+}
+
 func TestEncodeLossyEnablesNormalLoopFilterWithDelta(t *testing.T) {
 	const quality = 25
 

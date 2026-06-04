@@ -559,7 +559,7 @@ func encodeVP8KeyFrame(readPixel pixelReader, bounds image.Rectangle, width int,
 	mbw := (width + 15) >> 4
 	mbh := (height + 15) >> 4
 	quant := vp8QuantForIndex(qIndex)
-	filter := vp8LoopFilterForIndex(qIndex)
+	filter := vp8LoopFilterForQuant(quant)
 	work := newVP8EncodeBuffers(mbw, mbh)
 	modes := analyzeVP8Modes(readPixel, bounds, mbw, mbh, quant, work)
 	work.clear()
@@ -636,11 +636,18 @@ func (b *vp8EncodeBuffers) clear() {
 }
 
 func vp8LoopFilterForIndex(qIndex int) vp8LoopFilter {
-	level := 4 + qIndex/8
+	return vp8LoopFilterForQuant(vp8QuantForIndex(qIndex))
+}
+
+func vp8LoopFilterForQuant(quant vp8Quant) vp8LoopFilter {
+	level := 4 + quant.qIndex/6
 	if level > 24 {
 		level = 24
 	}
-	sharpness := qIndex / 32
+	if quant.qIndex <= 8 {
+		level = maxInt(level-2, 0)
+	}
+	sharpness := quant.qIndex / 32
 	if sharpness > 3 {
 		sharpness = 3
 	}
@@ -1002,12 +1009,13 @@ func writeVP8Literal(enc *vp8BoolEncoder, value uint32, n uint8) {
 }
 
 type vp8Quant struct {
-	y1DC int
-	y1AC int
-	y2DC int
-	y2AC int
-	uvDC int
-	uvAC int
+	qIndex int
+	y1DC   int
+	y1AC   int
+	y2DC   int
+	y2AC   int
+	uvDC   int
+	uvAC   int
 }
 
 var vp8DCQuantTable = [...]int{
@@ -1055,19 +1063,38 @@ func vp8QuantForIndex(qIndex int) vp8Quant {
 	if qIndex > 127 {
 		qIndex = 127
 	}
+	uvIndex := clipInt(qIndex-4, 0, 117)
+	if qIndex >= 80 {
+		uvIndex = clipInt(qIndex-8, 0, 117)
+	}
+	y2ACScale := 145
+	switch {
+	case qIndex <= 16:
+		y2ACScale = 135
+	case qIndex >= 96:
+		y2ACScale = 160
+	}
 	return vp8Quant{
-		y1DC: vp8DCQuantTable[qIndex],
-		y1AC: vp8ACQuantTable[qIndex],
-		y2DC: vp8DCQuantTable[qIndex] * 2,
-		y2AC: maxInt(vp8ACQuantTable[qIndex]*155/100, 8),
-		uvDC: vp8DCQuantTable[clipInt(qIndex, 0, 117)],
-		uvAC: vp8ACQuantTable[qIndex],
+		qIndex: qIndex,
+		y1DC:   vp8DCQuantTable[qIndex],
+		y1AC:   vp8ACQuantTable[qIndex],
+		y2DC:   maxInt(vp8DCQuantTable[qIndex]*2, 8),
+		y2AC:   maxInt(vp8ACQuantTable[qIndex]*y2ACScale/100, 8),
+		uvDC:   vp8DCQuantTable[uvIndex],
+		uvAC:   vp8ACQuantTable[uvIndex],
 	}
 }
 
 func qualityToVP8QIndex(quality int) int {
 	quality = clipInt(quality, 1, 100)
-	return (100 - quality) * 127 / 99
+	if quality >= 100 {
+		return 0
+	}
+	inv := 100 - quality
+	linear := (inv*127 + 99/2) / 99
+	curved := (inv*inv*127 + 99*99/2) / (99 * 99)
+	q := (linear + curved + 1) / 2
+	return clipInt(q, 0, 127)
 }
 
 type vp8RDConfig struct {

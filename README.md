@@ -94,8 +94,9 @@ room for future options.
   updates when they are estimated to reduce the frame size and enables the
   normal VP8 loop filter with quality-scaled sharpness and a mode delta for
   luma4x4 macroblocks.
-- Lossy `Quality` currently controls the VP8 base quantizer while the encoder
-  uses a simple rate-distortion mode decision heuristic.
+- Lossy `Quality` currently uses a non-linear mapping to the VP8 base quantizer
+  and quality-dependent Y2/UV quantization and loop filter settings. The
+  encoder uses a simple rate-distortion mode decision heuristic.
 - Lossy images with alpha are written as extended WebP files with an `ALPH`
   chunk. The encoder uses compressed alpha when it is smaller and falls back to
   raw alpha otherwise.
