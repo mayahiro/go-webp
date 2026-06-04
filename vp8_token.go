@@ -369,6 +369,52 @@ func encodeVP8BlockSkipFirst(enc *vp8BoolEncoder, plane int, context uint8, coef
 	return encodeVP8BlockFrom(enc, plane, context, coeff, 1)
 }
 
+func vp8BlockBitCost(plane int, context uint8, coeff [16]int) int64 {
+	return vp8BlockBitCostFrom(plane, context, coeff, 0)
+}
+
+func vp8BlockBitCostFrom(plane int, context uint8, coeff [16]int, start int) int64 {
+	if context > 2 {
+		context = 2
+	}
+	n := start
+	prob := vp8TokenProb(plane, int(vp8Bands[n]), context)
+	if !vp8HasNonZeroCoeff(coeff, n) {
+		return vp8BitCost(prob[0], false)
+	}
+	cost := vp8BitCost(prob[0], true)
+
+	for n != 16 {
+		n++
+		z := int(vp8Zigzag[n-1])
+		v := coeff[z]
+		if v == 0 {
+			cost += vp8BitCost(prob[1], false)
+			prob = vp8TokenProb(plane, int(vp8Bands[n]), 0)
+			continue
+		}
+
+		cost += vp8BitCost(prob[1], true)
+		absCoeff := v
+		if absCoeff < 0 {
+			absCoeff = -absCoeff
+		}
+		cost += vp8CoeffValueBitCost(prob, absCoeff)
+		cost += vp8BitCost(128, v < 0)
+		prob = vp8TokenProb(plane, int(vp8Bands[n]), coeffContext(absCoeff))
+		if n == 16 {
+			return cost
+		}
+		if !vp8HasNonZeroCoeff(coeff, n) {
+			cost += vp8BitCost(prob[0], false)
+			return cost
+		}
+		cost += vp8BitCost(prob[0], true)
+	}
+
+	return cost
+}
+
 func encodeVP8BlockFrom(enc *vp8BoolEncoder, plane int, context uint8, coeff [16]int, start int) uint8 {
 	if context > 2 {
 		context = 2
@@ -463,6 +509,36 @@ func encodeVP8CoeffValue(enc *vp8BoolEncoder, prob [11]uint8, v int) {
 	writeVP8CategoryBits(enc, vp8Cat3456[cat], v-offset)
 }
 
+func vp8CoeffValueBitCost(prob [11]uint8, v int) int64 {
+	if v <= 1 {
+		return vp8BitCost(prob[2], false)
+	}
+
+	cost := vp8BitCost(prob[2], true)
+	if v == 2 {
+		return cost + vp8BitCost(prob[3], false) + vp8BitCost(prob[4], false)
+	}
+	if v <= 4 {
+		return cost + vp8BitCost(prob[3], false) + vp8BitCost(prob[4], true) + vp8BitCost(prob[5], v == 4)
+	}
+
+	cost += vp8BitCost(prob[3], true)
+	if v <= 6 {
+		return cost + vp8BitCost(prob[6], false) + vp8BitCost(prob[7], false) + vp8BitCost(159, v == 6)
+	}
+	if v <= 10 {
+		d := v - 7
+		return cost + vp8BitCost(prob[6], false) + vp8BitCost(prob[7], true) +
+			vp8BitCost(165, d&2 != 0) + vp8BitCost(145, d&1 != 0)
+	}
+
+	cost += vp8BitCost(prob[6], true)
+	cat, offset := vp8CoeffCategory(v)
+	cost += vp8BitCost(prob[8], cat&2 != 0)
+	cost += vp8BitCost(prob[9+cat/2], cat&1 != 0)
+	return cost + vp8CategoryBitCost(vp8Cat3456[cat], v-offset)
+}
+
 func vp8CoeffCategory(v int) (cat int, offset int) {
 	switch {
 	case v <= 18:
@@ -474,6 +550,15 @@ func vp8CoeffCategory(v int) (cat int, offset int) {
 	default:
 		return 3, 67
 	}
+}
+
+func vp8CategoryBitCost(probs []uint8, value int) int64 {
+	var cost int64
+	for i, prob := range probs {
+		shift := len(probs) - 1 - i
+		cost += vp8BitCost(prob, value&(1<<shift) != 0)
+	}
+	return cost
 }
 
 func writeVP8CategoryBits(enc *vp8BoolEncoder, probs []uint8, value int) {

@@ -93,7 +93,7 @@ room for future options.
   quantized DC and AC coefficients. It enables the simple VP8 loop filter with
   a quality-scaled filter level.
 - Lossy `Quality` currently controls the VP8 base quantizer while the encoder
-  uses a simple mode decision heuristic.
+  uses a simple rate-distortion mode decision heuristic.
 - Lossy images with alpha are written as extended WebP files with an `ALPH`
   chunk. The encoder uses compressed alpha when it is smaller and falls back to
   raw alpha otherwise.

@@ -258,12 +258,21 @@ func TestVP8Y16ModeSelectionChoosesVertical(t *testing.T) {
 		}
 	}
 
-	mode, score := chooseVP8Y16Mode(pixelReaderFor(img), img.Bounds(), 0, 1, recY, 16)
+	quant := vp8QuantForIndex(qualityToVP8QIndex(75))
+	rd := newVP8RDConfig(quant)
+	var left, up [4]uint8
+	var leftY16, upY16 uint8
+	mode, score := chooseVP8Y16Mode(pixelReaderFor(img), img.Bounds(), 0, 1, recY, 16, quant, rd, &left, &up, &leftY16, &upY16)
 	if mode != vp8PredVE {
 		t.Fatalf("Y16 mode = %d, want vertical", mode)
 	}
-	if score != 0 {
-		t.Fatalf("Y16 vertical score = %d, want 0", score)
+	var zero [16]int
+	wantBits := vp8BitCost(145, true) + vp8Y16ModeCost(vp8PredVE) + vp8BlockBitCost(vp8PlaneY2, 0, zero)
+	for i := 0; i < 16; i++ {
+		wantBits += vp8BlockBitCostFrom(vp8PlaneY1WithY2, 0, zero, 1)
+	}
+	if want := rd.lumaScore(0, wantBits); score != want {
+		t.Fatalf("Y16 vertical score = %d, want %d", score, want)
 	}
 }
 
@@ -291,12 +300,18 @@ func TestVP8Y4ModeSelectionChoosesVertical(t *testing.T) {
 	}
 
 	quant := vp8QuantForIndex(qualityToVP8QIndex(1))
-	mode, score := chooseVP8Y4Mode(pixelReaderFor(img), img.Bounds(), x, y, recY, stride, quant, vp8PredVE, vp8PredVE)
+	rd := newVP8RDConfig(quant)
+	mode, score, nz := chooseVP8Y4Mode(pixelReaderFor(img), img.Bounds(), x, y, recY, stride, quant, rd, vp8PredVE, vp8PredVE, 0)
 	if mode != vp8PredVE {
 		t.Fatalf("Y4 mode = %d, want vertical", mode)
 	}
-	if score != vp8Y4ModeCost(vp8PredVE, vp8PredVE, vp8PredVE)*int64(quant.y1AC)/2 {
-		t.Fatalf("Y4 vertical score = %d, want mode cost only", score)
+	if nz != 0 {
+		t.Fatalf("Y4 vertical nz = %d, want 0", nz)
+	}
+	var zero [16]int
+	wantBits := vp8Y4ModeCost(vp8PredVE, vp8PredVE, vp8PredVE) + vp8BlockBitCost(vp8PlaneY1SansY2, 0, zero)
+	if want := rd.lumaScore(0, wantBits); score != want {
+		t.Fatalf("Y4 vertical score = %d, want %d", score, want)
 	}
 }
 
@@ -318,6 +333,34 @@ func TestVP8FirstPartitionWritesSelectedY4Modes(t *testing.T) {
 	got := readVP8FirstPartitionY4Modes(t, firstPart)
 	if got != want {
 		t.Fatalf("Y4 modes = %v, want %v", got, want)
+	}
+}
+
+func TestVP8BlockBitCostAccountsForNonZeroCoefficients(t *testing.T) {
+	var zero [16]int
+	var dc [16]int
+	dc[0] = 1
+	zeroCost := vp8BlockBitCost(vp8PlaneY1SansY2, 0, zero)
+	if got := vp8BlockBitCost(vp8PlaneY1SansY2, 0, dc); got <= zeroCost {
+		t.Fatalf("non-zero DC bit cost = %d, want greater than zero block cost %d", got, zeroCost)
+	}
+
+	var ac [16]int
+	ac[1] = 1
+	zeroSkipCost := vp8BlockBitCostFrom(vp8PlaneY1WithY2, 0, zero, 1)
+	if got := vp8BlockBitCostFrom(vp8PlaneY1WithY2, 0, ac, 1); got <= zeroSkipCost {
+		t.Fatalf("non-zero AC bit cost = %d, want greater than zero skip-first cost %d", got, zeroSkipCost)
+	}
+}
+
+func TestVP8RDLambdaIncreasesWithQuantizer(t *testing.T) {
+	highQuality := newVP8RDConfig(vp8QuantForIndex(qualityToVP8QIndex(90)))
+	lowQuality := newVP8RDConfig(vp8QuantForIndex(qualityToVP8QIndex(10)))
+	if lowQuality.yLambda <= highQuality.yLambda {
+		t.Fatalf("low quality luma lambda = %d, want greater than high quality lambda %d", lowQuality.yLambda, highQuality.yLambda)
+	}
+	if lowQuality.uvLambda <= highQuality.uvLambda {
+		t.Fatalf("low quality chroma lambda = %d, want greater than high quality lambda %d", lowQuality.uvLambda, highQuality.uvLambda)
 	}
 }
 
