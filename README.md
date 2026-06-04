@@ -89,9 +89,9 @@ room for future options.
   backwards references, so output can be larger than highly optimized WebP
   encoders.
 - Lossy encoding uses a low-complexity VP8 key frame encoder with 4:2:0 chroma
-  subsampling, selected intra16x16 and chroma prediction modes, and quantized
-  DC and AC coefficients. It enables the simple VP8 loop filter with a
-  quality-scaled filter level.
+  subsampling, selected intra16x16, luma4x4, and chroma prediction modes, and
+  quantized DC and AC coefficients. It enables the simple VP8 loop filter with
+  a quality-scaled filter level.
 - Lossy `Quality` currently controls the VP8 base quantizer while the encoder
   uses a simple mode decision heuristic.
 - Lossy images with alpha are written as extended WebP files with an `ALPH`
@@ -107,9 +107,8 @@ room for future options.
   encoding.
 - Lossy alpha compression is intentionally simple and currently uses
   frequency-coded alpha residuals without LZ77 references.
-- Lossy 4x4 luma prediction mode selection and normal loop filtering are not
-  implemented yet, so detailed images can still be blockier or larger than
-  optimized VP8/WebP encoders.
+- Lossy normal loop filtering is not implemented yet, so detailed images can
+  still be blockier or larger than optimized VP8/WebP encoders.
 
 ## Supported Environments
 

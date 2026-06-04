@@ -581,9 +581,10 @@ func encodeVP8KeyFrame(readPixel pixelReader, bounds image.Rectangle, width int,
 }
 
 type vp8MBMode struct {
-	useY16 bool
-	yMode  uint8
-	cMode  uint8
+	useY16  bool
+	yMode   uint8
+	y4Modes [16]uint8
+	cMode   uint8
 }
 
 type vp8LoopFilter struct {
@@ -603,6 +604,13 @@ const (
 	vp8PredTM
 	vp8PredVE
 	vp8PredHE
+	vp8PredRD
+	vp8PredVR
+	vp8PredLD
+	vp8PredVL
+	vp8PredHD
+	vp8PredHU
+	vp8NumPredModes
 )
 
 func newVP8EncodeBuffers(mbw int, mbh int) *vp8EncodeBuffers {
@@ -645,12 +653,12 @@ func vp8ResidualPartitionCapacity(width int, height int) int {
 }
 
 func vp8FirstPartition(mbw int, mbh int, qIndex int, filter vp8LoopFilter, modes []vp8MBMode) ([]byte, error) {
-	bitCount := 2 + 1 + 11 + 2 + 12 + 1 + 4*8*3*11 + 1 + mbw*mbh*36
-	size := (bitCount+7)/8 + 4
-	if size > vp8FirstPartitionMax {
-		return nil, fmt.Errorf("webp: lossy image is too large for the simple VP8 first partition")
+	bitCount := 2 + 1 + 11 + 2 + 12 + 1 + 4*8*3*11 + 1 + mbw*mbh*(1+16*7+3)
+	capacity := (bitCount+7)/8 + 4
+	if capacity > vp8FirstPartitionMax {
+		capacity = vp8FirstPartitionMax
 	}
-	enc := newVP8BoolEncoderWithCapacity(size)
+	enc := newVP8BoolEncoderWithCapacity(capacity)
 	writeVP8Literal(enc, 0, 1)       // color space
 	writeVP8Literal(enc, 0, 1)       // pixel clamp
 	enc.writeBit(128, false)         // no segmentation
@@ -679,16 +687,16 @@ func vp8FirstPartition(mbw int, mbh int, qIndex int, filter vp8LoopFilter, modes
 					leftPred[i] = mode.yMode
 				}
 			} else {
-				writeVP8Y4DCModes(enc, &leftPred, &upPred[mbx])
+				writeVP8Y4Modes(enc, &leftPred, &upPred[mbx], mode.y4Modes)
 			}
 			writeVP8ChromaMode(enc, mode.cMode)
 		}
 	}
 	data := enc.bytes()
-	if len(data) > size {
+	if len(data) > vp8FirstPartitionMax {
 		return nil, fmt.Errorf("webp: lossy image is too large for the simple VP8 first partition")
 	}
-	firstPart := make([]byte, size)
+	firstPart := make([]byte, len(data))
 	copy(firstPart, data)
 	return firstPart, nil
 }
@@ -722,15 +730,79 @@ func writeVP8Y16Mode(enc *vp8BoolEncoder, mode uint8) {
 	}
 }
 
-func writeVP8Y4DCModes(enc *vp8BoolEncoder, left *[4]uint8, up *[4]uint8) {
+func writeVP8Y4Modes(enc *vp8BoolEncoder, left *[4]uint8, up *[4]uint8, modes [16]uint8) {
 	for by := 0; by < 4; by++ {
 		p := left[by]
 		for bx := 0; bx < 4; bx++ {
-			enc.writeBit(vp8Y4DCPredProb[up[bx]][p], false)
-			p = vp8PredDC
-			up[bx] = vp8PredDC
+			mode := modes[by*4+bx]
+			writeVP8Y4Mode(enc, vp8PredProb[up[bx]][p], mode)
+			p = mode
+			up[bx] = mode
 		}
 		left[by] = p
+	}
+}
+
+func writeVP8Y4Mode(enc *vp8BoolEncoder, prob [9]uint8, mode uint8) {
+	switch mode {
+	case vp8PredDC:
+		enc.writeBit(prob[0], false)
+	case vp8PredTM:
+		enc.writeBit(prob[0], true)
+		enc.writeBit(prob[1], false)
+	case vp8PredVE:
+		enc.writeBit(prob[0], true)
+		enc.writeBit(prob[1], true)
+		enc.writeBit(prob[2], false)
+	case vp8PredHE:
+		enc.writeBit(prob[0], true)
+		enc.writeBit(prob[1], true)
+		enc.writeBit(prob[2], true)
+		enc.writeBit(prob[3], false)
+		enc.writeBit(prob[4], false)
+	case vp8PredRD:
+		enc.writeBit(prob[0], true)
+		enc.writeBit(prob[1], true)
+		enc.writeBit(prob[2], true)
+		enc.writeBit(prob[3], false)
+		enc.writeBit(prob[4], true)
+		enc.writeBit(prob[5], false)
+	case vp8PredVR:
+		enc.writeBit(prob[0], true)
+		enc.writeBit(prob[1], true)
+		enc.writeBit(prob[2], true)
+		enc.writeBit(prob[3], false)
+		enc.writeBit(prob[4], true)
+		enc.writeBit(prob[5], true)
+	case vp8PredLD:
+		enc.writeBit(prob[0], true)
+		enc.writeBit(prob[1], true)
+		enc.writeBit(prob[2], true)
+		enc.writeBit(prob[3], true)
+		enc.writeBit(prob[6], false)
+	case vp8PredVL:
+		enc.writeBit(prob[0], true)
+		enc.writeBit(prob[1], true)
+		enc.writeBit(prob[2], true)
+		enc.writeBit(prob[3], true)
+		enc.writeBit(prob[6], true)
+		enc.writeBit(prob[7], false)
+	case vp8PredHD:
+		enc.writeBit(prob[0], true)
+		enc.writeBit(prob[1], true)
+		enc.writeBit(prob[2], true)
+		enc.writeBit(prob[3], true)
+		enc.writeBit(prob[6], true)
+		enc.writeBit(prob[7], true)
+		enc.writeBit(prob[8], false)
+	default:
+		enc.writeBit(prob[0], true)
+		enc.writeBit(prob[1], true)
+		enc.writeBit(prob[2], true)
+		enc.writeBit(prob[3], true)
+		enc.writeBit(prob[6], true)
+		enc.writeBit(prob[7], true)
+		enc.writeBit(prob[8], true)
 	}
 }
 
@@ -752,11 +824,127 @@ func writeVP8ChromaMode(enc *vp8BoolEncoder, mode uint8) {
 	}
 }
 
-var vp8Y4DCPredProb = [4][4]uint8{
-	{231, 152, 175, 56},
-	{134, 72, 66, 41},
-	{88, 43, 39, 56},
-	{193, 60, 112, 40},
+var vp8PredProb = [vp8NumPredModes][vp8NumPredModes][9]uint8{
+	{
+		{231, 120, 48, 89, 115, 113, 120, 152, 112},
+		{152, 179, 64, 126, 170, 118, 46, 70, 95},
+		{175, 69, 143, 80, 85, 82, 72, 155, 103},
+		{56, 58, 10, 171, 218, 189, 17, 13, 152},
+		{114, 26, 17, 163, 44, 195, 21, 10, 173},
+		{121, 24, 80, 195, 26, 62, 44, 64, 85},
+		{144, 71, 10, 38, 171, 213, 144, 34, 26},
+		{170, 46, 55, 19, 136, 160, 33, 206, 71},
+		{63, 20, 8, 114, 114, 208, 12, 9, 226},
+		{81, 40, 11, 96, 182, 84, 29, 16, 36},
+	},
+	{
+		{134, 183, 89, 137, 98, 101, 106, 165, 148},
+		{72, 187, 100, 130, 157, 111, 32, 75, 80},
+		{66, 102, 167, 99, 74, 62, 40, 234, 128},
+		{41, 53, 9, 178, 241, 141, 26, 8, 107},
+		{74, 43, 26, 146, 73, 166, 49, 23, 157},
+		{65, 38, 105, 160, 51, 52, 31, 115, 128},
+		{104, 79, 12, 27, 217, 255, 87, 17, 7},
+		{87, 68, 71, 44, 114, 51, 15, 186, 23},
+		{47, 41, 14, 110, 182, 183, 21, 17, 194},
+		{66, 45, 25, 102, 197, 189, 23, 18, 22},
+	},
+	{
+		{88, 88, 147, 150, 42, 46, 45, 196, 205},
+		{43, 97, 183, 117, 85, 38, 35, 179, 61},
+		{39, 53, 200, 87, 26, 21, 43, 232, 171},
+		{56, 34, 51, 104, 114, 102, 29, 93, 77},
+		{39, 28, 85, 171, 58, 165, 90, 98, 64},
+		{34, 22, 116, 206, 23, 34, 43, 166, 73},
+		{107, 54, 32, 26, 51, 1, 81, 43, 31},
+		{68, 25, 106, 22, 64, 171, 36, 225, 114},
+		{34, 19, 21, 102, 132, 188, 16, 76, 124},
+		{62, 18, 78, 95, 85, 57, 50, 48, 51},
+	},
+	{
+		{193, 101, 35, 159, 215, 111, 89, 46, 111},
+		{60, 148, 31, 172, 219, 228, 21, 18, 111},
+		{112, 113, 77, 85, 179, 255, 38, 120, 114},
+		{40, 42, 1, 196, 245, 209, 10, 25, 109},
+		{88, 43, 29, 140, 166, 213, 37, 43, 154},
+		{61, 63, 30, 155, 67, 45, 68, 1, 209},
+		{100, 80, 8, 43, 154, 1, 51, 26, 71},
+		{142, 78, 78, 16, 255, 128, 34, 197, 171},
+		{41, 40, 5, 102, 211, 183, 4, 1, 221},
+		{51, 50, 17, 168, 209, 192, 23, 25, 82},
+	},
+	{
+		{138, 31, 36, 171, 27, 166, 38, 44, 229},
+		{67, 87, 58, 169, 82, 115, 26, 59, 179},
+		{63, 59, 90, 180, 59, 166, 93, 73, 154},
+		{40, 40, 21, 116, 143, 209, 34, 39, 175},
+		{47, 15, 16, 183, 34, 223, 49, 45, 183},
+		{46, 17, 33, 183, 6, 98, 15, 32, 183},
+		{57, 46, 22, 24, 128, 1, 54, 17, 37},
+		{65, 32, 73, 115, 28, 128, 23, 128, 205},
+		{40, 3, 9, 115, 51, 192, 18, 6, 223},
+		{87, 37, 9, 115, 59, 77, 64, 21, 47},
+	},
+	{
+		{104, 55, 44, 218, 9, 54, 53, 130, 226},
+		{64, 90, 70, 205, 40, 41, 23, 26, 57},
+		{54, 57, 112, 184, 5, 41, 38, 166, 213},
+		{30, 34, 26, 133, 152, 116, 10, 32, 134},
+		{39, 19, 53, 221, 26, 114, 32, 73, 255},
+		{31, 9, 65, 234, 2, 15, 1, 118, 73},
+		{75, 32, 12, 51, 192, 255, 160, 43, 51},
+		{88, 31, 35, 67, 102, 85, 55, 186, 85},
+		{56, 21, 23, 111, 59, 205, 45, 37, 192},
+		{55, 38, 70, 124, 73, 102, 1, 34, 98},
+	},
+	{
+		{125, 98, 42, 88, 104, 85, 117, 175, 82},
+		{95, 84, 53, 89, 128, 100, 113, 101, 45},
+		{75, 79, 123, 47, 51, 128, 81, 171, 1},
+		{57, 17, 5, 71, 102, 57, 53, 41, 49},
+		{38, 33, 13, 121, 57, 73, 26, 1, 85},
+		{41, 10, 67, 138, 77, 110, 90, 47, 114},
+		{115, 21, 2, 10, 102, 255, 166, 23, 6},
+		{101, 29, 16, 10, 85, 128, 101, 196, 26},
+		{57, 18, 10, 102, 102, 213, 34, 20, 43},
+		{117, 20, 15, 36, 163, 128, 68, 1, 26},
+	},
+	{
+		{102, 61, 71, 37, 34, 53, 31, 243, 192},
+		{69, 60, 71, 38, 73, 119, 28, 222, 37},
+		{68, 45, 128, 34, 1, 47, 11, 245, 171},
+		{62, 17, 19, 70, 146, 85, 55, 62, 70},
+		{37, 43, 37, 154, 100, 163, 85, 160, 1},
+		{63, 9, 92, 136, 28, 64, 32, 201, 85},
+		{75, 15, 9, 9, 64, 255, 184, 119, 16},
+		{86, 6, 28, 5, 64, 255, 25, 248, 1},
+		{56, 8, 17, 132, 137, 255, 55, 116, 128},
+		{58, 15, 20, 82, 135, 57, 26, 121, 40},
+	},
+	{
+		{164, 50, 31, 137, 154, 133, 25, 35, 218},
+		{51, 103, 44, 131, 131, 123, 31, 6, 158},
+		{86, 40, 64, 135, 148, 224, 45, 183, 128},
+		{22, 26, 17, 131, 240, 154, 14, 1, 209},
+		{45, 16, 21, 91, 64, 222, 7, 1, 197},
+		{56, 21, 39, 155, 60, 138, 23, 102, 213},
+		{83, 12, 13, 54, 192, 255, 68, 47, 28},
+		{85, 26, 85, 85, 128, 128, 32, 146, 171},
+		{18, 11, 7, 63, 144, 171, 4, 4, 246},
+		{35, 27, 10, 146, 174, 171, 12, 26, 128},
+	},
+	{
+		{190, 80, 35, 99, 180, 80, 126, 54, 45},
+		{85, 126, 47, 87, 176, 51, 41, 20, 32},
+		{101, 75, 128, 139, 118, 146, 116, 128, 85},
+		{56, 41, 15, 176, 236, 85, 37, 9, 62},
+		{71, 30, 17, 119, 118, 255, 17, 18, 138},
+		{101, 38, 60, 138, 55, 70, 43, 26, 142},
+		{146, 36, 19, 30, 171, 255, 97, 27, 20},
+		{138, 45, 61, 62, 219, 1, 81, 188, 64},
+		{32, 41, 20, 117, 151, 142, 20, 21, 163},
+		{112, 19, 12, 61, 195, 128, 48, 4, 24},
+	},
 }
 
 func writeVP8Literal(enc *vp8BoolEncoder, value uint32, n uint8) {
@@ -842,27 +1030,52 @@ func analyzeVP8Modes(readPixel pixelReader, bounds image.Rectangle, mbw int, mbh
 	recCb := work.recCb
 	recCr := work.recCr
 	modes := make([]vp8MBMode, mbw*mbh)
+	upPred := make([][4]uint8, mbw)
 
 	for mby := 0; mby < mbh; mby++ {
+		var leftPred [4]uint8
 		for mbx := 0; mbx < mbw; mbx++ {
-			mode := chooseVP8MBMode(readPixel, bounds, mbx, mby, recY, recCb, recCr, yStride, cStride)
-			modes[mby*mbw+mbx] = mode
-			reconstructVP8LumaMB(readPixel, bounds, mbx, mby, recY, yStride, quant, mode)
+			mode := vp8MBMode{cMode: chooseVP8ChromaMode(readPixel, bounds, mbx, mby, recCb, recCr, cStride)}
+			var savedLuma [256]uint8
+			saveLumaMB(recY, yStride, mbx, mby, &savedLuma)
+			savedLeftPred := leftPred
+			savedUpPred := upPred[mbx]
+
+			y16Mode, y16Score := chooseVP8Y16Mode(readPixel, bounds, mbx, mby, recY, yStride)
+			y4Score := chooseVP8Y4Modes(readPixel, bounds, mbx, mby, recY, yStride, quant, &leftPred, &upPred[mbx], &mode)
+			if y16Score <= y4Score {
+				restoreLumaMB(recY, yStride, mbx, mby, &savedLuma)
+				leftPred = savedLeftPred
+				upPred[mbx] = savedUpPred
+				mode.useY16 = true
+				mode.yMode = y16Mode
+				for i := 0; i < 4; i++ {
+					leftPred[i] = y16Mode
+					upPred[mbx][i] = y16Mode
+				}
+				reconstructVP8LumaMB(readPixel, bounds, mbx, mby, recY, yStride, quant, mode)
+			}
 			reconstructVP8ChromaMB(readPixel, bounds, mbx, mby, recCb, recCr, cStride, quant, mode)
+			modes[mby*mbw+mbx] = mode
 		}
 	}
 	return modes
 }
 
-func chooseVP8MBMode(readPixel pixelReader, bounds image.Rectangle, mbx int, mby int, recY []uint8, recCb []uint8, recCr []uint8, yStride int, cStride int) vp8MBMode {
-	mode := vp8MBMode{cMode: chooseVP8ChromaMode(readPixel, bounds, mbx, mby, recCb, recCr, cStride)}
-	y4Score := estimateY4Score(readPixel, bounds, mbx, mby)
-	y16Mode, y16Score := chooseVP8Y16Mode(readPixel, bounds, mbx, mby, recY, yStride)
-	if y16Score <= y4Score {
-		mode.useY16 = true
-		mode.yMode = y16Mode
+func saveLumaMB(recY []uint8, stride int, mbx int, mby int, dst *[256]uint8) {
+	x0 := mbx * 16
+	y0 := mby * 16
+	for y := 0; y < 16; y++ {
+		copy(dst[y*16:y*16+16], recY[(y0+y)*stride+x0:(y0+y)*stride+x0+16])
 	}
-	return mode
+}
+
+func restoreLumaMB(recY []uint8, stride int, mbx int, mby int, src *[256]uint8) {
+	x0 := mbx * 16
+	y0 := mby * 16
+	for y := 0; y < 16; y++ {
+		copy(recY[(y0+y)*stride+x0:(y0+y)*stride+x0+16], src[y*16:y*16+16])
+	}
 }
 
 func encodeVP8Residuals(readPixel pixelReader, bounds image.Rectangle, width int, height int, mbw int, mbh int, quant vp8Quant, modes []vp8MBMode, work *vp8EncodeBuffers) []byte {
@@ -895,7 +1108,7 @@ func reconstructVP8LumaMB(readPixel pixelReader, bounds image.Rectangle, mbx int
 		processVP8Luma16MB(nil, readPixel, bounds, mbx, mby, recY, stride, quant, mode, nil, nil, nil, nil)
 		return
 	}
-	processVP8Luma4MB(nil, readPixel, bounds, mbx, mby, recY, stride, quant, nil, nil)
+	processVP8Luma4MB(nil, readPixel, bounds, mbx, mby, recY, stride, quant, nil, nil, mode)
 }
 
 func encodeVP8LumaMB(enc *vp8BoolEncoder, readPixel pixelReader, bounds image.Rectangle, mbx int, mby int, recY []uint8, stride int, quant vp8Quant, mode vp8MBMode, left *[4]uint8, up *[4]uint8, leftY16 *uint8, upY16 *uint8) {
@@ -903,12 +1116,12 @@ func encodeVP8LumaMB(enc *vp8BoolEncoder, readPixel pixelReader, bounds image.Re
 		processVP8Luma16MB(enc, readPixel, bounds, mbx, mby, recY, stride, quant, mode, left, up, leftY16, upY16)
 		return
 	}
-	processVP8Luma4MB(enc, readPixel, bounds, mbx, mby, recY, stride, quant, left, up)
+	processVP8Luma4MB(enc, readPixel, bounds, mbx, mby, recY, stride, quant, left, up, mode)
 	*leftY16 = 0
 	*upY16 = 0
 }
 
-func processVP8Luma4MB(enc *vp8BoolEncoder, readPixel pixelReader, bounds image.Rectangle, mbx int, mby int, recY []uint8, stride int, quant vp8Quant, left *[4]uint8, up *[4]uint8) {
+func processVP8Luma4MB(enc *vp8BoolEncoder, readPixel pixelReader, bounds image.Rectangle, mbx int, mby int, recY []uint8, stride int, quant vp8Quant, left *[4]uint8, up *[4]uint8, mode vp8MBMode) {
 	var localLeft [4]uint8
 	var localUp [4]uint8
 	if left == nil {
@@ -922,7 +1135,7 @@ func processVP8Luma4MB(enc *vp8BoolEncoder, readPixel pixelReader, bounds image.
 		for bx := 0; bx < 4; bx++ {
 			x := mbx*16 + bx*4
 			y := mby*16 + by*4
-			pred := pred4DCBlock(recY, stride, x, y)
+			pred := predictLuma4(recY, stride, x, y, mode.y4Modes[by*4+bx])
 			residual := lumaResidualBlock(readPixel, bounds, x, y, pred)
 			coeff := quantizeVP8Block(residual, quant.y1DC, quant.y1AC)
 			blockNZ := uint8(0)
@@ -1045,27 +1258,117 @@ func processVP8ChromaPlane(enc *vp8BoolEncoder, readPixel pixelReader, bounds im
 	}
 }
 
-func estimateY4Score(readPixel pixelReader, bounds image.Rectangle, mbx int, mby int) int64 {
+func chooseVP8Y4Modes(readPixel pixelReader, bounds image.Rectangle, mbx int, mby int, recY []uint8, stride int, quant vp8Quant, leftPred *[4]uint8, upPred *[4]uint8, mode *vp8MBMode) int64 {
 	var score int64
 	for by := 0; by < 4; by++ {
+		p := leftPred[by]
 		for bx := 0; bx < 4; bx++ {
-			var values [16]uint8
-			sum := 0
-			for yy := 0; yy < 4; yy++ {
-				for xx := 0; xx < 4; xx++ {
-					c := samplePixel(readPixel, bounds, mbx*16+bx*4+xx, mby*16+by*4+yy)
-					y := rgbToLuma(c.R, c.G, c.B)
-					values[yy*4+xx] = y
-					sum += int(y)
-				}
-			}
-			avg := (sum + 8) / 16
-			for _, v := range values {
-				score += squareInt(int(v) - avg)
-			}
+			x := mbx*16 + bx*4
+			y := mby*16 + by*4
+			blockMode, blockScore := chooseVP8Y4Mode(readPixel, bounds, x, y, recY, stride, quant, upPred[bx], p)
+			mode.y4Modes[by*4+bx] = blockMode
+			pred := predictLuma4(recY, stride, x, y, blockMode)
+			residual := lumaResidualBlock(readPixel, bounds, x, y, pred)
+			coeff := quantizeVP8Block(residual, quant.y1DC, quant.y1AC)
+			recon := reconstructVP8Block(pred, coeff, quant.y1DC, quant.y1AC)
+			put4(recY, stride, x, y, recon)
+			score += blockScore
+			p = blockMode
+			upPred[bx] = blockMode
+		}
+		leftPred[by] = p
+	}
+	return score
+}
+
+func chooseVP8Y4Mode(readPixel pixelReader, bounds image.Rectangle, x int, y int, recY []uint8, stride int, quant vp8Quant, topPred uint8, leftPred uint8) (uint8, int64) {
+	bestMode := uint8(vp8PredDC)
+	bestScore := int64(1<<63 - 1)
+	for mode := uint8(0); mode < vp8NumPredModes; mode++ {
+		pred := predictLuma4(recY, stride, x, y, mode)
+		residual := lumaResidualBlock(readPixel, bounds, x, y, pred)
+		coeff := quantizeVP8Block(residual, quant.y1DC, quant.y1AC)
+		recon := reconstructVP8Block(pred, coeff, quant.y1DC, quant.y1AC)
+		score := scoreLuma4(readPixel, bounds, x, y, recon)
+		score += vp8Y4ModeCost(topPred, leftPred, mode) * int64(maxInt(quant.y1AC, 1)) / 2
+		if score < bestScore {
+			bestScore = score
+			bestMode = mode
+		}
+	}
+	return bestMode, bestScore
+}
+
+func scoreLuma4(readPixel pixelReader, bounds image.Rectangle, x int, y int, block [16]uint8) int64 {
+	var score int64
+	for yy := 0; yy < 4; yy++ {
+		for xx := 0; xx < 4; xx++ {
+			c := samplePixel(readPixel, bounds, x+xx, y+yy)
+			luma := rgbToLuma(c.R, c.G, c.B)
+			score += squareInt(int(luma) - int(block[yy*4+xx]))
 		}
 	}
 	return score
+}
+
+func vp8Y4ModeCost(topPred uint8, leftPred uint8, mode uint8) int64 {
+	prob := vp8PredProb[topPred][leftPred]
+	switch mode {
+	case vp8PredDC:
+		return vp8BitCost(prob[0], false)
+	case vp8PredTM:
+		return vp8BitCost(prob[0], true) + vp8BitCost(prob[1], false)
+	case vp8PredVE:
+		return vp8BitCost(prob[0], true) + vp8BitCost(prob[1], true) + vp8BitCost(prob[2], false)
+	case vp8PredHE:
+		return vp8BitCost(prob[0], true) + vp8BitCost(prob[1], true) + vp8BitCost(prob[2], true) +
+			vp8BitCost(prob[3], false) + vp8BitCost(prob[4], false)
+	case vp8PredRD:
+		return vp8BitCost(prob[0], true) + vp8BitCost(prob[1], true) + vp8BitCost(prob[2], true) +
+			vp8BitCost(prob[3], false) + vp8BitCost(prob[4], true) + vp8BitCost(prob[5], false)
+	case vp8PredVR:
+		return vp8BitCost(prob[0], true) + vp8BitCost(prob[1], true) + vp8BitCost(prob[2], true) +
+			vp8BitCost(prob[3], false) + vp8BitCost(prob[4], true) + vp8BitCost(prob[5], true)
+	case vp8PredLD:
+		return vp8BitCost(prob[0], true) + vp8BitCost(prob[1], true) + vp8BitCost(prob[2], true) +
+			vp8BitCost(prob[3], true) + vp8BitCost(prob[6], false)
+	case vp8PredVL:
+		return vp8BitCost(prob[0], true) + vp8BitCost(prob[1], true) + vp8BitCost(prob[2], true) +
+			vp8BitCost(prob[3], true) + vp8BitCost(prob[6], true) + vp8BitCost(prob[7], false)
+	case vp8PredHD:
+		return vp8BitCost(prob[0], true) + vp8BitCost(prob[1], true) + vp8BitCost(prob[2], true) +
+			vp8BitCost(prob[3], true) + vp8BitCost(prob[6], true) + vp8BitCost(prob[7], true) +
+			vp8BitCost(prob[8], false)
+	default:
+		return vp8BitCost(prob[0], true) + vp8BitCost(prob[1], true) + vp8BitCost(prob[2], true) +
+			vp8BitCost(prob[3], true) + vp8BitCost(prob[6], true) + vp8BitCost(prob[7], true) +
+			vp8BitCost(prob[8], true)
+	}
+}
+
+var vp8BitCostTable = makeVP8BitCostTable()
+
+func makeVP8BitCostTable() [256][2]int64 {
+	var costs [256][2]int64
+	for prob := 0; prob < 256; prob++ {
+		costs[prob][0] = vp8ProbabilityCost(prob)
+		costs[prob][1] = vp8ProbabilityCost(256 - prob)
+	}
+	return costs
+}
+
+func vp8ProbabilityCost(prob int) int64 {
+	if prob <= 0 {
+		return 1 << 30
+	}
+	return int64(math.Log2(256/float64(prob)) * 256)
+}
+
+func vp8BitCost(prob uint8, bit bool) int64 {
+	if bit {
+		return vp8BitCostTable[prob][1]
+	}
+	return vp8BitCostTable[prob][0]
 }
 
 func chooseVP8Y16Mode(readPixel pixelReader, bounds image.Rectangle, mbx int, mby int, recY []uint8, stride int) (uint8, int64) {
@@ -1385,6 +1688,187 @@ func rgbToChroma(r uint8, g uint8, b uint8) (uint8, uint8) {
 	}
 
 	return uint8(cb), uint8(cr)
+}
+
+func predictLuma4(rec []uint8, stride int, x int, y int, mode uint8) [16]uint8 {
+	a := luma4TopLeft(rec, stride, x, y)
+	b := luma4Top(rec, stride, x, y, 0)
+	c := luma4Top(rec, stride, x, y, 1)
+	d := luma4Top(rec, stride, x, y, 2)
+	e := luma4Top(rec, stride, x, y, 3)
+	f := luma4Top(rec, stride, x, y, 4)
+	g := luma4Top(rec, stride, x, y, 5)
+	h := luma4Top(rec, stride, x, y, 6)
+	i := luma4Top(rec, stride, x, y, 7)
+	p := luma4Left(rec, stride, x, y, 0)
+	q := luma4Left(rec, stride, x, y, 1)
+	r := luma4Left(rec, stride, x, y, 2)
+	s := luma4Left(rec, stride, x, y, 3)
+
+	var block [16]uint8
+	switch mode {
+	case vp8PredTM:
+		for yy := 0; yy < 4; yy++ {
+			left := luma4Left(rec, stride, x, y, yy)
+			for xx := 0; xx < 4; xx++ {
+				block[yy*4+xx] = clipUint8(left + luma4Top(rec, stride, x, y, xx) - a)
+			}
+		}
+	case vp8PredVE:
+		abc := avg3(a, b, c)
+		bcd := avg3(b, c, d)
+		cde := avg3(c, d, e)
+		def := avg3(d, e, f)
+		for yy := 0; yy < 4; yy++ {
+			block[yy*4+0] = abc
+			block[yy*4+1] = bcd
+			block[yy*4+2] = cde
+			block[yy*4+3] = def
+		}
+	case vp8PredHE:
+		ssr := avg3(s, s, r)
+		srq := avg3(s, r, q)
+		rqp := avg3(r, q, p)
+		apq := avg3(a, p, q)
+		for xx := 0; xx < 4; xx++ {
+			block[0*4+xx] = apq
+			block[1*4+xx] = rqp
+			block[2*4+xx] = srq
+			block[3*4+xx] = ssr
+		}
+	case vp8PredRD:
+		srq := avg3(s, r, q)
+		rqp := avg3(r, q, p)
+		qpa := avg3(q, p, a)
+		pab := avg3(p, a, b)
+		abc := avg3(a, b, c)
+		bcd := avg3(b, c, d)
+		cde := avg3(c, d, e)
+		block = [16]uint8{
+			pab, abc, bcd, cde,
+			qpa, pab, abc, bcd,
+			rqp, qpa, pab, abc,
+			srq, rqp, qpa, pab,
+		}
+	case vp8PredVR:
+		ab := avg2(a, b)
+		bc := avg2(b, c)
+		cd := avg2(c, d)
+		de := avg2(d, e)
+		rqp := avg3(r, q, p)
+		qpa := avg3(q, p, a)
+		pab := avg3(p, a, b)
+		abc := avg3(a, b, c)
+		bcd := avg3(b, c, d)
+		cde := avg3(c, d, e)
+		block = [16]uint8{
+			ab, bc, cd, de,
+			pab, abc, bcd, cde,
+			qpa, ab, bc, cd,
+			rqp, pab, abc, bcd,
+		}
+	case vp8PredLD:
+		abc := avg3(b, c, d)
+		bcd := avg3(c, d, e)
+		cde := avg3(d, e, f)
+		def := avg3(e, f, g)
+		efg := avg3(f, g, h)
+		fgh := avg3(g, h, i)
+		ghh := avg3(h, i, i)
+		block = [16]uint8{
+			abc, bcd, cde, def,
+			bcd, cde, def, efg,
+			cde, def, efg, fgh,
+			def, efg, fgh, ghh,
+		}
+	case vp8PredVL:
+		ab := avg2(b, c)
+		bc := avg2(c, d)
+		cd := avg2(d, e)
+		de := avg2(e, f)
+		abc := avg3(b, c, d)
+		bcd := avg3(c, d, e)
+		cde := avg3(d, e, f)
+		def := avg3(e, f, g)
+		efg := avg3(f, g, h)
+		fgh := avg3(g, h, i)
+		block = [16]uint8{
+			ab, bc, cd, de,
+			abc, bcd, cde, def,
+			bc, cd, de, efg,
+			bcd, cde, def, fgh,
+		}
+	case vp8PredHD:
+		sr := avg2(s, r)
+		rq := avg2(r, q)
+		qp := avg2(q, p)
+		pa := avg2(p, a)
+		srq := avg3(s, r, q)
+		rqp := avg3(r, q, p)
+		qpa := avg3(q, p, a)
+		pab := avg3(p, a, b)
+		abc := avg3(a, b, c)
+		bcd := avg3(b, c, d)
+		block = [16]uint8{
+			pa, pab, abc, bcd,
+			qp, qpa, pa, pab,
+			rq, rqp, qp, qpa,
+			sr, srq, rq, rqp,
+		}
+	case vp8PredHU:
+		pq := avg2(p, q)
+		qr := avg2(q, r)
+		rs := avg2(r, s)
+		pqr := avg3(p, q, r)
+		qrs := avg3(q, r, s)
+		rss := avg3(r, s, s)
+		sss := uint8(s)
+		block = [16]uint8{
+			pq, pqr, qr, qrs,
+			qr, qrs, rs, rss,
+			rs, rss, sss, sss,
+			sss, sss, sss, sss,
+		}
+	default:
+		block = pred4DCBlock(rec, stride, x, y)
+	}
+	return block
+}
+
+func luma4Top(rec []uint8, stride int, x int, y int, dx int) int {
+	if y == 0 {
+		return 0x7f
+	}
+	xx := x + dx
+	if xx >= stride {
+		xx = stride - 1
+	}
+	return int(rec[(y-1)*stride+xx])
+}
+
+func luma4Left(rec []uint8, stride int, x int, y int, dy int) int {
+	if x == 0 {
+		return 0x81
+	}
+	return int(rec[(y+dy)*stride+x-1])
+}
+
+func luma4TopLeft(rec []uint8, stride int, x int, y int) int {
+	if y == 0 {
+		return 0x7f
+	}
+	if x == 0 {
+		return 0x81
+	}
+	return int(rec[(y-1)*stride+x-1])
+}
+
+func avg2(a int, b int) uint8 {
+	return uint8((a + b + 1) / 2)
+}
+
+func avg3(a int, b int, c int) uint8 {
+	return uint8((a + 2*b + c + 2) / 4)
 }
 
 func pred4DCBlock(rec []uint8, stride int, x int, y int) [16]uint8 {

@@ -267,6 +267,60 @@ func TestVP8Y16ModeSelectionChoosesVertical(t *testing.T) {
 	}
 }
 
+func TestVP8Y4ModeSelectionChoosesVertical(t *testing.T) {
+	const stride = 16
+	const x = 4
+	const y = 4
+
+	recY := make([]uint8, stride*16)
+	top := []uint8{0, 0, 0, 255, 255, 255}
+	for i, v := range top {
+		recY[(y-1)*stride+x-1+i] = v
+	}
+	for yy := 0; yy < 4; yy++ {
+		recY[(y+yy)*stride+x-1] = 220
+	}
+	pred := predictLuma4(recY, stride, x, y, vp8PredVE)
+
+	img := image.NewNRGBA(image.Rect(0, 0, 8, 8))
+	for yy := 0; yy < 4; yy++ {
+		for xx := 0; xx < 4; xx++ {
+			v := pred[yy*4+xx]
+			img.SetNRGBA(x+xx, y+yy, color.NRGBA{R: v, G: v, B: v, A: 255})
+		}
+	}
+
+	quant := vp8QuantForIndex(qualityToVP8QIndex(1))
+	mode, score := chooseVP8Y4Mode(pixelReaderFor(img), img.Bounds(), x, y, recY, stride, quant, vp8PredVE, vp8PredVE)
+	if mode != vp8PredVE {
+		t.Fatalf("Y4 mode = %d, want vertical", mode)
+	}
+	if score != vp8Y4ModeCost(vp8PredVE, vp8PredVE, vp8PredVE)*int64(quant.y1AC)/2 {
+		t.Fatalf("Y4 vertical score = %d, want mode cost only", score)
+	}
+}
+
+func TestVP8FirstPartitionWritesSelectedY4Modes(t *testing.T) {
+	want := [16]uint8{
+		vp8PredDC, vp8PredTM, vp8PredVE, vp8PredHE,
+		vp8PredRD, vp8PredVR, vp8PredLD, vp8PredVL,
+		vp8PredHD, vp8PredHU, vp8PredDC, vp8PredTM,
+		vp8PredVE, vp8PredHE, vp8PredRD, vp8PredVR,
+	}
+	firstPart, err := vp8FirstPartition(1, 1, qualityToVP8QIndex(75), vp8LoopFilterForIndex(qualityToVP8QIndex(75)), []vp8MBMode{{
+		y4Modes: want,
+		cMode:   vp8PredDC,
+	}})
+	if err != nil {
+		t.Fatalf("vp8FirstPartition failed: %v", err)
+	}
+
+	got := readVP8FirstPartitionY4Modes(t, firstPart)
+	if got != want {
+		t.Fatalf("Y4 modes = %v, want %v", got, want)
+	}
+}
+
 func TestEncodeLossyWithAlphaWritesExtendedChunks(t *testing.T) {
 	img := image.NewNRGBA(image.Rect(4, 5, 7, 7))
 	wantAlpha := []byte{255, 128, 0, 64, 200, 255}
@@ -510,6 +564,89 @@ func readVP8FirstPartition(t *testing.T, frame []byte) []byte {
 		t.Fatalf("first partition length = %d, frame length = %d", firstPartitionLen, len(frame))
 	}
 	return frame[10 : 10+firstPartitionLen]
+}
+
+func readVP8FirstPartitionY4Modes(t *testing.T, firstPart []byte) [16]uint8 {
+	t.Helper()
+	var r testVP8PartitionReader
+	r.init(firstPart)
+
+	r.readUint(128, 1) // color space
+	r.readUint(128, 1) // pixel clamp
+	r.readBit(128)     // segmentation
+	r.readBit(128)     // loop filter type
+	r.readUint(128, 6) // loop filter level
+	r.readUint(128, 3) // sharpness
+	r.readBit(128)     // loop filter delta
+	r.readUint(128, 2) // token partitions
+	r.readUint(128, 7) // base quantizer
+	for i := 0; i < 5; i++ {
+		r.readBit(128)
+	}
+	r.readBit(128) // refresh last frame buffer
+	for plane := range vp8TokenProbUpdateProb {
+		for band := range vp8TokenProbUpdateProb[plane] {
+			for context := range vp8TokenProbUpdateProb[plane][band] {
+				for _, prob := range vp8TokenProbUpdateProb[plane][band][context] {
+					r.readBit(prob)
+				}
+			}
+		}
+	}
+	r.readBit(128) // macroblock skip probability
+	if r.unexpectedEOF {
+		t.Fatal("unexpected end before Y4 modes")
+	}
+	if useY16 := r.readBit(145); useY16 {
+		t.Fatal("macroblock uses Y16 mode, want Y4")
+	}
+
+	var modes [16]uint8
+	var up [4]uint8
+	for by := 0; by < 4; by++ {
+		p := uint8(0)
+		for bx := 0; bx < 4; bx++ {
+			mode := readVP8Y4Mode(&r, vp8PredProb[up[bx]][p])
+			modes[by*4+bx] = mode
+			p = mode
+			up[bx] = mode
+		}
+	}
+	if r.unexpectedEOF {
+		t.Fatal("unexpected end while reading Y4 modes")
+	}
+	return modes
+}
+
+func readVP8Y4Mode(r *testVP8PartitionReader, prob [9]uint8) uint8 {
+	if !r.readBit(prob[0]) {
+		return vp8PredDC
+	}
+	if !r.readBit(prob[1]) {
+		return vp8PredTM
+	}
+	if !r.readBit(prob[2]) {
+		return vp8PredVE
+	}
+	if !r.readBit(prob[3]) {
+		if !r.readBit(prob[4]) {
+			return vp8PredHE
+		}
+		if !r.readBit(prob[5]) {
+			return vp8PredRD
+		}
+		return vp8PredVR
+	}
+	if !r.readBit(prob[6]) {
+		return vp8PredLD
+	}
+	if !r.readBit(prob[7]) {
+		return vp8PredVL
+	}
+	if !r.readBit(prob[8]) {
+		return vp8PredHD
+	}
+	return vp8PredHU
 }
 
 func TestEncodeRejectsInvalidInput(t *testing.T) {
