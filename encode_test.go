@@ -1140,6 +1140,75 @@ func TestAlphaDistanceCodeUsesNormalTreeForNeighborhoodDistances(t *testing.T) {
 	}
 }
 
+func TestAlphaPayloadCandidateSizeMatchesEncodedStream(t *testing.T) {
+	for _, img := range []*image.NRGBA{
+		newAlphaSizeEstimateRunsImage(),
+		newAlphaSizeEstimateNeighborhoodImage(),
+	} {
+		readPixel := pixelReaderFor(img)
+		bounds := img.Bounds()
+		width, height := bounds.Dx(), bounds.Dy()
+		analysis := analyzeLossyAlpha(readPixel, bounds, width, height)
+		candidates := appendAlphaPayloadCandidates(nil, analysis)
+		if len(candidates) == 0 {
+			t.Fatal("no alpha payload candidates")
+		}
+		for _, candidate := range candidates {
+			stream, err := encodeAlphaVP8LStream(readPixel, bounds, width, height, candidate.filter, candidate.code)
+			if err != nil {
+				t.Fatalf("encodeAlphaVP8LStream failed: %v", err)
+			}
+			want := uint64(1 + len(stream))
+			if got := alphaPayloadCandidateSize(candidate); got != want {
+				t.Fatalf("candidate size = %d, want %d", got, want)
+			}
+		}
+	}
+}
+
+func newAlphaSizeEstimateRunsImage() *image.NRGBA {
+	img := image.NewNRGBA(image.Rect(0, 0, 96, 6))
+	for y := 0; y < img.Rect.Dy(); y++ {
+		for x := 0; x < img.Rect.Dx(); x++ {
+			alpha := uint8(32)
+			if (x/12+y)%2 == 1 {
+				alpha = 220
+			}
+			img.SetNRGBA(x, y, color.NRGBA{
+				R: uint8(x*7 + y*3),
+				G: uint8(y*11 + x),
+				B: uint8(x*5 + y*13),
+				A: alpha,
+			})
+		}
+	}
+	return img
+}
+
+func newAlphaSizeEstimateNeighborhoodImage() *image.NRGBA {
+	img := image.NewNRGBA(image.Rect(0, 0, 96, 9))
+	for y := 0; y < img.Rect.Dy(); y++ {
+		shift := 0
+		if y%2 == 1 {
+			shift = -1
+		}
+		for x := 0; x < img.Rect.Dx(); x++ {
+			index := x + shift
+			if index < 0 {
+				index += img.Rect.Dx()
+			}
+			alpha := uint8(32 + (index*37)%191)
+			img.SetNRGBA(x, y, color.NRGBA{
+				R: uint8(x*3 + y),
+				G: uint8(y*5 + x/2),
+				B: uint8((x+y)*2 + x*y/17),
+				A: alpha,
+			})
+		}
+	}
+	return img
+}
+
 func huffmanKraftSumForTest(lengths [nLiteralCodes + nLengthCodes]uint8) int {
 	sum := 0
 	for _, length := range lengths {

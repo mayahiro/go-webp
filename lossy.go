@@ -140,6 +140,12 @@ type alphaPayload struct {
 	stream     []byte
 }
 
+type alphaPayloadCandidate struct {
+	filter byte
+	plan   alphaResidualPlan
+	code   alphaCode
+}
+
 func makeAlphaPayload(readPixel pixelReader, bounds image.Rectangle, width int, height int, analysis lossyAlphaAnalysis) (alphaPayload, error) {
 	rawSize := uint64(1) + uint64(width)*uint64(height)
 	if rawSize > math.MaxUint32 {
@@ -147,6 +153,33 @@ func makeAlphaPayload(readPixel pixelReader, bounds image.Rectangle, width int, 
 	}
 
 	best := alphaPayload{size: rawSize}
+	var candidateBuf [12]alphaPayloadCandidate
+	candidates := appendAlphaPayloadCandidates(candidateBuf[:0], analysis)
+	var bestCandidate alphaPayloadCandidate
+	hasBestCandidate := false
+	for _, candidate := range candidates {
+		size := alphaPayloadCandidateSize(candidate)
+		if size < best.size {
+			best.size = size
+			bestCandidate = candidate
+			hasBestCandidate = true
+		}
+	}
+	if !hasBestCandidate {
+		return best, nil
+	}
+	stream, err := encodeAlphaVP8LStream(readPixel, bounds, width, height, bestCandidate.filter, bestCandidate.code)
+	if err != nil {
+		return alphaPayload{}, err
+	}
+	best.size = uint64(1 + len(stream))
+	best.compressed = true
+	best.filter = bestCandidate.filter
+	best.stream = stream
+	return best, nil
+}
+
+func appendAlphaPayloadCandidates(candidates []alphaPayloadCandidate, analysis lossyAlphaAnalysis) []alphaPayloadCandidate {
 	for filter, plan := range analysis.residuals {
 		if !plan.encodable() {
 			continue
@@ -155,19 +188,7 @@ func makeAlphaPayload(readPixel pixelReader, bounds image.Rectangle, width int, 
 		if !ok {
 			continue
 		}
-		stream, err := encodeAlphaVP8LStream(readPixel, bounds, width, height, byte(filter), code)
-		if err != nil {
-			return alphaPayload{}, err
-		}
-		size := uint64(1 + len(stream))
-		if size < best.size {
-			best = alphaPayload{
-				size:       size,
-				compressed: true,
-				filter:     byte(filter),
-				stream:     stream,
-			}
-		}
+		candidates = append(candidates, alphaPayloadCandidate{filter: byte(filter), plan: plan, code: code})
 	}
 	for filter, plan := range analysis.rleResiduals {
 		if !plan.hasRefs || !plan.encodable() {
@@ -178,19 +199,7 @@ func makeAlphaPayload(readPixel pixelReader, bounds image.Rectangle, width int, 
 			continue
 		}
 		code.lz77 = true
-		stream, err := encodeAlphaVP8LStream(readPixel, bounds, width, height, byte(filter), code)
-		if err != nil {
-			return alphaPayload{}, err
-		}
-		size := uint64(1 + len(stream))
-		if size < best.size {
-			best = alphaPayload{
-				size:       size,
-				compressed: true,
-				filter:     byte(filter),
-				stream:     stream,
-			}
-		}
+		candidates = append(candidates, alphaPayloadCandidate{filter: byte(filter), plan: plan, code: code})
 	}
 	for filter, plan := range analysis.lz77Residuals {
 		if !plan.hasRefs || !plan.encodable() {
@@ -202,21 +211,13 @@ func makeAlphaPayload(readPixel pixelReader, bounds image.Rectangle, width int, 
 		}
 		code.lz77 = true
 		code.rowCopy = true
-		stream, err := encodeAlphaVP8LStream(readPixel, bounds, width, height, byte(filter), code)
-		if err != nil {
-			return alphaPayload{}, err
-		}
-		size := uint64(1 + len(stream))
-		if size < best.size {
-			best = alphaPayload{
-				size:       size,
-				compressed: true,
-				filter:     byte(filter),
-				stream:     stream,
-			}
-		}
+		candidates = append(candidates, alphaPayloadCandidate{filter: byte(filter), plan: plan, code: code})
 	}
-	return best, nil
+	return candidates
+}
+
+func alphaPayloadCandidateSize(candidate alphaPayloadCandidate) uint64 {
+	return 1 + alphaVP8LStreamSize(candidate.plan, candidate.code)
 }
 
 func encodeAlphaVP8LStream(readPixel pixelReader, bounds image.Rectangle, width int, height int, filter byte, code alphaCode) ([]byte, error) {
@@ -285,6 +286,158 @@ func writeAlphaDistanceTree(bits *bitWriter, code alphaCode) {
 	default:
 		writeSimpleTree(bits, 0)
 	}
+}
+
+func alphaVP8LStreamSize(plan alphaResidualPlan, code alphaCode) uint64 {
+	bits := uint64(3)
+	bits += alphaGreenTreeBits(code)
+	bits += 3 * alphaSimpleTreeBits(0)
+	if code.lz77 {
+		bits += alphaDistanceTreeBits(code)
+	} else {
+		bits += alphaSimpleTreeBits(0)
+	}
+	bits += alphaDataBits(plan, code)
+	return (bits + 7) >> 3
+}
+
+func alphaGreenTreeBits(code alphaCode) uint64 {
+	if code.normal {
+		return alphaNormalTreeBits(code.lengths[:])
+	}
+	switch code.n {
+	case 1:
+		return alphaSimpleTreeBits(uint8(code.symbols[0]))
+	case 2:
+		return alphaTwoSymbolTreeBits(uint8(code.symbols[0]))
+	default:
+		return alphaNormalTreeBits(code.lengths[:])
+	}
+}
+
+func alphaDistanceTreeBits(code alphaCode) uint64 {
+	if code.distanceNormal {
+		return alphaNormalTreeBits(code.distanceLengths[:])
+	}
+	switch code.distanceN {
+	case 1:
+		return alphaSimpleTreeBits(code.distanceSymbols[0])
+	case 2:
+		return alphaTwoSymbolTreeBits(code.distanceSymbols[0])
+	default:
+		return alphaSimpleTreeBits(0)
+	}
+}
+
+func alphaSimpleTreeBits(symbol uint8) uint64 {
+	if symbol < 2 {
+		return 4
+	}
+	return 11
+}
+
+func alphaTwoSymbolTreeBits(symbol0 uint8) uint64 {
+	if symbol0 < 2 {
+		return 12
+	}
+	return 19
+}
+
+func alphaNormalTreeBits(lengths []uint8) uint64 {
+	tokens := alphaCodeLengthTokens(lengths)
+	bits := uint64(1 + 4 + len(normalCodeLengthCodeOrder)*3)
+	bits += alphaCodeLengthLimitBits(len(tokens), len(lengths))
+	for _, token := range tokens {
+		bits += uint64(alphaCodeLengthCodeLengths[token.symbol] + token.extraBits)
+	}
+	return bits
+}
+
+func alphaCodeLengthLimitBits(maxSymbol int, alphabetSize int) uint64 {
+	if maxSymbol >= alphabetSize {
+		return 1
+	}
+	if maxSymbol < 2 {
+		maxSymbol = 2
+	}
+	value := maxSymbol - 2
+	nBits := uint8(2)
+	for value >= 1<<nBits {
+		nBits += 2
+	}
+	return uint64(1 + 3 + nBits)
+}
+
+func alphaDataBits(plan alphaResidualPlan, code alphaCode) uint64 {
+	bits := alphaLiteralDataBits(plan, code)
+	if code.lz77 {
+		bits += alphaLengthExtraBits(plan)
+		bits += alphaDistanceDataBits(plan, code)
+	}
+	return bits
+}
+
+func alphaLiteralDataBits(plan alphaResidualPlan, code alphaCode) uint64 {
+	if code.normal {
+		var bits uint64
+		for symbol, count := range plan.counts {
+			bits += uint64(count) * uint64(code.lengths[symbol])
+		}
+		return bits
+	}
+	switch code.n {
+	case 1:
+		return 0
+	case 2:
+		return alphaTotalSymbolCount(plan.counts[:])
+	default:
+		var bits uint64
+		for symbol, count := range plan.counts {
+			bits += uint64(count) * uint64(code.lengths[symbol])
+		}
+		return bits
+	}
+}
+
+func alphaLengthExtraBits(plan alphaResidualPlan) uint64 {
+	var bits uint64
+	for code := 0; code < nLengthCodes; code++ {
+		bits += uint64(plan.counts[nLiteralCodes+code]) * uint64(vp8lLengthPrefixExtraBits(code))
+	}
+	return bits
+}
+
+func vp8lLengthPrefixExtraBits(code int) uint8 {
+	if code < 4 {
+		return 0
+	}
+	return uint8((code - 2) >> 1)
+}
+
+func alphaDistanceDataBits(plan alphaResidualPlan, code alphaCode) uint64 {
+	if code.distanceNormal {
+		var bits uint64
+		for symbol, count := range plan.distanceCounts {
+			bits += uint64(count) * uint64(code.distanceLengths[symbol])
+		}
+		return bits
+	}
+	switch code.distanceN {
+	case 1:
+		return 0
+	case 2:
+		return alphaTotalSymbolCount(plan.distanceCounts[:])
+	default:
+		return 0
+	}
+}
+
+func alphaTotalSymbolCount(counts []uint32) uint64 {
+	var total uint64
+	for _, count := range counts {
+		total += uint64(count)
+	}
+	return total
 }
 
 func writeAlphaNormalTree(bits *bitWriter, lengths []uint8) {
