@@ -291,10 +291,10 @@ func lossyYUVPSNRProxy(m image.Image, quality int) (float64, float64) {
 	quant := vp8QuantForIndex(qualityToVP8QIndex(quality))
 	work := newVP8EncodeBuffers(mbw, mbh)
 	modes := analyzeVP8Modes(readPixel, bounds, mbw, mbh, quant, work)
-	work.clear()
 
 	yStride := mbw * 16
 	cStride := mbw * 8
+	clear(work.recY)
 	for mby := 0; mby < mbh; mby++ {
 		for mbx := 0; mbx < mbw; mbx++ {
 			mode := modes[mby*mbw+mbx]

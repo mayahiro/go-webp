@@ -1148,14 +1148,14 @@ func encodeVP8KeyFrame(readPixel pixelReader, bounds image.Rectangle, width int,
 	filter := vp8LoopFilterForQuant(quant)
 	work := newVP8EncodeBuffers(mbw, mbh)
 	modes := analyzeVP8Modes(readPixel, bounds, mbw, mbh, quant, work)
-	work.clear()
+	clear(work.recY)
 	tokenStats := collectVP8TokenStats(readPixel, bounds, mbw, mbh, quant, modes, work)
 	tokenProbs := chooseVP8TokenProbs(&tokenStats)
 	firstPart, err := vp8FirstPartition(mbw, mbh, qIndex, filter, modes, tokenProbs)
 	if err != nil {
 		return nil, err
 	}
-	work.clear()
+	clear(work.recY)
 	residualPart := encodeVP8Residuals(readPixel, bounds, width, height, mbw, mbh, quant, modes, work, &tokenProbs)
 	frameLen := 10 + len(firstPart) + len(residualPart)
 	frame := make([]byte, 0, frameLen)
@@ -1186,7 +1186,6 @@ type vp8LoopFilter struct {
 }
 
 type vp8EncodeBuffers struct {
-	rec   []uint8
 	recY  []uint8
 	recCb []uint8
 	recCr []uint8
@@ -1213,15 +1212,10 @@ func newVP8EncodeBuffers(mbw int, mbh int) *vp8EncodeBuffers {
 	cSize := cStride * mbh * 8
 	rec := make([]uint8, ySize+2*cSize)
 	return &vp8EncodeBuffers{
-		rec:   rec,
 		recY:  rec[:ySize],
 		recCb: rec[ySize : ySize+cSize],
 		recCr: rec[ySize+cSize:],
 	}
-}
-
-func (b *vp8EncodeBuffers) clear() {
-	clear(b.rec)
 }
 
 func vp8LoopFilterForIndex(qIndex int) vp8LoopFilter {
@@ -2015,12 +2009,8 @@ func chooseVP8Y4Modes(target *lumaTargetBlocks, mbx int, mby int, recY []uint8, 
 			x := mbx*16 + bx*4
 			y := mby*16 + by*4
 			luma := &(*target)[by*4+bx]
-			blockMode, blockScore, blockNZ := chooseVP8Y4Mode(luma, x, y, recY, stride, quant, rd, upPred[bx], p, nz+upNZ[bx])
+			blockMode, blockScore, blockNZ, recon := chooseVP8Y4Mode(luma, x, y, recY, stride, quant, rd, upPred[bx], p, nz+upNZ[bx])
 			mode.y4Modes[by*4+bx] = blockMode
-			pred := predictLuma4(recY, stride, x, y, blockMode)
-			residual := lumaResidualBlockFromTarget(luma, pred)
-			coeff := quantizeVP8Block(residual, quant.y1DC, quant.y1AC)
-			recon := reconstructVP8Block(pred, coeff, quant.y1DC, quant.y1AC)
 			put4(recY, stride, x, y, recon)
 			score += blockScore
 			p = blockMode
@@ -2034,10 +2024,11 @@ func chooseVP8Y4Modes(target *lumaTargetBlocks, mbx int, mby int, recY []uint8, 
 	return score
 }
 
-func chooseVP8Y4Mode(target *[16]uint8, x int, y int, recY []uint8, stride int, quant vp8Quant, rd vp8RDConfig, topPred uint8, leftPred uint8, context uint8) (uint8, int64, uint8) {
+func chooseVP8Y4Mode(target *[16]uint8, x int, y int, recY []uint8, stride int, quant vp8Quant, rd vp8RDConfig, topPred uint8, leftPred uint8, context uint8) (uint8, int64, uint8, [16]uint8) {
 	bestMode := uint8(vp8PredDC)
 	bestScore := int64(1<<63 - 1)
 	bestNZ := uint8(0)
+	var bestRecon [16]uint8
 	for mode := uint8(0); mode < vp8NumPredModes; mode++ {
 		pred := predictLuma4(recY, stride, x, y, mode)
 		residual := lumaResidualBlockFromTarget(target, pred)
@@ -2049,6 +2040,7 @@ func chooseVP8Y4Mode(target *[16]uint8, x int, y int, recY []uint8, stride int, 
 		if score < bestScore {
 			bestScore = score
 			bestMode = mode
+			bestRecon = recon
 			if hasNonZeroBlockCoeff(coeff) {
 				bestNZ = 1
 			} else {
@@ -2056,7 +2048,7 @@ func chooseVP8Y4Mode(target *[16]uint8, x int, y int, recY []uint8, stride int, 
 			}
 		}
 	}
-	return bestMode, bestScore, bestNZ
+	return bestMode, bestScore, bestNZ, bestRecon
 }
 
 func vp8Y4ModeCost(topPred uint8, leftPred uint8, mode uint8) int64 {

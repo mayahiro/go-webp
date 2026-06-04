@@ -576,7 +576,7 @@ func TestVP8Y4ModeSelectionChoosesVertical(t *testing.T) {
 			target[yy*4+xx] = rgbToLuma(c.R, c.G, c.B)
 		}
 	}
-	mode, score, nz := chooseVP8Y4Mode(&target, x, y, recY, stride, quant, rd, vp8PredVE, vp8PredVE, 0)
+	mode, score, nz, _ := chooseVP8Y4Mode(&target, x, y, recY, stride, quant, rd, vp8PredVE, vp8PredVE, 0)
 	if mode != vp8PredVE {
 		t.Fatalf("Y4 mode = %d, want vertical", mode)
 	}
@@ -671,6 +671,71 @@ func TestVP8LastNonZeroCoeffUsesZigzagOrder(t *testing.T) {
 	}
 	if got := vp8LastNonZeroCoeff(coeff, 13); got != -1 {
 		t.Fatalf("last non-zero from 13 = %d, want -1", got)
+	}
+}
+
+func TestVP8PassesIgnoreInitialReconstructionBuffer(t *testing.T) {
+	img := image.NewNRGBA(image.Rect(3, 5, 42, 38))
+	for y := img.Rect.Min.Y; y < img.Rect.Max.Y; y++ {
+		for x := img.Rect.Min.X; x < img.Rect.Max.X; x++ {
+			img.SetNRGBA(x, y, color.NRGBA{
+				R: uint8(x*9 + y*5),
+				G: uint8(y*11 + x*7),
+				B: uint8((x-y)*13 + x*y),
+				A: 255,
+			})
+		}
+	}
+
+	readPixel := pixelReaderFor(img)
+	bounds := img.Bounds()
+	width, height := bounds.Dx(), bounds.Dy()
+	mbw := (width + 15) >> 4
+	mbh := (height + 15) >> 4
+	quant := vp8QuantForIndex(qualityToVP8QIndex(75))
+
+	cleanWork := newVP8EncodeBuffers(mbw, mbh)
+	cleanModes := analyzeVP8Modes(readPixel, bounds, mbw, mbh, quant, cleanWork)
+	dirtyWork := newVP8EncodeBuffers(mbw, mbh)
+	fillVP8EncodeBuffers(dirtyWork, 0xa5)
+	clear(dirtyWork.recY)
+	dirtyModes := analyzeVP8Modes(readPixel, bounds, mbw, mbh, quant, dirtyWork)
+	if len(dirtyModes) != len(cleanModes) {
+		t.Fatalf("dirty mode count = %d, want %d", len(dirtyModes), len(cleanModes))
+	}
+	for i := range cleanModes {
+		if dirtyModes[i] != cleanModes[i] {
+			t.Fatalf("mode[%d] with dirty work = %#v, want %#v", i, dirtyModes[i], cleanModes[i])
+		}
+	}
+
+	cleanStatsWork := newVP8EncodeBuffers(mbw, mbh)
+	cleanStats := collectVP8TokenStats(readPixel, bounds, mbw, mbh, quant, cleanModes, cleanStatsWork)
+	dirtyStatsWork := newVP8EncodeBuffers(mbw, mbh)
+	fillVP8EncodeBuffers(dirtyStatsWork, 0x5a)
+	clear(dirtyStatsWork.recY)
+	dirtyStats := collectVP8TokenStats(readPixel, bounds, mbw, mbh, quant, cleanModes, dirtyStatsWork)
+	if dirtyStats != cleanStats {
+		t.Fatal("token stats depend on the initial reconstruction buffer")
+	}
+
+	tokenProbs := chooseVP8TokenProbs(&cleanStats)
+	cleanResidualWork := newVP8EncodeBuffers(mbw, mbh)
+	cleanResidual := encodeVP8Residuals(readPixel, bounds, width, height, mbw, mbh, quant, cleanModes, cleanResidualWork, &tokenProbs)
+	dirtyResidualWork := newVP8EncodeBuffers(mbw, mbh)
+	fillVP8EncodeBuffers(dirtyResidualWork, 0x3c)
+	clear(dirtyResidualWork.recY)
+	dirtyResidual := encodeVP8Residuals(readPixel, bounds, width, height, mbw, mbh, quant, cleanModes, dirtyResidualWork, &tokenProbs)
+	if !bytes.Equal(dirtyResidual, cleanResidual) {
+		t.Fatal("residual stream depends on the initial reconstruction buffer")
+	}
+}
+
+func fillVP8EncodeBuffers(work *vp8EncodeBuffers, value uint8) {
+	for _, buf := range [][]uint8{work.recY, work.recCb, work.recCr} {
+		for i := range buf {
+			buf[i] = value
+		}
 	}
 }
 
