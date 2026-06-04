@@ -510,6 +510,25 @@ func TestVP8BlockBitCostAccountsForNonZeroCoefficients(t *testing.T) {
 	}
 }
 
+func TestVP8LastNonZeroCoeffUsesZigzagOrder(t *testing.T) {
+	var coeff [16]int
+	if got := vp8LastNonZeroCoeff(coeff, 0); got != -1 {
+		t.Fatalf("zero block last non-zero = %d, want -1", got)
+	}
+
+	coeff[vp8Zigzag[5]] = -1
+	coeff[vp8Zigzag[12]] = 2
+	if got := vp8LastNonZeroCoeff(coeff, 0); got != 12 {
+		t.Fatalf("last non-zero = %d, want 12", got)
+	}
+	if got := vp8LastNonZeroCoeff(coeff, 6); got != 12 {
+		t.Fatalf("last non-zero from 6 = %d, want 12", got)
+	}
+	if got := vp8LastNonZeroCoeff(coeff, 13); got != -1 {
+		t.Fatalf("last non-zero from 13 = %d, want -1", got)
+	}
+}
+
 func TestVP8RecordBlockTokensCollectsBranches(t *testing.T) {
 	var coeff [16]int
 	coeff[0] = 1

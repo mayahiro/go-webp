@@ -418,7 +418,8 @@ func vp8BlockBitCostFromWithProbs(probs *vp8TokenProbs, plane int, context uint8
 	}
 	n := start
 	prob := vp8TokenProbFrom(probs, plane, int(vp8Bands[n]), context)
-	if !vp8HasNonZeroCoeff(coeff, n) {
+	last := vp8LastNonZeroCoeff(coeff, n)
+	if last < n {
 		return vp8BitCost(prob[0], false)
 	}
 	cost := vp8BitCost(prob[0], true)
@@ -444,7 +445,7 @@ func vp8BlockBitCostFromWithProbs(probs *vp8TokenProbs, plane int, context uint8
 		if n == 16 {
 			return cost
 		}
-		if !vp8HasNonZeroCoeff(coeff, n) {
+		if n > last {
 			cost += vp8BitCost(prob[0], false)
 			return cost
 		}
@@ -464,7 +465,8 @@ func encodeVP8BlockFromWithProbs(enc *vp8BoolEncoder, probs *vp8TokenProbs, plan
 	}
 	n := start
 	prob := vp8TokenProbFrom(probs, plane, int(vp8Bands[n]), context)
-	if !vp8HasNonZeroCoeff(coeff, n) {
+	last := vp8LastNonZeroCoeff(coeff, n)
+	if last < n {
 		enc.writeBit(prob[0], false)
 		return 0
 	}
@@ -491,7 +493,7 @@ func encodeVP8BlockFromWithProbs(enc *vp8BoolEncoder, probs *vp8TokenProbs, plan
 		if n == 16 {
 			return 1
 		}
-		if !vp8HasNonZeroCoeff(coeff, n) {
+		if n > last {
 			enc.writeBit(prob[0], false)
 			return 1
 		}
@@ -502,12 +504,16 @@ func encodeVP8BlockFromWithProbs(enc *vp8BoolEncoder, probs *vp8TokenProbs, plan
 }
 
 func vp8HasNonZeroCoeff(coeff [16]int, after int) bool {
-	for i := after; i < 16; i++ {
+	return vp8LastNonZeroCoeff(coeff, after) >= after
+}
+
+func vp8LastNonZeroCoeff(coeff [16]int, start int) int {
+	for i := 15; i >= start; i-- {
 		if coeff[vp8Zigzag[i]] != 0 {
-			return true
+			return i
 		}
 	}
-	return false
+	return -1
 }
 
 func vp8RecordBlockTokens(stats *vp8TokenStats, plane int, context uint8, coeff [16]int) uint8 {
@@ -520,7 +526,8 @@ func vp8RecordBlockTokensFrom(stats *vp8TokenStats, plane int, context uint8, co
 	}
 	n := start
 	band := int(vp8Bands[n])
-	hasNZ := vp8HasNonZeroCoeff(coeff, n)
+	last := vp8LastNonZeroCoeff(coeff, n)
+	hasNZ := last >= n
 	stats.record(plane, band, context, 0, hasNZ)
 	if !hasNZ {
 		return 0
@@ -549,7 +556,7 @@ func vp8RecordBlockTokensFrom(stats *vp8TokenStats, plane int, context uint8, co
 		}
 
 		band = int(vp8Bands[n])
-		hasNZ = vp8HasNonZeroCoeff(coeff, n)
+		hasNZ = n <= last
 		stats.record(plane, band, context, 0, hasNZ)
 		if !hasNZ {
 			return 1
