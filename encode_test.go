@@ -704,6 +704,42 @@ func TestEncodeLossyWithMultiSymbolAlphaWritesCompressedALPH(t *testing.T) {
 	assertLossyVP8Frame(t, chunks[2].payload, 1024, 1)
 }
 
+func TestEncodeLossyWithAlphaRunsUsesBackwardReferences(t *testing.T) {
+	img := image.NewNRGBA(image.Rect(0, 0, 4096, 1))
+	for x := 0; x < img.Rect.Dx(); x++ {
+		alpha := uint8(32)
+		if x/512%2 == 1 {
+			alpha = 220
+		}
+		img.SetNRGBA(x, 0, color.NRGBA{
+			R: uint8(x),
+			G: uint8(x >> 1),
+			B: uint8(x >> 2),
+			A: alpha,
+		})
+	}
+
+	var buf bytes.Buffer
+	if err := Encode(&buf, img, &Options{Compression: CompressionLossy}); err != nil {
+		t.Fatalf("Encode lossy with alpha runs failed: %v", err)
+	}
+
+	chunks := readWebPChunks(t, buf.Bytes())
+	if len(chunks) != 3 {
+		t.Fatalf("chunk count = %d, want 3", len(chunks))
+	}
+	if chunks[1].name != "ALPH" {
+		t.Fatalf("second chunk = %q, want ALPH", chunks[1].name)
+	}
+	if chunks[1].payload[0]&0x03 != alphCompressionVP8L {
+		t.Fatalf("ALPH compression = %d, want %d", chunks[1].payload[0]&0x03, alphCompressionVP8L)
+	}
+	if len(chunks[1].payload) >= 300 {
+		t.Fatalf("compressed ALPH payload size = %d, want less than 300", len(chunks[1].payload))
+	}
+	assertLossyVP8Frame(t, chunks[2].payload, 4096, 1)
+}
+
 func assertLossyVP8Frame(t *testing.T, frame []byte, wantWidth int, wantHeight int) {
 	t.Helper()
 	if len(frame) < 10 {

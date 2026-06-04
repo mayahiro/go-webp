@@ -99,7 +99,8 @@ room for future options.
   encoder uses a simple rate-distortion mode decision heuristic.
 - Lossy images with alpha are written as extended WebP files with an `ALPH`
   chunk. The encoder uses compressed alpha when it is smaller and falls back to
-  raw alpha otherwise.
+  raw alpha otherwise. Compressed alpha uses frequency-coded residuals and
+  distance-1 backward references for repeated residual runs.
 
 ## Limitations
 
@@ -108,8 +109,10 @@ room for future options.
 - Lossy image dimensions must be between 1 and 16383 pixels on each axis.
 - Non-`image.NRGBA` images are converted through `color.NRGBAModel` before
   encoding.
-- Lossy alpha compression is intentionally simple and currently uses
-  frequency-coded alpha residuals without LZ77 references.
+- Lossy alpha compression is intentionally simple and currently uses one global
+  `ALPH` filter, frequency-coded residuals, and distance-1 backward references
+  for repeated residual runs. It does not yet perform general LZ77 match search
+  or block-adaptive alpha entropy coding.
 - Lossy loop filter settings are intentionally conservative and are not yet
   tuned with image-specific perceptual metrics.
 

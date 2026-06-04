@@ -22,6 +22,9 @@ const (
 	alphFilterHorizontal = 1
 	alphFilterVertical   = 2
 	alphFilterGradient   = 3
+
+	alphaMinBackwardRefLength = 4
+	alphaMaxBackwardRefLength = 4096
 )
 
 func encodeLossy(w io.Writer, m image.Image, bounds image.Rectangle, width int, height int, quality int) error {
@@ -157,6 +160,29 @@ func makeAlphaPayload(readPixel pixelReader, bounds image.Rectangle, width int, 
 			}
 		}
 	}
+	for filter, plan := range analysis.rleResiduals {
+		if !plan.hasRefs || !plan.encodable() {
+			continue
+		}
+		code, ok := alphaCodeFor(plan)
+		if !ok {
+			continue
+		}
+		code.rle = true
+		stream, err := encodeAlphaVP8LStream(readPixel, bounds, width, height, byte(filter), code)
+		if err != nil {
+			return alphaPayload{}, err
+		}
+		size := uint64(1 + len(stream))
+		if size < best.size {
+			best = alphaPayload{
+				size:       size,
+				compressed: true,
+				filter:     byte(filter),
+				stream:     stream,
+			}
+		}
+	}
 	return best, nil
 }
 
@@ -183,19 +209,29 @@ func writeAlphaVP8LImageStream(bits *bitWriter, readPixel pixelReader, bounds im
 	writeSimpleTree(bits, 0)
 	writeSimpleTree(bits, 0)
 	writeSimpleTree(bits, 0)
-	writeSimpleTree(bits, 0)
+	if code.rle {
+		writeSimpleTree(bits, 1)
+	} else {
+		writeSimpleTree(bits, 0)
+	}
 
-	if code.n != 1 {
+	if code.rle {
+		writeAlphaRLEBits(bits, readPixel, bounds, width, height, filter, code)
+	} else if code.n != 1 {
 		writeAlphaResidualBits(bits, readPixel, bounds, width, height, filter, code)
 	}
 }
 
 func writeAlphaGreenTree(bits *bitWriter, code alphaCode) {
+	if code.normal {
+		writeAlphaNormalTree(bits, code.lengths)
+		return
+	}
 	switch code.n {
 	case 1:
-		writeSimpleTree(bits, code.symbols[0])
+		writeSimpleTree(bits, uint8(code.symbols[0]))
 	case 2:
-		writeTwoSymbolTree(bits, code.symbols[0], code.symbols[1])
+		writeTwoSymbolTree(bits, uint8(code.symbols[0]), uint8(code.symbols[1]))
 	default:
 		writeAlphaNormalTree(bits, code.lengths)
 	}
@@ -232,7 +268,7 @@ func writeAlphaResidualBits(bits *bitWriter, readPixel pixelReader, bounds image
 			if x > 0 && y > 0 {
 				upperLeft = previous[x-1]
 			}
-			writeAlphaCode(bits, code, alpha-alphaPredictor(filter, x, y, left, above, upperLeft))
+			writeAlphaSymbol(bits, code, int(alpha-alphaPredictor(filter, x, y, left, above, upperLeft)))
 			current[x] = alpha
 			left = alpha
 		}
@@ -240,12 +276,45 @@ func writeAlphaResidualBits(bits *bitWriter, readPixel pixelReader, bounds image
 	}
 }
 
-func writeAlphaCode(bits *bitWriter, code alphaCode, symbol uint8) {
+func writeAlphaRLEBits(bits *bitWriter, readPixel pixelReader, bounds image.Rectangle, width int, height int, filter byte, code alphaCode) {
+	var run alphaRun
+	previous := make([]uint8, width)
+	current := make([]uint8, width)
+	for y := 0; y < height; y++ {
+		left := uint8(0)
+		for x := 0; x < width; x++ {
+			alpha := readPixel(bounds.Min.X+x, bounds.Min.Y+y).A
+			above := uint8(0)
+			if y > 0 {
+				above = previous[x]
+			}
+			upperLeft := uint8(0)
+			if x > 0 && y > 0 {
+				upperLeft = previous[x-1]
+			}
+			run.write(bits, code, alpha-alphaPredictor(filter, x, y, left, above, upperLeft))
+			current[x] = alpha
+			left = alpha
+		}
+		previous, current = current, previous
+	}
+	run.flush(bits, code)
+}
+
+func writeAlphaSymbol(bits *bitWriter, code alphaCode, symbol int) {
+	if code.normal {
+		if code.n == 1 {
+			return
+		}
+		length := code.lengths[symbol]
+		bits.writeBits(uint32(reverseBits(code.codes[symbol], length)), length)
+		return
+	}
 	switch code.n {
 	case 1:
 		return
 	case 2:
-		if symbol == code.symbols[0] {
+		if symbol == int(code.symbols[0]) {
 			bits.writeBits(0, 1)
 		} else {
 			bits.writeBits(1, 1)
@@ -254,6 +323,12 @@ func writeAlphaCode(bits *bitWriter, code alphaCode, symbol uint8) {
 		length := code.lengths[symbol]
 		bits.writeBits(uint32(reverseBits(code.codes[symbol], length)), length)
 	}
+}
+
+func writeAlphaCopy(bits *bitWriter, code alphaCode, length int) {
+	prefix := vp8lPrefixCode(length)
+	writeAlphaSymbol(bits, code, nLiteralCodes+prefix.code)
+	bits.writeBits(prefix.extra, prefix.extraBits)
 }
 
 func writeAlphaChunk(w *bufio.Writer, readPixel pixelReader, bounds image.Rectangle, payload alphaPayload) error {
@@ -285,14 +360,23 @@ func writeAlphaChunk(w *bufio.Writer, readPixel pixelReader, bounds image.Rectan
 }
 
 type lossyAlphaAnalysis struct {
-	hasAlpha  bool
-	residuals [4]alphaResidualPlan
+	hasAlpha     bool
+	residuals    [4]alphaResidualPlan
+	rleResiduals [4]alphaResidualPlan
 }
 
 type alphaResidualPlan struct {
 	n       int
-	symbols [2]uint8
-	counts  [nLiteralCodes]uint32
+	symbols [2]uint16
+	counts  [nLiteralCodes + nLengthCodes]uint32
+	hasRefs bool
+	run     alphaRun
+}
+
+type alphaRun struct {
+	active bool
+	value  uint8
+	length int
 }
 
 func analyzeLossyAlpha(readPixel pixelReader, bounds image.Rectangle, width int, height int) lossyAlphaAnalysis {
@@ -314,26 +398,140 @@ func analyzeLossyAlpha(readPixel pixelReader, bounds image.Rectangle, width int,
 			if x > 0 && y > 0 {
 				upperLeft = previous[x-1]
 			}
-			analysis.residuals[alphFilterNone].observe(alpha)
-			analysis.residuals[alphFilterHorizontal].observe(alpha - alphaPredictor(alphFilterHorizontal, x, y, left, above, upperLeft))
-			analysis.residuals[alphFilterVertical].observe(alpha - alphaPredictor(alphFilterVertical, x, y, left, above, upperLeft))
-			analysis.residuals[alphFilterGradient].observe(alpha - alphaPredictor(alphFilterGradient, x, y, left, above, upperLeft))
+			none := alpha
+			horizontal := alpha - alphaPredictor(alphFilterHorizontal, x, y, left, above, upperLeft)
+			vertical := alpha - alphaPredictor(alphFilterVertical, x, y, left, above, upperLeft)
+			gradient := alpha - alphaPredictor(alphFilterGradient, x, y, left, above, upperLeft)
+			analysis.residuals[alphFilterNone].observe(int(none))
+			analysis.residuals[alphFilterHorizontal].observe(int(horizontal))
+			analysis.residuals[alphFilterVertical].observe(int(vertical))
+			analysis.residuals[alphFilterGradient].observe(int(gradient))
+			analysis.rleResiduals[alphFilterNone].observeRLE(none)
+			analysis.rleResiduals[alphFilterHorizontal].observeRLE(horizontal)
+			analysis.rleResiduals[alphFilterVertical].observeRLE(vertical)
+			analysis.rleResiduals[alphFilterGradient].observeRLE(gradient)
 			current[x] = alpha
 			left = alpha
 		}
 		previous, current = current, previous
 	}
+	for i := range analysis.rleResiduals {
+		analysis.rleResiduals[i].flushRLE()
+	}
 	return analysis
 }
 
-func (p *alphaResidualPlan) observe(value uint8) {
-	if p.counts[value] == 0 {
+func (p *alphaResidualPlan) observe(symbol int) {
+	if p.counts[symbol] == 0 {
 		if p.n < len(p.symbols) {
-			p.symbols[p.n] = value
+			p.symbols[p.n] = uint16(symbol)
 		}
 		p.n++
 	}
-	p.counts[value]++
+	p.counts[symbol]++
+}
+
+func (p *alphaResidualPlan) observeRLE(value uint8) {
+	if !p.run.active {
+		p.run = alphaRun{active: true, value: value, length: 1}
+		return
+	}
+	if p.run.value == value {
+		p.run.length++
+		return
+	}
+	p.flushRLE()
+	p.run = alphaRun{active: true, value: value, length: 1}
+}
+
+func (p *alphaResidualPlan) flushRLE() {
+	if !p.run.active {
+		return
+	}
+	p.observe(int(p.run.value))
+	remaining := p.run.length - 1
+	if remaining >= alphaMinBackwardRefLength {
+		for remaining > 0 {
+			length := remaining
+			if length > alphaMaxBackwardRefLength {
+				length = alphaMaxBackwardRefLength
+			}
+			p.observe(nLiteralCodes + vp8lPrefixCode(length).code)
+			p.hasRefs = true
+			remaining -= length
+		}
+	} else {
+		for ; remaining > 0; remaining-- {
+			p.observe(int(p.run.value))
+		}
+	}
+	p.run = alphaRun{}
+}
+
+func (r *alphaRun) write(bits *bitWriter, code alphaCode, value uint8) {
+	if !r.active {
+		*r = alphaRun{active: true, value: value, length: 1}
+		return
+	}
+	if r.value == value {
+		r.length++
+		return
+	}
+	r.flush(bits, code)
+	*r = alphaRun{active: true, value: value, length: 1}
+}
+
+func (r *alphaRun) flush(bits *bitWriter, code alphaCode) {
+	if !r.active {
+		return
+	}
+	writeAlphaSymbol(bits, code, int(r.value))
+	remaining := r.length - 1
+	if remaining >= alphaMinBackwardRefLength {
+		for remaining > 0 {
+			length := remaining
+			if length > alphaMaxBackwardRefLength {
+				length = alphaMaxBackwardRefLength
+			}
+			writeAlphaCopy(bits, code, length)
+			remaining -= length
+		}
+	} else {
+		for ; remaining > 0; remaining-- {
+			writeAlphaSymbol(bits, code, int(r.value))
+		}
+	}
+	*r = alphaRun{}
+}
+
+type vp8lPrefix struct {
+	code      int
+	extraBits uint8
+	extra     uint32
+}
+
+func vp8lPrefixCode(value int) vp8lPrefix {
+	if value <= 4 {
+		return vp8lPrefix{code: value - 1}
+	}
+	for code := 4; code < nLengthCodes; code++ {
+		extraBits := uint8((code - 2) >> 1)
+		offset := (2 + code&1) << extraBits
+		minValue := offset + 1
+		maxValue := offset + 1<<extraBits
+		if value >= minValue && value <= maxValue {
+			return vp8lPrefix{
+				code:      code,
+				extraBits: extraBits,
+				extra:     uint32(value - minValue),
+			}
+		}
+	}
+	return vp8lPrefix{
+		code:      nLengthCodes - 1,
+		extraBits: 11,
+		extra:     alphaMaxBackwardRefLength - 2049,
+	}
 }
 
 func (p alphaResidualPlan) encodable() bool {
@@ -342,9 +540,11 @@ func (p alphaResidualPlan) encodable() bool {
 
 type alphaCode struct {
 	n       int
-	symbols [2]uint8
+	symbols [2]uint16
 	lengths [nLiteralCodes + nLengthCodes]uint8
-	codes   [nLiteralCodes]uint16
+	codes   [nLiteralCodes + nLengthCodes]uint16
+	rle     bool
+	normal  bool
 }
 
 func alphaCodeFor(plan alphaResidualPlan) (alphaCode, bool) {
@@ -352,20 +552,24 @@ func alphaCodeFor(plan alphaResidualPlan) (alphaCode, bool) {
 	case 0:
 		return alphaCode{}, false
 	case 1:
-		return alphaCode{n: 1, symbols: plan.symbols}, true
+		if plan.symbols[0] < nLiteralCodes {
+			return alphaCode{n: 1, symbols: plan.symbols}, true
+		}
 	case 2:
+		if plan.symbols[0] >= nLiteralCodes || plan.symbols[1] >= nLiteralCodes {
+			break
+		}
 		if plan.symbols[1] < 2 && plan.symbols[0] >= 2 {
 			plan.symbols[0], plan.symbols[1] = plan.symbols[1], plan.symbols[0]
 		}
 		return alphaCode{n: 2, symbols: plan.symbols}, true
-	default:
-		lengths, ok := huffmanCodeLengths(plan.counts)
-		if !ok {
-			return alphaCode{}, false
-		}
-		codes := canonicalCodes(lengths)
-		return alphaCode{n: plan.n, lengths: lengths, codes: codes}, true
 	}
+	lengths, ok := huffmanCodeLengths(plan.counts)
+	if !ok {
+		return alphaCode{}, false
+	}
+	codes := canonicalCodes(lengths)
+	return alphaCode{n: plan.n, lengths: lengths, codes: codes, normal: true}, true
 }
 
 type huffmanNode struct {
@@ -375,7 +579,7 @@ type huffmanNode struct {
 	right  int
 }
 
-func huffmanCodeLengths(counts [nLiteralCodes]uint32) ([nLiteralCodes + nLengthCodes]uint8, bool) {
+func huffmanCodeLengths(counts [nLiteralCodes + nLengthCodes]uint32) ([nLiteralCodes + nLengthCodes]uint8, bool) {
 	var lengths [nLiteralCodes + nLengthCodes]uint8
 	var nodes []huffmanNode
 	var active []int
@@ -386,8 +590,17 @@ func huffmanCodeLengths(counts [nLiteralCodes]uint32) ([nLiteralCodes + nLengthC
 		nodes = append(nodes, huffmanNode{freq: uint64(count), symbol: symbol, left: -1, right: -1})
 		active = append(active, len(nodes)-1)
 	}
-	if len(active) <= 2 {
+	if len(active) == 0 {
 		return lengths, false
+	}
+	if len(active) == 1 {
+		lengths[nodes[active[0]].symbol] = 1
+		return lengths, true
+	}
+	if len(active) == 2 {
+		lengths[nodes[active[0]].symbol] = 1
+		lengths[nodes[active[1]].symbol] = 1
+		return lengths, true
 	}
 
 	for len(active) > 1 {
@@ -459,7 +672,7 @@ func assignHuffmanLengths(lengths []uint8, nodes []huffmanNode, index int, depth
 		assignHuffmanLengths(lengths, nodes, node.right, nextDepth)
 }
 
-func canonicalCodes(lengths [nLiteralCodes + nLengthCodes]uint8) [nLiteralCodes]uint16 {
+func canonicalCodes(lengths [nLiteralCodes + nLengthCodes]uint8) [nLiteralCodes + nLengthCodes]uint16 {
 	var histogram [16]uint16
 	for _, length := range lengths {
 		if length != 0 {
@@ -474,8 +687,8 @@ func canonicalCodes(lengths [nLiteralCodes + nLengthCodes]uint8) [nLiteralCodes]
 		nextCodes[length] = code
 	}
 
-	var codes [nLiteralCodes]uint16
-	for symbol, length := range lengths[:nLiteralCodes] {
+	var codes [nLiteralCodes + nLengthCodes]uint16
+	for symbol, length := range lengths {
 		if length == 0 {
 			continue
 		}

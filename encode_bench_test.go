@@ -17,6 +17,7 @@ const (
 	benchmarkImageLineArt
 	benchmarkImageFlat
 	benchmarkImageAlpha
+	benchmarkImageAlphaBands
 	benchmarkImageColorEdge
 )
 
@@ -44,6 +45,16 @@ func BenchmarkEncodeLossyAlpha128(b *testing.B) {
 		kind:    benchmarkImageAlpha,
 		width:   128,
 		height:  128,
+		quality: 75,
+	})
+}
+
+func BenchmarkEncodeLossyAlphaBands512(b *testing.B) {
+	benchmarkEncodeLossyCase(b, lossyBenchmarkCase{
+		name:    "AlphaBands512Q75",
+		kind:    benchmarkImageAlphaBands,
+		width:   512,
+		height:  512,
 		quality: 75,
 	})
 }
@@ -82,6 +93,7 @@ func lossyBenchmarkCases() []lossyBenchmarkCase {
 		{name: "LineArt256Q75", kind: benchmarkImageLineArt, width: 256, height: 256, quality: 75},
 		{name: "Flat128Q75", kind: benchmarkImageFlat, width: 128, height: 128, quality: 75},
 		{name: "Alpha128Q75", kind: benchmarkImageAlpha, width: 128, height: 128, quality: 75},
+		{name: "AlphaBands512Q75", kind: benchmarkImageAlphaBands, width: 512, height: 512, quality: 75},
 		{name: "ColorEdge128Q75", kind: benchmarkImageColorEdge, width: 128, height: 128, quality: 75},
 	}
 }
@@ -149,7 +161,7 @@ func assertLossyBenchmarkWebP(t *testing.T, data []byte, tc lossyBenchmarkCase) 
 }
 
 func (tc lossyBenchmarkCase) hasAlpha() bool {
-	return tc.kind == benchmarkImageAlpha
+	return tc.kind == benchmarkImageAlpha || tc.kind == benchmarkImageAlphaBands
 }
 
 func newBenchmarkImage(width int, height int, alpha bool) *image.NRGBA {
@@ -203,6 +215,17 @@ func benchmarkPixel(kind benchmarkImageKind, x int, y int) color.NRGBA {
 			G: uint8(y*5 + x/2),
 			B: uint8((x+y)*2 + x*y/17),
 			A: uint8(96 + (x*5+y*7)%160),
+		}
+	case benchmarkImageAlphaBands:
+		alpha := uint8(48)
+		if (x/64+y/16)%2 == 1 {
+			alpha = 224
+		}
+		return color.NRGBA{
+			R: uint8(x*3 + y),
+			G: uint8(y*5 + x/2),
+			B: uint8((x+y)*2 + x*y/17),
+			A: alpha,
 		}
 	case benchmarkImageColorEdge:
 		if (x/16+y/16)%2 == 0 {
