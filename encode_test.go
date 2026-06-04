@@ -590,6 +590,31 @@ func TestVP8Y4ModeSelectionChoosesVertical(t *testing.T) {
 	}
 }
 
+func TestPredictLuma4WithNeighborsMatchesDirectPrediction(t *testing.T) {
+	const stride = 16
+	recY := make([]uint8, stride*16)
+	for i := range recY {
+		recY[i] = uint8(i*37 + i/3)
+	}
+	for _, pos := range []struct {
+		x int
+		y int
+	}{
+		{x: 0, y: 0},
+		{x: 4, y: 4},
+		{x: 12, y: 8},
+	} {
+		neighbors := makeLuma4Neighbors(recY, stride, pos.x, pos.y)
+		for mode := uint8(0); mode < vp8NumPredModes; mode++ {
+			want := predictLuma4(recY, stride, pos.x, pos.y, mode)
+			got := predictLuma4WithNeighbors(&neighbors, mode)
+			if got != want {
+				t.Fatalf("prediction at (%d,%d) mode %d = %v, want %v", pos.x, pos.y, mode, got, want)
+			}
+		}
+	}
+}
+
 func TestVP8FirstPartitionWritesSelectedY4Modes(t *testing.T) {
 	want := [16]uint8{
 		vp8PredDC, vp8PredTM, vp8PredVE, vp8PredHE,

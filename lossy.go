@@ -2275,8 +2275,9 @@ func chooseVP8Y4Mode(target *[16]uint8, x int, y int, recY []uint8, stride int, 
 	bestScore := int64(1<<63 - 1)
 	bestNZ := uint8(0)
 	var bestRecon [16]uint8
+	neighbors := makeLuma4Neighbors(recY, stride, x, y)
 	for mode := uint8(0); mode < vp8NumPredModes; mode++ {
-		pred := predictLuma4(recY, stride, x, y, mode)
+		pred := predictLuma4WithNeighbors(&neighbors, mode)
 		residual := lumaResidualBlockFromTarget(target, pred)
 		coeff := quantizeVP8Block(residual, quant.y1DC, quant.y1AC)
 		recon := reconstructVP8Block(pred, coeff, quant.y1DC, quant.y1AC)
@@ -3063,28 +3064,51 @@ func rgbToChroma(r uint8, g uint8, b uint8) (uint8, uint8) {
 	return uint8(cb), uint8(cr)
 }
 
+type luma4Neighbors struct {
+	topLeft int
+	top     [8]int
+	left    [4]int
+}
+
+func makeLuma4Neighbors(rec []uint8, stride int, x int, y int) luma4Neighbors {
+	var neighbors luma4Neighbors
+	neighbors.topLeft = luma4TopLeft(rec, stride, x, y)
+	for i := range neighbors.top {
+		neighbors.top[i] = luma4Top(rec, stride, x, y, i)
+	}
+	for i := range neighbors.left {
+		neighbors.left[i] = luma4Left(rec, stride, x, y, i)
+	}
+	return neighbors
+}
+
 func predictLuma4(rec []uint8, stride int, x int, y int, mode uint8) [16]uint8 {
-	a := luma4TopLeft(rec, stride, x, y)
-	b := luma4Top(rec, stride, x, y, 0)
-	c := luma4Top(rec, stride, x, y, 1)
-	d := luma4Top(rec, stride, x, y, 2)
-	e := luma4Top(rec, stride, x, y, 3)
-	f := luma4Top(rec, stride, x, y, 4)
-	g := luma4Top(rec, stride, x, y, 5)
-	h := luma4Top(rec, stride, x, y, 6)
-	i := luma4Top(rec, stride, x, y, 7)
-	p := luma4Left(rec, stride, x, y, 0)
-	q := luma4Left(rec, stride, x, y, 1)
-	r := luma4Left(rec, stride, x, y, 2)
-	s := luma4Left(rec, stride, x, y, 3)
+	neighbors := makeLuma4Neighbors(rec, stride, x, y)
+	return predictLuma4WithNeighbors(&neighbors, mode)
+}
+
+func predictLuma4WithNeighbors(neighbors *luma4Neighbors, mode uint8) [16]uint8 {
+	a := neighbors.topLeft
+	b := neighbors.top[0]
+	c := neighbors.top[1]
+	d := neighbors.top[2]
+	e := neighbors.top[3]
+	f := neighbors.top[4]
+	g := neighbors.top[5]
+	h := neighbors.top[6]
+	i := neighbors.top[7]
+	p := neighbors.left[0]
+	q := neighbors.left[1]
+	r := neighbors.left[2]
+	s := neighbors.left[3]
 
 	var block [16]uint8
 	switch mode {
 	case vp8PredTM:
 		for yy := 0; yy < 4; yy++ {
-			left := luma4Left(rec, stride, x, y, yy)
+			left := neighbors.left[yy]
 			for xx := 0; xx < 4; xx++ {
-				block[yy*4+xx] = clipUint8(left + luma4Top(rec, stride, x, y, xx) - a)
+				block[yy*4+xx] = clipUint8(left + neighbors.top[xx] - a)
 			}
 		}
 	case vp8PredVE:
@@ -3203,7 +3227,7 @@ func predictLuma4(rec []uint8, stride int, x int, y int, mode uint8) [16]uint8 {
 			sss, sss, sss, sss,
 		}
 	default:
-		block = pred4DCBlock(rec, stride, x, y)
+		block = pred4DCBlockFromNeighbors(neighbors)
 	}
 	return block
 }
@@ -3245,20 +3269,17 @@ func avg3(a int, b int, c int) uint8 {
 }
 
 func pred4DCBlock(rec []uint8, stride int, x int, y int) [16]uint8 {
+	neighbors := makeLuma4Neighbors(rec, stride, x, y)
+	return pred4DCBlockFromNeighbors(&neighbors)
+}
+
+func pred4DCBlockFromNeighbors(neighbors *luma4Neighbors) [16]uint8 {
 	sum := 4
 	for i := 0; i < 4; i++ {
-		if y == 0 {
-			sum += 0x7f
-		} else {
-			sum += int(rec[(y-1)*stride+x+i])
-		}
+		sum += neighbors.top[i]
 	}
 	for j := 0; j < 4; j++ {
-		if x == 0 {
-			sum += 0x81
-		} else {
-			sum += int(rec[(y+j)*stride+x-1])
-		}
+		sum += neighbors.left[j]
 	}
 	return filledBlock4(uint8(sum / 8))
 }
