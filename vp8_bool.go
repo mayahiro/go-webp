@@ -43,6 +43,30 @@ func (e *vp8BoolEncoder) writeBit(prob uint8, bit bool) {
 	}
 }
 
+func (e *vp8BoolEncoder) writeBitEqualProb(bit bool) {
+	split := (e.range_ + 1) >> 1
+	if bit {
+		e.bottom += split
+		e.range_ -= split
+	} else {
+		e.range_ = split
+	}
+
+	for e.range_ < 128 {
+		e.range_ <<= 1
+		if e.bottom&(1<<31) != 0 {
+			e.addOneToOutput()
+		}
+		e.bottom <<= 1
+		e.bitCount--
+		if e.bitCount == 0 {
+			e.out = append(e.out, byte(e.bottom>>24))
+			e.bottom &= (1 << 24) - 1
+			e.bitCount = 8
+		}
+	}
+}
+
 func (e *vp8BoolEncoder) addOneToOutput() {
 	for i := len(e.out) - 1; i >= 0; i-- {
 		if e.out[i] != 0xff {

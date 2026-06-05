@@ -82,6 +82,7 @@ room for future options.
 ## Performance Notes
 
 - The encoder is pure Go and does not use cgo.
+- See [BENCHMARKS.md](BENCHMARKS.md) for current local benchmark references.
 - It scans the source image twice and does not keep a full converted image in
   memory for lossless encoding.
 - Constant channels are encoded with single-symbol Huffman trees.
@@ -108,7 +109,9 @@ room for future options.
 - Encoding only. Decoding is not implemented.
 - Lossless image dimensions must be between 1 and 16384 pixels on each axis.
 - Lossy image dimensions must be between 1 and 16383 pixels on each axis.
-- Non-`image.NRGBA` images are converted through `color.NRGBAModel` before
+- Standard image types such as `image.NRGBA`, `image.RGBA`, `image.Gray`,
+  `image.YCbCr`, and `image.Paletted` use dedicated read paths. Other image
+  types are read through `color.NRGBAModel`-equivalent conversion before
   encoding.
 - Lossy alpha compression is intentionally simple and currently uses one global
   `ALPH` filter, frequency-coded residuals, and limited backward references for

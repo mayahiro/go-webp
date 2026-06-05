@@ -71,6 +71,47 @@ func BenchmarkEncodeLossyAlphaNeighborhood512(b *testing.B) {
 	})
 }
 
+func BenchmarkEncodeLossyYCbCr512(b *testing.B) {
+	img := newBenchmarkYCbCrFixtureImage(512, 512)
+	benchmarkEncodeLossyImage(b, img, 75, len(img.Y)+len(img.Cb)+len(img.Cr))
+}
+
+func BenchmarkEncodeLossyYCbCrFallback512(b *testing.B) {
+	img := newBenchmarkYCbCrFixtureImage(512, 512)
+	benchmarkEncodeLossyImage(b, benchmarkImageWrapper{Image: img}, 75, len(img.Y)+len(img.Cb)+len(img.Cr))
+}
+
+func BenchmarkEncodeLossyPaletted512(b *testing.B) {
+	img := newBenchmarkPalettedFixtureImage(512, 512)
+	benchmarkEncodeLossyImage(b, img, 75, len(img.Pix)+len(img.Palette)*4)
+}
+
+func BenchmarkEncodeLossyPalettedFallback512(b *testing.B) {
+	img := newBenchmarkPalettedFixtureImage(512, 512)
+	benchmarkEncodeLossyImage(b, benchmarkImageWrapper{Image: img}, 75, len(img.Pix)+len(img.Palette)*4)
+}
+
+func benchmarkEncodeLossyImage(b *testing.B, img image.Image, quality int, inputBytes int) {
+	opts := &Options{Compression: CompressionLossy, Quality: quality}
+	encoded := encodeBenchmarkWebP(b, img, opts)
+	b.SetBytes(int64(inputBytes))
+	b.ReportAllocs()
+	var buf bytes.Buffer
+	b.ResetTimer()
+	for b.Loop() {
+		buf.Reset()
+		if err := Encode(&buf, img, opts); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.ReportMetric(float64(len(encoded)), "encoded_B")
+	b.ReportMetric(float64(len(encoded))/float64(inputBytes), "encoded_per_input")
+}
+
+type benchmarkImageWrapper struct {
+	image.Image
+}
+
 func BenchmarkEncodeLossyGradient1024(b *testing.B) {
 	benchmarkEncodeLossyCase(b, lossyBenchmarkCase{
 		name:    "Gradient1024Q75",
@@ -239,6 +280,35 @@ func newBenchmarkFixtureImage(tc lossyBenchmarkCase) *image.NRGBA {
 	return img
 }
 
+func newBenchmarkYCbCrFixtureImage(width int, height int) *image.YCbCr {
+	img := image.NewYCbCr(image.Rect(0, 0, width, height), image.YCbCrSubsampleRatio420)
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			c := benchmarkPixel(benchmarkImagePhotoLike, x, y)
+			yy, cb, cr := color.RGBToYCbCr(c.R, c.G, c.B)
+			img.Y[img.YOffset(x, y)] = yy
+			ci := img.COffset(x, y)
+			img.Cb[ci] = cb
+			img.Cr[ci] = cr
+		}
+	}
+	return img
+}
+
+func newBenchmarkPalettedFixtureImage(width int, height int) *image.Paletted {
+	palette := make(color.Palette, 256)
+	for i := range palette {
+		palette[i] = benchmarkPixel(benchmarkImagePhotoLike, i*3, i*5)
+	}
+	img := image.NewPaletted(image.Rect(0, 0, width, height), palette)
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			img.Pix[img.PixOffset(x, y)] = uint8(x*3 + y*5 + x*y/17)
+		}
+	}
+	return img
+}
+
 func benchmarkPixel(kind benchmarkImageKind, x int, y int) color.NRGBA {
 	switch kind {
 	case benchmarkImagePhotoLike:
@@ -324,9 +394,11 @@ func lossyYUVPSNRProxy(m image.Image, quality int) (float64, float64) {
 	mbw := (width + 15) >> 4
 	mbh := (height + 15) >> 4
 	readPixel := pixelReaderFor(m)
+	readLuma := lumaReaderFor(m)
+	readChroma := chromaReaderFor(m)
 	quant := vp8QuantForIndex(qualityToVP8QIndex(quality))
 	work := newVP8EncodeBuffers(mbw, mbh)
-	modes := analyzeVP8Modes(readPixel, bounds, mbw, mbh, quant, work)
+	modes := analyzeVP8Modes(readLuma, readChroma, bounds, mbw, mbh, quant, work)
 
 	yStride := mbw * 16
 	cStride := mbw * 8
@@ -334,8 +406,8 @@ func lossyYUVPSNRProxy(m image.Image, quality int) (float64, float64) {
 	for mby := 0; mby < mbh; mby++ {
 		for mbx := 0; mbx < mbw; mbx++ {
 			mode := modes[mby*mbw+mbx]
-			reconstructVP8LumaMB(readPixel, bounds, mbx, mby, work.recY, yStride, quant, mode)
-			reconstructVP8ChromaMB(readPixel, bounds, mbx, mby, work.recCb, work.recCr, cStride, quant, mode)
+			reconstructVP8LumaMB(readLuma, bounds, mbx, mby, work.recY, yStride, quant, mode)
+			reconstructVP8ChromaMB(readChroma, bounds, mbx, mby, work.recCb, work.recCr, cStride, quant, mode)
 		}
 	}
 
@@ -353,8 +425,8 @@ func lossyYUVPSNRProxy(m image.Image, quality int) (float64, float64) {
 	var uvErr float64
 	for y := 0; y < chromaHeight; y++ {
 		for x := 0; x < chromaWidth; x++ {
-			wantCb := chromaSample(readPixel, bounds, x*2, y*2, true)
-			wantCr := chromaSample(readPixel, bounds, x*2, y*2, false)
+			wantCb := chromaSample(readChroma, bounds, x*2, y*2, true)
+			wantCr := chromaSample(readChroma, bounds, x*2, y*2, false)
 			gotCb := work.recCb[y*cStride+x]
 			gotCr := work.recCr[y*cStride+x]
 			uvErr += squareFloat(float64(int(wantCb) - int(gotCb)))

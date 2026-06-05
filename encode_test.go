@@ -9,6 +9,26 @@ import (
 	"testing"
 )
 
+func TestVP8BoolEncoderEqualProbMatchesWriteBit(t *testing.T) {
+	bits := []bool{
+		false, true, true, false, true, false, false, true,
+		true, true, false, false, false, true, false, true,
+		false, false, true, true, true, false, true, false,
+	}
+	generic := newVP8BoolEncoder()
+	equal := newVP8BoolEncoder()
+	for i, bit := range bits {
+		generic.writeBit(128, bit)
+		equal.writeBitEqualProb(bit)
+		if generic.range_ != equal.range_ || generic.bottom != equal.bottom || generic.bitCount != equal.bitCount || !bytes.Equal(generic.out, equal.out) {
+			t.Fatalf("state after bit %d differs: generic={range:%d bottom:%d bitCount:%d out:%v} equal={range:%d bottom:%d bitCount:%d out:%v}", i, generic.range_, generic.bottom, generic.bitCount, generic.out, equal.range_, equal.bottom, equal.bitCount, equal.out)
+		}
+	}
+	if got, want := equal.bytes(), generic.bytes(); !bytes.Equal(got, want) {
+		t.Fatalf("bytes = %v, want %v", got, want)
+	}
+}
+
 func TestEncodeRoundTripNRGBA(t *testing.T) {
 	img := image.NewNRGBA(image.Rect(10, 20, 12, 22))
 	want := []color.NRGBA{
@@ -55,11 +75,21 @@ func TestPixelReaderForFastPaths(t *testing.T) {
 	nrgba.SetNRGBA(3, 5, color.NRGBA{R: 1, G: 2, B: 3, A: 4})
 	nrgba.SetNRGBA(4, 5, color.NRGBA{R: 250, G: 251, B: 252, A: 253})
 	readNRGBA := pixelReaderFor(nrgba)
+	readNRGBALuma := lumaReaderFor(nrgba)
+	readNRGBAChroma := chromaReaderFor(nrgba)
 	if got, want := readNRGBA(3, 5), (color.NRGBA{R: 1, G: 2, B: 3, A: 4}); got != want {
 		t.Fatalf("NRGBA pixel = %#v, want %#v", got, want)
 	}
 	if got, want := readNRGBA(4, 5), (color.NRGBA{R: 250, G: 251, B: 252, A: 253}); got != want {
 		t.Fatalf("NRGBA pixel = %#v, want %#v", got, want)
+	}
+	if got, want := readNRGBALuma(4, 5), rgbToLuma(250, 251, 252); got != want {
+		t.Fatalf("NRGBA luma = %d, want %d", got, want)
+	}
+	gotCb, gotCr := readNRGBAChroma(4, 5)
+	wantCb, wantCr := rgbToChroma(250, 251, 252)
+	if gotCb != wantCb || gotCr != wantCr {
+		t.Fatalf("NRGBA chroma = (%d,%d), want (%d,%d)", gotCb, gotCr, wantCb, wantCr)
 	}
 
 	rgba := image.NewRGBA(image.Rect(7, 11, 10, 12))
@@ -72,11 +102,88 @@ func TestPixelReaderForFastPaths(t *testing.T) {
 		rgba.SetRGBA(rgba.Rect.Min.X+i, rgba.Rect.Min.Y, c)
 	}
 	readRGBA := pixelReaderFor(rgba)
+	readRGBALuma := lumaReaderFor(rgba)
+	readRGBAChroma := chromaReaderFor(rgba)
 	for i := range values {
 		x := rgba.Rect.Min.X + i
 		want := color.NRGBAModel.Convert(rgba.RGBAAt(x, rgba.Rect.Min.Y)).(color.NRGBA)
 		if got := readRGBA(x, rgba.Rect.Min.Y); got != want {
 			t.Fatalf("RGBA pixel %d = %#v, want %#v", i, got, want)
+		}
+		wantLuma := rgbToLuma(want.R, want.G, want.B)
+		if got := readRGBALuma(x, rgba.Rect.Min.Y); got != wantLuma {
+			t.Fatalf("RGBA luma %d = %d, want %d", i, got, wantLuma)
+		}
+		gotCb, gotCr := readRGBAChroma(x, rgba.Rect.Min.Y)
+		wantCb, wantCr := rgbToChroma(want.R, want.G, want.B)
+		if gotCb != wantCb || gotCr != wantCr {
+			t.Fatalf("RGBA chroma %d = (%d,%d), want (%d,%d)", i, gotCb, gotCr, wantCb, wantCr)
+		}
+	}
+
+	ycbcr := image.NewYCbCr(image.Rect(5, 7, 9, 11), image.YCbCrSubsampleRatio420)
+	for y := ycbcr.Rect.Min.Y; y < ycbcr.Rect.Max.Y; y++ {
+		for x := ycbcr.Rect.Min.X; x < ycbcr.Rect.Max.X; x++ {
+			ycbcr.Y[ycbcr.YOffset(x, y)] = uint8(32 + x*11 + y*7)
+			ci := ycbcr.COffset(x, y)
+			ycbcr.Cb[ci] = uint8(96 + ci*13)
+			ycbcr.Cr[ci] = uint8(160 + ci*17)
+		}
+	}
+	readYCbCr := pixelReaderFor(ycbcr)
+	readYCbCrLuma := lumaReaderFor(ycbcr)
+	readYCbCrChroma := chromaReaderFor(ycbcr)
+	for _, p := range []image.Point{
+		{X: 5, Y: 7},
+		{X: 6, Y: 7},
+		{X: 8, Y: 10},
+	} {
+		want := color.NRGBAModel.Convert(ycbcr.YCbCrAt(p.X, p.Y)).(color.NRGBA)
+		if got := readYCbCr(p.X, p.Y); got != want {
+			t.Fatalf("YCbCr pixel at %v = %#v, want %#v", p, got, want)
+		}
+		wantLuma := rgbToLuma(want.R, want.G, want.B)
+		if got := readYCbCrLuma(p.X, p.Y); got != wantLuma {
+			t.Fatalf("YCbCr luma at %v = %d, want %d", p, got, wantLuma)
+		}
+		gotCb, gotCr := readYCbCrChroma(p.X, p.Y)
+		wantCb, wantCr := rgbToChroma(want.R, want.G, want.B)
+		if gotCb != wantCb || gotCr != wantCr {
+			t.Fatalf("YCbCr chroma at %v = (%d,%d), want (%d,%d)", p, gotCb, gotCr, wantCb, wantCr)
+		}
+	}
+
+	paletted := image.NewPaletted(image.Rect(2, 4, 6, 6), color.Palette{
+		color.NRGBA{R: 3, G: 5, B: 7, A: 255},
+		color.RGBA{R: 64, G: 96, B: 128, A: 160},
+		color.Gray{Y: 210},
+		color.NRGBA{R: 250, G: 16, B: 48, A: 80},
+	})
+	for y := paletted.Rect.Min.Y; y < paletted.Rect.Max.Y; y++ {
+		for x := paletted.Rect.Min.X; x < paletted.Rect.Max.X; x++ {
+			paletted.SetColorIndex(x, y, uint8((x+y)%len(paletted.Palette)))
+		}
+	}
+	readPaletted := pixelReaderFor(paletted)
+	readPalettedLuma := lumaReaderFor(paletted)
+	readPalettedChroma := chromaReaderFor(paletted)
+	for _, p := range []image.Point{
+		{X: 2, Y: 4},
+		{X: 5, Y: 4},
+		{X: 4, Y: 5},
+	} {
+		want := color.NRGBAModel.Convert(paletted.At(p.X, p.Y)).(color.NRGBA)
+		if got := readPaletted(p.X, p.Y); got != want {
+			t.Fatalf("Paletted pixel at %v = %#v, want %#v", p, got, want)
+		}
+		wantLuma := rgbToLuma(want.R, want.G, want.B)
+		if got := readPalettedLuma(p.X, p.Y); got != wantLuma {
+			t.Fatalf("Paletted luma at %v = %d, want %d", p, got, wantLuma)
+		}
+		gotCb, gotCr := readPalettedChroma(p.X, p.Y)
+		wantCb, wantCr := rgbToChroma(want.R, want.G, want.B)
+		if gotCb != wantCb || gotCr != wantCr {
+			t.Fatalf("Paletted chroma at %v = (%d,%d), want (%d,%d)", p, gotCb, gotCr, wantCb, wantCr)
 		}
 	}
 }
@@ -287,13 +394,13 @@ func TestChromaSampleFilteredUsesNeighboringPixels(t *testing.T) {
 	img.SetNRGBA(1, 1, red)
 	img.SetNRGBA(2, 1, red)
 
-	readPixel := pixelReaderFor(img)
+	readChroma := chromaReaderFor(img)
 	redCb, redCr := rgbToChroma(red.R, red.G, red.B)
 	blueCb, blueCr := rgbToChroma(blue.R, blue.G, blue.B)
 	simpleCb := uint8((int(redCb)*2 + int(blueCb)*2 + 2) / 4)
 	simpleCr := uint8((int(redCr)*2 + int(blueCr)*2 + 2) / 4)
-	gotCb := chromaSample(readPixel, img.Bounds(), 1, 1, true)
-	gotCr := chromaSample(readPixel, img.Bounds(), 1, 1, false)
+	gotCb := chromaSample(readChroma, img.Bounds(), 1, 1, true)
+	gotCr := chromaSample(readChroma, img.Bounds(), 1, 1, false)
 	if gotCb <= simpleCb || gotCb >= blueCb {
 		t.Fatalf("filtered Cb = %d, want between simple %d and blue %d", gotCb, simpleCb, blueCb)
 	}
@@ -305,12 +412,12 @@ func TestChromaSampleFilteredUsesNeighboringPixels(t *testing.T) {
 func TestChromaSampleFilteredClampsImageEdges(t *testing.T) {
 	img := image.NewNRGBA(image.Rect(0, 0, 1, 1))
 	img.SetNRGBA(0, 0, color.NRGBA{R: 20, G: 180, B: 80, A: 255})
-	readPixel := pixelReaderFor(img)
+	readChroma := chromaReaderFor(img)
 	wantCb, wantCr := rgbToChroma(20, 180, 80)
-	if got := chromaSample(readPixel, img.Bounds(), 0, 0, true); got != wantCb {
+	if got := chromaSample(readChroma, img.Bounds(), 0, 0, true); got != wantCb {
 		t.Fatalf("edge Cb = %d, want %d", got, wantCb)
 	}
-	if got := chromaSample(readPixel, img.Bounds(), 0, 0, false); got != wantCr {
+	if got := chromaSample(readChroma, img.Bounds(), 0, 0, false); got != wantCr {
 		t.Fatalf("edge Cr = %d, want %d", got, wantCr)
 	}
 }
@@ -327,7 +434,7 @@ func TestChromaSampleFilteredInBoundsMatchesClampedPath(t *testing.T) {
 			})
 		}
 	}
-	readPixel := pixelReaderFor(img)
+	readChroma := chromaReaderFor(img)
 	bounds := img.Bounds()
 	for _, tc := range []struct {
 		x  int
@@ -341,8 +448,8 @@ func TestChromaSampleFilteredInBoundsMatchesClampedPath(t *testing.T) {
 		{x: bounds.Dx() - 3, y: bounds.Dy() - 3, cb: true},
 		{x: bounds.Dx() - 3, y: bounds.Dy() - 3, cb: false},
 	} {
-		got := chromaSampleFiltered(readPixel, bounds, tc.x, tc.y, tc.cb)
-		want := chromaSampleFilteredClamped(readPixel, bounds, tc.x, tc.y, tc.cb)
+		got := chromaSampleFiltered(readChroma, bounds, tc.x, tc.y, tc.cb)
+		want := chromaSampleFilteredClamped(readChroma, bounds, tc.x, tc.y, tc.cb)
 		if got != want {
 			t.Fatalf("sample at (%d,%d) cb=%v = %d, want %d", tc.x, tc.y, tc.cb, got, want)
 		}
@@ -362,7 +469,7 @@ func TestChromaTargetMBMatchesChromaSamples(t *testing.T) {
 		}
 	}
 
-	readPixel := pixelReaderFor(img)
+	readChroma := chromaReaderFor(img)
 	bounds := img.Bounds()
 	for _, tc := range []struct {
 		mbx int
@@ -372,20 +479,112 @@ func TestChromaTargetMBMatchesChromaSamples(t *testing.T) {
 		{mbx: 1, mby: 1},
 		{mbx: 3, mby: 3},
 	} {
-		target := makeChromaTargetMB(readPixel, bounds, tc.mbx, tc.mby)
+		target := makeChromaTargetMB(readChroma, bounds, tc.mbx, tc.mby)
 		for y := 0; y < 8; y++ {
 			for x := 0; x < 8; x++ {
 				sampleX := tc.mbx*16 + x*2
 				sampleY := tc.mby*16 + y*2
 				i := y*8 + x
-				if got, want := target.cb[i], chromaSample(readPixel, bounds, sampleX, sampleY, true); got != want {
+				if got, want := target.cb[i], chromaSample(readChroma, bounds, sampleX, sampleY, true); got != want {
 					t.Fatalf("target Cb mb=(%d,%d) xy=(%d,%d) = %d, want %d", tc.mbx, tc.mby, x, y, got, want)
 				}
-				if got, want := target.cr[i], chromaSample(readPixel, bounds, sampleX, sampleY, false); got != want {
+				if got, want := target.cr[i], chromaSample(readChroma, bounds, sampleX, sampleY, false); got != want {
 					t.Fatalf("target Cr mb=(%d,%d) xy=(%d,%d) = %d, want %d", tc.mbx, tc.mby, x, y, got, want)
 				}
 			}
 		}
+	}
+}
+
+func TestChromaPairCacheMatchesInBoundsSampler(t *testing.T) {
+	img := image.NewNRGBA(image.Rect(3, 5, 70, 74))
+	for y := img.Rect.Min.Y; y < img.Rect.Max.Y; y++ {
+		for x := img.Rect.Min.X; x < img.Rect.Max.X; x++ {
+			img.SetNRGBA(x, y, color.NRGBA{
+				R: uint8(x*29 + y*7),
+				G: uint8(y*31 + x*5),
+				B: uint8((x-y)*13 + x*y),
+				A: 255,
+			})
+		}
+	}
+
+	readChroma := chromaReaderFor(img)
+	bounds := img.Bounds()
+	baseX, baseY := 16, 16
+	cache := makeChromaPairCacheMB(readChroma, bounds.Min.X+baseX, bounds.Min.Y+baseY)
+	for y := 0; y < 8; y++ {
+		for x := 0; x < 8; x++ {
+			sampleX := x * 2
+			sampleY := y * 2
+			gotCb, gotCr := chromaSamplePairFromCache(&cache, sampleX, sampleY)
+			wantCb, wantCr := chromaSamplePairInBounds(readChroma, bounds.Min.X+baseX+sampleX, bounds.Min.Y+baseY+sampleY)
+			if gotCb != wantCb || gotCr != wantCr {
+				t.Fatalf("cached chroma xy=(%d,%d) = (%d,%d), want (%d,%d)", x, y, gotCb, gotCr, wantCb, wantCr)
+			}
+		}
+	}
+}
+
+func TestChromaTargetReuseMatchesFreshTarget(t *testing.T) {
+	img := image.NewNRGBA(image.Rect(3, 5, 70, 74))
+	for y := img.Rect.Min.Y; y < img.Rect.Max.Y; y++ {
+		for x := img.Rect.Min.X; x < img.Rect.Max.X; x++ {
+			img.SetNRGBA(x, y, color.NRGBA{
+				R: uint8(x*11 + y*7),
+				G: uint8(y*13 + x*5),
+				B: uint8((x-y)*19 + x*y),
+				A: 255,
+			})
+		}
+	}
+
+	readChroma := chromaReaderFor(img)
+	bounds := img.Bounds()
+	mbw := (bounds.Dx() + 15) >> 4
+	mbh := (bounds.Dy() + 15) >> 4
+	stride := mbw * 8
+	mbx, mby := 1, 1
+	quant := vp8QuantForIndex(qualityToVP8QIndex(75))
+	rd := newVP8RDConfig(quant)
+	recCb := make([]uint8, stride*mbh*8)
+	recCr := make([]uint8, stride*mbh*8)
+	for i := range recCb {
+		recCb[i] = uint8(i*17 + i/5)
+		recCr[i] = uint8(i*23 + i/7)
+	}
+
+	left := [4]uint8{1, 0, 1, 0}
+	up := [4]uint8{0, 1, 0, 1}
+	freshLeft, freshUp := left, up
+	reuseLeft, reuseUp := left, up
+	target := makeChromaTargetMB(readChroma, bounds, mbx, mby)
+	freshMode := chooseVP8ChromaMode(readChroma, bounds, mbx, mby, recCb, recCr, stride, quant, rd, &freshLeft, &freshUp)
+	reuseMode := chooseVP8ChromaModeFromTarget(&target, mbx, mby, recCb, recCr, stride, quant, rd, &reuseLeft, &reuseUp)
+	if reuseMode != freshMode {
+		t.Fatalf("reused chroma mode = %d, want %d", reuseMode, freshMode)
+	}
+	if reuseLeft != freshLeft || reuseUp != freshUp {
+		t.Fatal("chroma mode selection mutated reuse context differently")
+	}
+
+	mode := vp8MBMode{cMode: freshMode}
+	freshCb := append([]uint8(nil), recCb...)
+	freshCr := append([]uint8(nil), recCr...)
+	reuseCb := append([]uint8(nil), recCb...)
+	reuseCr := append([]uint8(nil), recCr...)
+	freshLeft, freshUp = left, up
+	reuseLeft, reuseUp = left, up
+	processVP8ChromaMB(nil, readChroma, bounds, mbx, mby, freshCb, freshCr, stride, quant, mode, &freshLeft, &freshUp, nil, nil)
+	processVP8ChromaTargetMB(&target, nil, mbx, mby, reuseCb, reuseCr, stride, quant, mode, &reuseLeft, &reuseUp, nil, nil)
+	if !bytes.Equal(reuseCb, freshCb) {
+		t.Fatal("reused chroma target produced different Cb reconstruction")
+	}
+	if !bytes.Equal(reuseCr, freshCr) {
+		t.Fatal("reused chroma target produced different Cr reconstruction")
+	}
+	if reuseLeft != freshLeft || reuseUp != freshUp {
+		t.Fatal("reused chroma target produced different context state")
 	}
 }
 
@@ -403,6 +602,7 @@ func TestLumaTargetMBMatchesSampledLuma(t *testing.T) {
 	}
 
 	readPixel := pixelReaderFor(img)
+	readLuma := lumaReaderFor(img)
 	bounds := img.Bounds()
 	for _, tc := range []struct {
 		mbx int
@@ -412,14 +612,15 @@ func TestLumaTargetMBMatchesSampledLuma(t *testing.T) {
 		{mbx: 1, mby: 1},
 		{mbx: 3, mby: 3},
 	} {
-		target := makeLumaTargetMB(readPixel, bounds, tc.mbx, tc.mby)
+		target := makeLumaTargetMB(readLuma, bounds, tc.mbx, tc.mby)
 		for y := 0; y < 16; y++ {
 			for x := 0; x < 16; x++ {
 				sampleX := tc.mbx*16 + x
 				sampleY := tc.mby*16 + y
 				c := samplePixel(readPixel, bounds, sampleX, sampleY)
 				want := rgbToLuma(c.R, c.G, c.B)
-				if got := target.y[y*16+x]; got != want {
+				got := target.blocks[(y/4)*4+x/4][(y%4)*4+x%4]
+				if got != want {
 					t.Fatalf("target Y mb=(%d,%d) xy=(%d,%d) = %d, want %d", tc.mbx, tc.mby, x, y, got, want)
 				}
 			}
@@ -446,6 +647,7 @@ func TestLumaResidualBlockMatchesSampledLuma(t *testing.T) {
 	}
 
 	readPixel := pixelReaderFor(img)
+	readLuma := lumaReaderFor(img)
 	bounds := img.Bounds()
 	for _, pos := range []struct {
 		x int
@@ -454,7 +656,7 @@ func TestLumaResidualBlockMatchesSampledLuma(t *testing.T) {
 		{x: 4, y: 8},
 		{x: 64, y: 66},
 	} {
-		got := lumaResidualBlock(readPixel, bounds, pos.x, pos.y, pred)
+		got := lumaResidualBlock(readLuma, bounds, pos.x, pos.y, pred)
 		var want [16]int
 		for yy := 0; yy < 4; yy++ {
 			for xx := 0; xx < 4; xx++ {
@@ -555,6 +757,24 @@ func TestVP8BlockQuantizationKeepsAC(t *testing.T) {
 	}
 }
 
+func TestVP8BlockQuantizationACOnlyMatchesZeroDC(t *testing.T) {
+	transformed := [16]int{
+		1200, -96, 80, -64,
+		48, -32, 16, -8,
+		7, -6, 5, -4,
+		3, -2, 1, -1,
+	}
+	quant := vp8QuantForIndex(qualityToVP8QIndex(75))
+	got := quantizeTransformedVP8BlockACOnly(transformed, quant.y1AC)
+	want := quantizeTransformedVP8Block(transformed, 0, quant.y1AC)
+	if got != want {
+		t.Fatalf("AC-only quantized coeff = %#v, want %#v", got, want)
+	}
+	if got[0] != 0 {
+		t.Fatalf("AC-only DC coeff = %d, want 0", got[0])
+	}
+}
+
 func TestVP8Y16ModeSelectionChoosesVertical(t *testing.T) {
 	img := image.NewNRGBA(image.Rect(0, 0, 16, 32))
 	recY := make([]uint8, 16*32)
@@ -570,7 +790,7 @@ func TestVP8Y16ModeSelectionChoosesVertical(t *testing.T) {
 	rd := newVP8RDConfig(quant)
 	var left, up [4]uint8
 	var leftY16, upY16 uint8
-	target := makeLumaTargetMB(pixelReaderFor(img), img.Bounds(), 0, 1)
+	target := makeLumaTargetMB(lumaReaderFor(img), img.Bounds(), 0, 1)
 	blocks := makeLumaTargetBlocks(&target)
 	mode, score := chooseVP8Y16Mode(&blocks, 0, 1, recY, 16, quant, rd, &left, &up, &leftY16, &upY16)
 	if mode != vp8PredVE {
@@ -629,6 +849,32 @@ func TestVP8Y4ModeSelectionChoosesVertical(t *testing.T) {
 	wantBits := vp8Y4ModeCost(vp8PredVE, vp8PredVE, vp8PredVE) + vp8BlockBitCost(vp8PlaneY1SansY2, 0, zero)
 	if want := rd.lumaScore(0, wantBits); score != want {
 		t.Fatalf("Y4 vertical score = %d, want %d", score, want)
+	}
+}
+
+func TestVP8Y4ModeCostTableMatchesProbabilityTree(t *testing.T) {
+	for topPred := uint8(0); topPred < vp8NumPredModes; topPred++ {
+		for leftPred := uint8(0); leftPred < vp8NumPredModes; leftPred++ {
+			prob := vp8PredProb[topPred][leftPred]
+			for mode := uint8(0); mode < vp8NumPredModes; mode++ {
+				got := vp8Y4ModeCost(topPred, leftPred, mode)
+				want := vp8Y4ModeCostFromProb(prob, mode)
+				if got != want {
+					t.Fatalf("cost top=%d left=%d mode=%d = %d, want %d", topPred, leftPred, mode, got, want)
+				}
+			}
+		}
+	}
+}
+
+func TestVP8MacroblockModeCostTablesMatchBranchCosts(t *testing.T) {
+	for mode := uint8(0); mode < vp8NumPredModes; mode++ {
+		if got, want := vp8Y16ModeCost(mode), vp8Y16ModeCostFromMode(mode); got != want {
+			t.Fatalf("Y16 cost mode=%d = %d, want %d", mode, got, want)
+		}
+		if got, want := vp8ChromaModeCost(mode), vp8ChromaModeCostFromMode(mode); got != want {
+			t.Fatalf("chroma cost mode=%d = %d, want %d", mode, got, want)
+		}
 	}
 }
 
@@ -719,6 +965,164 @@ func TestVP8BlockBitCostDefaultMatchesExplicitDefaultProbs(t *testing.T) {
 		if got != want {
 			t.Fatalf("default cost plane=%d context=%d start=%d = %d, want %d", tc.plane, tc.context, tc.start, got, want)
 		}
+		gotWithNZ, gotNZ := vp8BlockBitCostFromAndNonZero(tc.plane, tc.context, coeff, tc.start)
+		if gotWithNZ != got {
+			t.Fatalf("default cost with nz plane=%d context=%d start=%d = %d, want %d", tc.plane, tc.context, tc.start, gotWithNZ, got)
+		}
+		ptrCost, ptrNZ := vp8BlockBitCostFromAndNonZeroPtr(tc.plane, tc.context, &coeff, tc.start)
+		if ptrCost != gotWithNZ || ptrNZ != gotNZ {
+			t.Fatalf("pointer default cost plane=%d context=%d start=%d = (%d,%v), want (%d,%v)", tc.plane, tc.context, tc.start, ptrCost, ptrNZ, gotWithNZ, gotNZ)
+		}
+		wantNZ := vp8HasNonZeroCoeff(coeff, tc.start)
+		if gotNZ != wantNZ {
+			t.Fatalf("default nz plane=%d context=%d start=%d = %v, want %v", tc.plane, tc.context, tc.start, gotNZ, wantNZ)
+		}
+	}
+
+	var zero [16]int
+	zeroStartCost := vp8BlockBitCost(vp8PlaneY1SansY2, 2, zero)
+	zeroStartCostWithNZ, zeroStartNZ := vp8BlockBitCostAndNonZero(vp8PlaneY1SansY2, 2, zero)
+	if zeroStartCostWithNZ != zeroStartCost {
+		t.Fatalf("zero start cost with nz = %d, want %d", zeroStartCostWithNZ, zeroStartCost)
+	}
+	if zeroStartNZ {
+		t.Fatal("zero block from start reported non-zero coefficients")
+	}
+
+	zeroCost := vp8BlockBitCostFrom(vp8PlaneY1WithY2, 2, zero, 1)
+	zeroCostWithNZ, zeroNZ := vp8BlockBitCostFromAndNonZero(vp8PlaneY1WithY2, 2, zero, 1)
+	if zeroCostWithNZ != zeroCost {
+		t.Fatalf("zero cost with nz = %d, want %d", zeroCostWithNZ, zeroCost)
+	}
+	if zeroNZ {
+		t.Fatal("zero block reported non-zero coefficients")
+	}
+}
+
+func TestEncodeVP8ZeroBlockWritesOnlyEOB(t *testing.T) {
+	var zero [16]int
+	customProbs := vp8DefaultTokenProbs
+	customProbs[vp8PlaneY1WithY2][1][2][0] = 17
+	for _, tc := range []struct {
+		name     string
+		plane    int
+		context  uint8
+		start    int
+		probs    *vp8TokenProbs
+		wantProb uint8
+		wantCtx  uint8
+		wantBand int
+	}{
+		{
+			name:     "start",
+			plane:    vp8PlaneY1SansY2,
+			context:  0,
+			start:    0,
+			wantProb: vp8DefaultTokenProbs[vp8PlaneY1SansY2][0][0][0],
+			wantCtx:  0,
+			wantBand: 0,
+		},
+		{
+			name:     "skip-first",
+			plane:    vp8PlaneY1WithY2,
+			context:  1,
+			start:    1,
+			wantProb: vp8DefaultTokenProbs[vp8PlaneY1WithY2][1][1][0],
+			wantCtx:  1,
+			wantBand: 1,
+		},
+		{
+			name:     "clamped-context-and-custom-probs",
+			plane:    vp8PlaneY1WithY2,
+			context:  7,
+			start:    1,
+			probs:    &customProbs,
+			wantProb: customProbs[vp8PlaneY1WithY2][1][2][0],
+			wantCtx:  2,
+			wantBand: 1,
+		},
+	} {
+		gotEnc := newVP8BoolEncoder()
+		gotNZ := encodeVP8BlockFromWithProbs(gotEnc, tc.probs, tc.plane, tc.context, zero, tc.start)
+		if gotNZ != 0 {
+			t.Fatalf("%s non-zero flag = %d, want 0", tc.name, gotNZ)
+		}
+
+		wantEnc := newVP8BoolEncoder()
+		wantEnc.writeBit(tc.wantProb, false)
+		if got, want := gotEnc.bytes(), wantEnc.bytes(); !bytes.Equal(got, want) {
+			t.Fatalf("%s bytes = %v, want %v", tc.name, got, want)
+		}
+		if got := vp8TokenProbFrom(tc.probs, tc.plane, tc.wantBand, tc.wantCtx)[0]; got != tc.wantProb {
+			t.Fatalf("%s token prob = %d, want %d", tc.name, got, tc.wantProb)
+		}
+	}
+}
+
+func TestVP8RecordZeroBlockTokensOnlyRecordsEOB(t *testing.T) {
+	var zero [16]int
+	for _, tc := range []struct {
+		name    string
+		plane   int
+		context uint8
+		start   int
+	}{
+		{name: "start", plane: vp8PlaneY1SansY2, context: 0, start: 0},
+		{name: "skip-first", plane: vp8PlaneY1WithY2, context: 1, start: 1},
+		{name: "clamped-context", plane: vp8PlaneUV, context: 9, start: 3},
+	} {
+		var got vp8TokenStats
+		gotNZ := vp8RecordBlockTokensFrom(&got, tc.plane, tc.context, zero, tc.start)
+		if gotNZ != 0 {
+			t.Fatalf("%s non-zero flag = %d, want 0", tc.name, gotNZ)
+		}
+
+		wantContext := tc.context
+		if wantContext > 2 {
+			wantContext = 2
+		}
+		var want vp8TokenStats
+		want.record(tc.plane, int(vp8Bands[tc.start]), wantContext, 0, false)
+		if got != want {
+			t.Fatalf("%s stats = %#v, want %#v", tc.name, got, want)
+		}
+	}
+}
+
+func TestVP8BlockFromIgnoresCoefficientsBeforeStart(t *testing.T) {
+	var zero [16]int
+	coeff := zero
+	coeff[0] = 7
+
+	const (
+		plane   = vp8PlaneY1WithY2
+		context = uint8(2)
+		start   = 1
+	)
+	if got, want := vp8BlockBitCostFrom(plane, context, coeff, start), vp8BlockBitCostFrom(plane, context, zero, start); got != want {
+		t.Fatalf("cost = %d, want %d", got, want)
+	}
+
+	gotEnc := newVP8BoolEncoder()
+	gotNZ := encodeVP8BlockFrom(gotEnc, plane, context, coeff, start)
+	wantEnc := newVP8BoolEncoder()
+	wantNZ := encodeVP8BlockFrom(wantEnc, plane, context, zero, start)
+	if gotNZ != wantNZ {
+		t.Fatalf("non-zero flag = %d, want %d", gotNZ, wantNZ)
+	}
+	if got, want := gotEnc.bytes(), wantEnc.bytes(); !bytes.Equal(got, want) {
+		t.Fatalf("bytes = %v, want %v", got, want)
+	}
+
+	var gotStats vp8TokenStats
+	gotStatsNZ := vp8RecordBlockTokensFrom(&gotStats, plane, context, coeff, start)
+	var wantStats vp8TokenStats
+	wantStatsNZ := vp8RecordBlockTokensFrom(&wantStats, plane, context, zero, start)
+	if gotStatsNZ != wantStatsNZ {
+		t.Fatalf("stats non-zero flag = %d, want %d", gotStatsNZ, wantStatsNZ)
+	}
+	if gotStats != wantStats {
+		t.Fatalf("stats = %#v, want %#v", gotStats, wantStats)
 	}
 }
 
@@ -754,7 +1158,8 @@ func TestVP8PassesIgnoreInitialReconstructionBuffer(t *testing.T) {
 		}
 	}
 
-	readPixel := pixelReaderFor(img)
+	readLuma := lumaReaderFor(img)
+	readChroma := chromaReaderFor(img)
 	bounds := img.Bounds()
 	width, height := bounds.Dx(), bounds.Dy()
 	mbw := (width + 15) >> 4
@@ -762,11 +1167,11 @@ func TestVP8PassesIgnoreInitialReconstructionBuffer(t *testing.T) {
 	quant := vp8QuantForIndex(qualityToVP8QIndex(75))
 
 	cleanWork := newVP8EncodeBuffers(mbw, mbh)
-	cleanModes := analyzeVP8Modes(readPixel, bounds, mbw, mbh, quant, cleanWork)
+	cleanModes := analyzeVP8Modes(readLuma, readChroma, bounds, mbw, mbh, quant, cleanWork)
 	dirtyWork := newVP8EncodeBuffers(mbw, mbh)
 	fillVP8EncodeBuffers(dirtyWork, 0xa5)
 	clear(dirtyWork.recY)
-	dirtyModes := analyzeVP8Modes(readPixel, bounds, mbw, mbh, quant, dirtyWork)
+	dirtyModes := analyzeVP8Modes(readLuma, readChroma, bounds, mbw, mbh, quant, dirtyWork)
 	if len(dirtyModes) != len(cleanModes) {
 		t.Fatalf("dirty mode count = %d, want %d", len(dirtyModes), len(cleanModes))
 	}
@@ -777,24 +1182,85 @@ func TestVP8PassesIgnoreInitialReconstructionBuffer(t *testing.T) {
 	}
 
 	cleanStatsWork := newVP8EncodeBuffers(mbw, mbh)
-	cleanStats := collectVP8TokenStats(readPixel, bounds, mbw, mbh, quant, cleanModes, cleanStatsWork)
+	cleanStats := collectVP8TokenStats(readLuma, readChroma, bounds, mbw, mbh, quant, cleanModes, cleanStatsWork)
 	dirtyStatsWork := newVP8EncodeBuffers(mbw, mbh)
 	fillVP8EncodeBuffers(dirtyStatsWork, 0x5a)
 	clear(dirtyStatsWork.recY)
-	dirtyStats := collectVP8TokenStats(readPixel, bounds, mbw, mbh, quant, cleanModes, dirtyStatsWork)
+	dirtyStats := collectVP8TokenStats(readLuma, readChroma, bounds, mbw, mbh, quant, cleanModes, dirtyStatsWork)
 	if dirtyStats != cleanStats {
 		t.Fatal("token stats depend on the initial reconstruction buffer")
 	}
 
 	tokenProbs := chooseVP8TokenProbs(&cleanStats)
 	cleanResidualWork := newVP8EncodeBuffers(mbw, mbh)
-	cleanResidual := encodeVP8Residuals(readPixel, bounds, width, height, mbw, mbh, quant, cleanModes, cleanResidualWork, &tokenProbs)
+	cleanResidual := encodeVP8Residuals(readLuma, readChroma, bounds, width, height, mbw, mbh, quant, cleanModes, cleanResidualWork, &tokenProbs)
 	dirtyResidualWork := newVP8EncodeBuffers(mbw, mbh)
 	fillVP8EncodeBuffers(dirtyResidualWork, 0x3c)
 	clear(dirtyResidualWork.recY)
-	dirtyResidual := encodeVP8Residuals(readPixel, bounds, width, height, mbw, mbh, quant, cleanModes, dirtyResidualWork, &tokenProbs)
+	dirtyResidual := encodeVP8Residuals(readLuma, readChroma, bounds, width, height, mbw, mbh, quant, cleanModes, dirtyResidualWork, &tokenProbs)
 	if !bytes.Equal(dirtyResidual, cleanResidual) {
 		t.Fatal("residual stream depends on the initial reconstruction buffer")
+	}
+}
+
+func TestVP8PassesIgnoreWorkspaceTopState(t *testing.T) {
+	img := image.NewNRGBA(image.Rect(0, 0, 257, 17))
+	for y := img.Rect.Min.Y; y < img.Rect.Max.Y; y++ {
+		for x := img.Rect.Min.X; x < img.Rect.Max.X; x++ {
+			img.SetNRGBA(x, y, color.NRGBA{
+				R: uint8(x*3 + y*17),
+				G: uint8(y*19 + x*5),
+				B: uint8((x-y)*11 + x*y),
+				A: 255,
+			})
+		}
+	}
+
+	readLuma := lumaReaderFor(img)
+	readChroma := chromaReaderFor(img)
+	bounds := img.Bounds()
+	width, height := bounds.Dx(), bounds.Dy()
+	mbw := (width + 15) >> 4
+	mbh := (height + 15) >> 4
+	quant := vp8QuantForIndex(qualityToVP8QIndex(75))
+
+	cleanWork := newVP8EncodeBuffers(mbw, mbh)
+	if cleanWork.top == nil {
+		t.Fatal("test image did not allocate top workspace")
+	}
+	cleanModes := analyzeVP8Modes(readLuma, readChroma, bounds, mbw, mbh, quant, cleanWork)
+	dirtyWork := newVP8EncodeBuffers(mbw, mbh)
+	fillVP8EncodeBuffers(dirtyWork, 0xd7)
+	clear(dirtyWork.recY)
+	dirtyModes := analyzeVP8Modes(readLuma, readChroma, bounds, mbw, mbh, quant, dirtyWork)
+	if len(dirtyModes) != len(cleanModes) {
+		t.Fatalf("dirty mode count = %d, want %d", len(dirtyModes), len(cleanModes))
+	}
+	for i := range cleanModes {
+		if dirtyModes[i] != cleanModes[i] {
+			t.Fatalf("mode[%d] with dirty top workspace = %#v, want %#v", i, dirtyModes[i], cleanModes[i])
+		}
+	}
+
+	cleanStatsWork := newVP8EncodeBuffers(mbw, mbh)
+	cleanStats := collectVP8TokenStats(readLuma, readChroma, bounds, mbw, mbh, quant, cleanModes, cleanStatsWork)
+	dirtyStatsWork := newVP8EncodeBuffers(mbw, mbh)
+	fillVP8EncodeBuffers(dirtyStatsWork, 0x93)
+	clear(dirtyStatsWork.recY)
+	dirtyStats := collectVP8TokenStats(readLuma, readChroma, bounds, mbw, mbh, quant, cleanModes, dirtyStatsWork)
+	if dirtyStats != cleanStats {
+		t.Fatal("token stats depend on dirty top workspace")
+	}
+
+	tokenProbs := chooseVP8TokenProbs(&cleanStats)
+	cleanResidualWork := newVP8EncodeBuffers(mbw, mbh)
+	cleanResidual := encodeVP8Residuals(readLuma, readChroma, bounds, width, height, mbw, mbh, quant, cleanModes, cleanResidualWork, &tokenProbs)
+	dirtyResidualWork := newVP8EncodeBuffers(mbw, mbh)
+	fillVP8EncodeBuffers(dirtyResidualWork, 0x41)
+	clear(dirtyResidualWork.recY)
+	dirtyResidual := encodeVP8Residuals(readLuma, readChroma, bounds, width, height, mbw, mbh, quant, cleanModes, dirtyResidualWork, &tokenProbs)
+	if !bytes.Equal(dirtyResidual, cleanResidual) {
+		t.Fatal("residual stream depends on dirty top workspace")
 	}
 }
 
@@ -803,6 +1269,27 @@ func fillVP8EncodeBuffers(work *vp8EncodeBuffers, value uint8) {
 		for i := range buf {
 			buf[i] = value
 		}
+	}
+	if work.top == nil {
+		return
+	}
+	for i := range work.top.modes {
+		work.top.modes[i] = vp8MBMode{
+			useY16: value&1 != 0,
+			yMode:  value,
+			cMode:  value,
+		}
+		for j := range work.top.modes[i].y4Modes {
+			work.top.modes[i].y4Modes[j] = value
+		}
+	}
+	for _, states := range [][][4]uint8{work.top.upPred, work.top.upY, work.top.upUV} {
+		for i := range states {
+			states[i] = [4]uint8{value, value, value, value}
+		}
+	}
+	for i := range work.top.upY16 {
+		work.top.upY16[i] = value
 	}
 }
 
@@ -1109,6 +1596,17 @@ func TestAlphaCodeLengthTokensUseZeroRunCodes(t *testing.T) {
 	}
 	if !foundBigZeroRun {
 		t.Fatal("missing long zero-run code length token")
+	}
+	gotTokenBits, gotTokenCount := alphaCodeLengthTokenBits(lengths[:])
+	if gotTokenCount != len(tokens) {
+		t.Fatalf("code length token count from bit scan = %d, want %d", gotTokenCount, len(tokens))
+	}
+	var wantTokenBits uint64
+	for _, token := range tokens {
+		wantTokenBits += uint64(alphaCodeLengthCodeLengths[token.symbol] + token.extraBits)
+	}
+	if gotTokenBits != wantTokenBits {
+		t.Fatalf("code length token bits = %d, want %d", gotTokenBits, wantTokenBits)
 	}
 
 	got := expandAlphaCodeLengthTokensForTest(tokens, 261)

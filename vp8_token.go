@@ -375,6 +375,7 @@ var vp8DefaultTokenProbs = makeVP8DefaultTokenProbs()
 const vp8CoeffValueCostCacheLimit = 256
 
 var vp8DefaultCoeffValueSignBitCosts [4][8][3][vp8CoeffValueCostCacheLimit]int32
+var vp8ZeroCoeff [16]int
 
 func init() {
 	initVP8DefaultCoeffValueSignBitCosts()
@@ -426,8 +427,24 @@ func vp8BlockBitCost(plane int, context uint8, coeff [16]int) int64 {
 	return vp8BlockBitCostFromDefault(plane, context, coeff, 0)
 }
 
+func vp8BlockBitCostAndNonZero(plane int, context uint8, coeff [16]int) (int64, bool) {
+	return vp8BlockBitCostFromDefaultAndNonZeroPtr(plane, context, &coeff, 0)
+}
+
+func vp8BlockBitCostAndNonZeroPtr(plane int, context uint8, coeff *[16]int) (int64, bool) {
+	return vp8BlockBitCostFromDefaultAndNonZeroPtr(plane, context, coeff, 0)
+}
+
 func vp8BlockBitCostFrom(plane int, context uint8, coeff [16]int, start int) int64 {
 	return vp8BlockBitCostFromDefault(plane, context, coeff, start)
+}
+
+func vp8BlockBitCostFromAndNonZero(plane int, context uint8, coeff [16]int, start int) (int64, bool) {
+	return vp8BlockBitCostFromDefaultAndNonZeroPtr(plane, context, &coeff, start)
+}
+
+func vp8BlockBitCostFromAndNonZeroPtr(plane int, context uint8, coeff *[16]int, start int) (int64, bool) {
+	return vp8BlockBitCostFromDefaultAndNonZeroPtr(plane, context, coeff, start)
 }
 
 func vp8BlockBitCostWithProbs(probs *vp8TokenProbs, plane int, context uint8, coeff [16]int) int64 {
@@ -439,7 +456,7 @@ func vp8BlockBitCostFromWithProbs(probs *vp8TokenProbs, plane int, context uint8
 		context = 2
 	}
 	n := start
-	prob := vp8TokenProbFrom(probs, plane, int(vp8Bands[n]), context)
+	prob := vp8TokenProbPtr(probs, plane, int(vp8Bands[n]), context)
 	last := vp8LastNonZeroCoeff(coeff, n)
 	if last < n {
 		return vp8BitCost(prob[0], false)
@@ -452,7 +469,7 @@ func vp8BlockBitCostFromWithProbs(probs *vp8TokenProbs, plane int, context uint8
 		v := coeff[z]
 		if v == 0 {
 			cost += vp8BitCost(prob[1], false)
-			prob = vp8TokenProbFrom(probs, plane, int(vp8Bands[n]), 0)
+			prob = vp8TokenProbPtr(probs, plane, int(vp8Bands[n]), 0)
 			continue
 		}
 
@@ -461,9 +478,9 @@ func vp8BlockBitCostFromWithProbs(probs *vp8TokenProbs, plane int, context uint8
 		if absCoeff < 0 {
 			absCoeff = -absCoeff
 		}
-		cost += vp8CoeffValueBitCost(prob, absCoeff)
+		cost += vp8CoeffValueBitCostFrom(prob, absCoeff)
 		cost += vp8BitCost(128, v < 0)
-		prob = vp8TokenProbFrom(probs, plane, int(vp8Bands[n]), coeffContext(absCoeff))
+		prob = vp8TokenProbPtr(probs, plane, int(vp8Bands[n]), coeffContext(absCoeff))
 		if n == 16 {
 			return cost
 		}
@@ -478,31 +495,43 @@ func vp8BlockBitCostFromWithProbs(probs *vp8TokenProbs, plane int, context uint8
 }
 
 func vp8BlockBitCostFromDefault(plane int, context uint8, coeff [16]int, start int) int64 {
+	cost, _ := vp8BlockBitCostFromDefaultAndNonZeroPtr(plane, context, &coeff, start)
+	return cost
+}
+
+func vp8BlockBitCostFromDefaultAndNonZero(plane int, context uint8, coeff [16]int, start int) (int64, bool) {
+	return vp8BlockBitCostFromDefaultAndNonZeroPtr(plane, context, &coeff, start)
+}
+
+func vp8BlockBitCostFromDefaultAndNonZeroPtr(plane int, context uint8, coeff *[16]int, start int) (int64, bool) {
 	if context > 2 {
 		context = 2
 	}
 	n := start
 	band := int(vp8Bands[n])
-	prob := vp8DefaultTokenProbs[plane][band][context]
-	last := vp8LastNonZeroCoeff(coeff, n)
-	if last < n {
-		return vp8BitCost(prob[0], false)
+	prob := &vp8DefaultTokenProbs[plane][band][context]
+	if *coeff == vp8ZeroCoeff {
+		return vp8BitCostTable[prob[0]][0], false
 	}
-	cost := vp8BitCost(prob[0], true)
+	last := vp8LastNonZeroCoeffPtr(coeff, n)
+	if last < n {
+		return vp8BitCostTable[prob[0]][0], false
+	}
+	cost := vp8BitCostTable[prob[0]][1]
 
 	for n != 16 {
 		n++
 		z := int(vp8Zigzag[n-1])
 		v := coeff[z]
 		if v == 0 {
-			cost += vp8BitCost(prob[1], false)
+			cost += vp8BitCostTable[prob[1]][0]
 			band = int(vp8Bands[n])
 			context = 0
-			prob = vp8DefaultTokenProbs[plane][band][context]
+			prob = &vp8DefaultTokenProbs[plane][band][context]
 			continue
 		}
 
-		cost += vp8BitCost(prob[1], true)
+		cost += vp8BitCostTable[prob[1]][1]
 		absCoeff := v
 		if absCoeff < 0 {
 			absCoeff = -absCoeff
@@ -510,22 +539,22 @@ func vp8BlockBitCostFromDefault(plane int, context uint8, coeff [16]int, start i
 		if absCoeff < vp8CoeffValueCostCacheLimit {
 			cost += int64(vp8DefaultCoeffValueSignBitCosts[plane][band][context][absCoeff])
 		} else {
-			cost += vp8CoeffValueBitCost(prob, absCoeff) + vp8BitCost(128, false)
+			cost += vp8CoeffValueBitCostFrom(prob, absCoeff) + vp8BitCostTable[128][0]
 		}
 		context = coeffContext(absCoeff)
 		if n == 16 {
-			return cost
+			return cost, true
 		}
 		band = int(vp8Bands[n])
-		prob = vp8DefaultTokenProbs[plane][band][context]
+		prob = &vp8DefaultTokenProbs[plane][band][context]
 		if n > last {
-			cost += vp8BitCost(prob[0], false)
-			return cost
+			cost += vp8BitCostTable[prob[0]][0]
+			return cost, true
 		}
-		cost += vp8BitCost(prob[0], true)
+		cost += vp8BitCostTable[prob[0]][1]
 	}
 
-	return cost
+	return cost, true
 }
 
 func encodeVP8BlockFrom(enc *vp8BoolEncoder, plane int, context uint8, coeff [16]int, start int) uint8 {
@@ -537,7 +566,11 @@ func encodeVP8BlockFromWithProbs(enc *vp8BoolEncoder, probs *vp8TokenProbs, plan
 		context = 2
 	}
 	n := start
-	prob := vp8TokenProbFrom(probs, plane, int(vp8Bands[n]), context)
+	prob := vp8TokenProbPtr(probs, plane, int(vp8Bands[n]), context)
+	if coeff == vp8ZeroCoeff {
+		enc.writeBit(prob[0], false)
+		return 0
+	}
 	last := vp8LastNonZeroCoeff(coeff, n)
 	if last < n {
 		enc.writeBit(prob[0], false)
@@ -551,7 +584,7 @@ func encodeVP8BlockFromWithProbs(enc *vp8BoolEncoder, probs *vp8TokenProbs, plan
 		v := coeff[z]
 		if v == 0 {
 			enc.writeBit(prob[1], false)
-			prob = vp8TokenProbFrom(probs, plane, int(vp8Bands[n]), 0)
+			prob = vp8TokenProbPtr(probs, plane, int(vp8Bands[n]), 0)
 			continue
 		}
 
@@ -561,8 +594,8 @@ func encodeVP8BlockFromWithProbs(enc *vp8BoolEncoder, probs *vp8TokenProbs, plan
 			absCoeff = -absCoeff
 		}
 		encodeVP8CoeffValue(enc, prob, absCoeff)
-		enc.writeBit(128, v < 0)
-		prob = vp8TokenProbFrom(probs, plane, int(vp8Bands[n]), coeffContext(absCoeff))
+		enc.writeBitEqualProb(v < 0)
+		prob = vp8TokenProbPtr(probs, plane, int(vp8Bands[n]), coeffContext(absCoeff))
 		if n == 16 {
 			return 1
 		}
@@ -577,10 +610,14 @@ func encodeVP8BlockFromWithProbs(enc *vp8BoolEncoder, probs *vp8TokenProbs, plan
 }
 
 func vp8HasNonZeroCoeff(coeff [16]int, after int) bool {
-	return vp8LastNonZeroCoeff(coeff, after) >= after
+	return vp8LastNonZeroCoeffPtr(&coeff, after) >= after
 }
 
 func vp8LastNonZeroCoeff(coeff [16]int, start int) int {
+	return vp8LastNonZeroCoeffPtr(&coeff, start)
+}
+
+func vp8LastNonZeroCoeffPtr(coeff *[16]int, start int) int {
 	for i := 15; i >= start; i-- {
 		if coeff[vp8Zigzag[i]] != 0 {
 			return i
@@ -599,6 +636,10 @@ func vp8RecordBlockTokensFrom(stats *vp8TokenStats, plane int, context uint8, co
 	}
 	n := start
 	band := int(vp8Bands[n])
+	if coeff == vp8ZeroCoeff {
+		stats.record(plane, band, context, 0, false)
+		return 0
+	}
 	last := vp8LastNonZeroCoeff(coeff, n)
 	hasNZ := last >= n
 	stats.record(plane, band, context, 0, hasNZ)
@@ -688,7 +729,7 @@ func (stats *vp8TokenStats) record(plane int, band int, context uint8, node int,
 	counts.zero++
 }
 
-func encodeVP8CoeffValue(enc *vp8BoolEncoder, prob [11]uint8, v int) {
+func encodeVP8CoeffValue(enc *vp8BoolEncoder, prob *[11]uint8, v int) {
 	if v <= 1 {
 		enc.writeBit(prob[2], false)
 		return
@@ -731,6 +772,10 @@ func encodeVP8CoeffValue(enc *vp8BoolEncoder, prob [11]uint8, v int) {
 }
 
 func vp8CoeffValueBitCost(prob [11]uint8, v int) int64 {
+	return vp8CoeffValueBitCostFrom(&prob, v)
+}
+
+func vp8CoeffValueBitCostFrom(prob *[11]uint8, v int) int64 {
 	if v <= 1 {
 		return vp8BitCost(prob[2], false)
 	}
@@ -801,6 +846,10 @@ func vp8TokenProb(plane int, band int, context uint8) [11]uint8 {
 }
 
 func vp8TokenProbFrom(probs *vp8TokenProbs, plane int, band int, context uint8) [11]uint8 {
+	return *vp8TokenProbPtr(probs, plane, band, context)
+}
+
+func vp8TokenProbPtr(probs *vp8TokenProbs, plane int, band int, context uint8) *[11]uint8 {
 	if context > 2 {
 		context = 2
 	}
@@ -811,9 +860,9 @@ func vp8TokenProbFrom(probs *vp8TokenProbs, plane int, band int, context uint8) 
 		band = len(vp8UVTokenProb) - 1
 	}
 	if probs != nil {
-		return probs[plane][band][context]
+		return &probs[plane][band][context]
 	}
-	return vp8DefaultTokenProbs[plane][band][context]
+	return &vp8DefaultTokenProbs[plane][band][context]
 }
 
 func vp8StaticTokenProb(plane int, band int, context uint8) [11]uint8 {

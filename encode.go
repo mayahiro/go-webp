@@ -156,6 +156,8 @@ type channelPlan struct {
 }
 
 type pixelReader func(x int, y int) color.NRGBA
+type lumaReader func(x int, y int) uint8
+type chromaReader func(x int, y int) (uint8, uint8)
 
 func analyzeImage(readPixel pixelReader, bounds image.Rectangle) imageAnalysis {
 	var a imageAnalysis
@@ -218,12 +220,33 @@ func pixelReaderFor(m image.Image) pixelReader {
 			return color.NRGBA{R: gray, G: gray, B: gray, A: 255}
 		}
 	case *image.YCbCr:
+		yPix := img.Y
+		cbPix := img.Cb
+		crPix := img.Cr
 		return func(x int, y int) color.NRGBA {
-			return color.NRGBAModel.Convert(img.YCbCrAt(x, y)).(color.NRGBA)
+			yy := yPix[img.YOffset(x, y)]
+			ci := img.COffset(x, y)
+			cb := cbPix[ci]
+			cr := crPix[ci]
+			r, g, b := color.YCbCrToRGB(yy, cb, cr)
+			return color.NRGBA{R: r, G: g, B: b, A: 255}
 		}
 	case *image.Paletted:
+		if len(img.Palette) == 0 {
+			return func(x int, y int) color.NRGBA {
+				return color.NRGBAModel.Convert(img.At(x, y)).(color.NRGBA)
+			}
+		}
+		palette := make([]color.NRGBA, len(img.Palette))
+		for i, c := range img.Palette {
+			palette[i] = color.NRGBAModel.Convert(c).(color.NRGBA)
+		}
+		pix := img.Pix
+		stride := img.Stride
+		minX := img.Rect.Min.X
+		minY := img.Rect.Min.Y
 		return func(x int, y int) color.NRGBA {
-			return color.NRGBAModel.Convert(img.At(x, y)).(color.NRGBA)
+			return palette[pix[(y-minY)*stride+x-minX]]
 		}
 	case *image.Uniform:
 		c := color.NRGBAModel.Convert(img.C).(color.NRGBA)
@@ -233,6 +256,156 @@ func pixelReaderFor(m image.Image) pixelReader {
 	default:
 		return func(x int, y int) color.NRGBA {
 			return color.NRGBAModel.Convert(m.At(x, y)).(color.NRGBA)
+		}
+	}
+}
+
+func lumaReaderFor(m image.Image) lumaReader {
+	switch img := m.(type) {
+	case *image.NRGBA:
+		pix := img.Pix
+		stride := img.Stride
+		minX := img.Rect.Min.X
+		minY := img.Rect.Min.Y
+		return func(x int, y int) uint8 {
+			i := (y-minY)*stride + (x-minX)*4
+			return rgbToLuma(pix[i+0], pix[i+1], pix[i+2])
+		}
+	case *image.RGBA:
+		pix := img.Pix
+		stride := img.Stride
+		minX := img.Rect.Min.X
+		minY := img.Rect.Min.Y
+		return func(x int, y int) uint8 {
+			i := (y-minY)*stride + (x-minX)*4
+			c := nrgbaFromRGBA(pix[i+0], pix[i+1], pix[i+2], pix[i+3])
+			return rgbToLuma(c.R, c.G, c.B)
+		}
+	case *image.Gray:
+		pix := img.Pix
+		stride := img.Stride
+		minX := img.Rect.Min.X
+		minY := img.Rect.Min.Y
+		return func(x int, y int) uint8 {
+			return pix[(y-minY)*stride+x-minX]
+		}
+	case *image.YCbCr:
+		yPix := img.Y
+		cbPix := img.Cb
+		crPix := img.Cr
+		return func(x int, y int) uint8 {
+			yy := yPix[img.YOffset(x, y)]
+			ci := img.COffset(x, y)
+			cb := cbPix[ci]
+			cr := crPix[ci]
+			r, g, b := color.YCbCrToRGB(yy, cb, cr)
+			return rgbToLuma(r, g, b)
+		}
+	case *image.Paletted:
+		if len(img.Palette) == 0 {
+			readPixel := pixelReaderFor(m)
+			return func(x int, y int) uint8 {
+				c := readPixel(x, y)
+				return rgbToLuma(c.R, c.G, c.B)
+			}
+		}
+		palette := make([]uint8, len(img.Palette))
+		for i, c := range img.Palette {
+			nrgba := color.NRGBAModel.Convert(c).(color.NRGBA)
+			palette[i] = rgbToLuma(nrgba.R, nrgba.G, nrgba.B)
+		}
+		pix := img.Pix
+		stride := img.Stride
+		minX := img.Rect.Min.X
+		minY := img.Rect.Min.Y
+		return func(x int, y int) uint8 {
+			return palette[pix[(y-minY)*stride+x-minX]]
+		}
+	case *image.Uniform:
+		c := color.NRGBAModel.Convert(img.C).(color.NRGBA)
+		y := rgbToLuma(c.R, c.G, c.B)
+		return func(int, int) uint8 {
+			return y
+		}
+	default:
+		readPixel := pixelReaderFor(m)
+		return func(x int, y int) uint8 {
+			c := readPixel(x, y)
+			return rgbToLuma(c.R, c.G, c.B)
+		}
+	}
+}
+
+func chromaReaderFor(m image.Image) chromaReader {
+	switch img := m.(type) {
+	case *image.NRGBA:
+		pix := img.Pix
+		stride := img.Stride
+		minX := img.Rect.Min.X
+		minY := img.Rect.Min.Y
+		return func(x int, y int) (uint8, uint8) {
+			i := (y-minY)*stride + (x-minX)*4
+			return rgbToChroma(pix[i+0], pix[i+1], pix[i+2])
+		}
+	case *image.RGBA:
+		pix := img.Pix
+		stride := img.Stride
+		minX := img.Rect.Min.X
+		minY := img.Rect.Min.Y
+		return func(x int, y int) (uint8, uint8) {
+			i := (y-minY)*stride + (x-minX)*4
+			c := nrgbaFromRGBA(pix[i+0], pix[i+1], pix[i+2], pix[i+3])
+			return rgbToChroma(c.R, c.G, c.B)
+		}
+	case *image.Gray:
+		return func(int, int) (uint8, uint8) {
+			return 128, 128
+		}
+	case *image.YCbCr:
+		yPix := img.Y
+		cbPix := img.Cb
+		crPix := img.Cr
+		return func(x int, y int) (uint8, uint8) {
+			yy := yPix[img.YOffset(x, y)]
+			ci := img.COffset(x, y)
+			cb := cbPix[ci]
+			cr := crPix[ci]
+			r, g, b := color.YCbCrToRGB(yy, cb, cr)
+			return rgbToChroma(r, g, b)
+		}
+	case *image.Paletted:
+		if len(img.Palette) == 0 {
+			readPixel := pixelReaderFor(m)
+			return func(x int, y int) (uint8, uint8) {
+				c := readPixel(x, y)
+				return rgbToChroma(c.R, c.G, c.B)
+			}
+		}
+		palette := make([][2]uint8, len(img.Palette))
+		for i, c := range img.Palette {
+			nrgba := color.NRGBAModel.Convert(c).(color.NRGBA)
+			palette[i][0], palette[i][1] = rgbToChroma(nrgba.R, nrgba.G, nrgba.B)
+		}
+		pix := img.Pix
+		stride := img.Stride
+		minX := img.Rect.Min.X
+		minY := img.Rect.Min.Y
+		return func(x int, y int) (uint8, uint8) {
+			index := pix[(y-minY)*stride+x-minX]
+			pair := palette[index]
+			return pair[0], pair[1]
+		}
+	case *image.Uniform:
+		c := color.NRGBAModel.Convert(img.C).(color.NRGBA)
+		cb, cr := rgbToChroma(c.R, c.G, c.B)
+		return func(int, int) (uint8, uint8) {
+			return cb, cr
+		}
+	default:
+		readPixel := pixelReaderFor(m)
+		return func(x int, y int) (uint8, uint8) {
+			c := readPixel(x, y)
+			return rgbToChroma(c.R, c.G, c.B)
 		}
 	}
 }
