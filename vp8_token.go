@@ -879,7 +879,14 @@ func vp8StaticTokenProb(plane int, band int, context uint8) [11]uint8 {
 }
 
 func chooseVP8TokenProbs(stats *vp8TokenStats) vp8TokenProbs {
+	return chooseVP8TokenProbsConfig(stats, true)
+}
+
+func chooseVP8TokenProbsConfig(stats *vp8TokenStats, update bool) vp8TokenProbs {
 	probs := vp8DefaultTokenProbs
+	if !update {
+		return probs
+	}
 	for plane := range probs {
 		for band := range probs[plane] {
 			for context := range probs[plane][band] {

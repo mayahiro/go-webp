@@ -33,12 +33,15 @@ const (
 	alphaDistanceTopLeft      = 2
 	alphaDistanceTopRight     = 3
 
-	alphaCodeLengthCodeCount     = 19
-	alphaCodeLengthRepeatZero    = 17
-	alphaCodeLengthRepeatZeroBig = 18
+	alphaCodeLengthCodeCount      = 19
+	alphaCodeLengthCodeMaxLength  = 7
+	alphaCodeLengthCodeKraft      = 1 << alphaCodeLengthCodeMaxLength
+	alphaCodeLengthRepeatPrevious = 16
+	alphaCodeLengthRepeatZero     = 17
+	alphaCodeLengthRepeatZeroBig  = 18
 )
 
-func encodeLossy(w io.Writer, m image.Image, bounds image.Rectangle, width int, height int, quality int) error {
+func encodeLossy(w io.Writer, m image.Image, bounds image.Rectangle, width int, height int, quality int, mode Mode) error {
 	if width > maxVP8Dimension || height > maxVP8Dimension {
 		return fmt.Errorf("webp: image dimensions %dx%d exceed VP8 limit %dx%d", width, height, maxVP8Dimension, maxVP8Dimension)
 	}
@@ -46,14 +49,15 @@ func encodeLossy(w io.Writer, m image.Image, bounds image.Rectangle, width int, 
 	readPixel := pixelReaderFor(m)
 	readLuma := lumaReaderFor(m)
 	readChroma := chromaReaderFor(m)
-	alphaAnalysis := analyzeLossyAlpha(readPixel, bounds, width, height)
-	qIndex := qualityToVP8QIndex(quality)
-	frame, err := encodeVP8KeyFrame(readLuma, readChroma, bounds, width, height, qIndex)
+	alphaConfig := lossyAlphaConfigForMode(mode)
+	alphaAnalysis := analyzeLossyAlphaConfig(readPixel, bounds, width, height, alphaConfig)
+	lossyConfig := vp8LossyConfigForModeQuality(mode, quality)
+	frame, err := encodeVP8KeyFrameConfig(readLuma, readChroma, bounds, width, height, lossyConfig)
 	if err != nil {
 		return err
 	}
 	if alphaAnalysis.hasAlpha {
-		return writeLossyExtended(w, readPixel, bounds, width, height, frame, alphaAnalysis)
+		return writeLossyExtended(w, readPixel, bounds, width, height, frame, alphaAnalysis, alphaConfig)
 	}
 	return writeLossySimple(w, frame)
 }
@@ -78,9 +82,9 @@ func writeLossySimple(w io.Writer, frame []byte) error {
 	return bw.Flush()
 }
 
-func writeLossyExtended(w io.Writer, readPixel pixelReader, bounds image.Rectangle, width int, height int, frame []byte, alphaAnalysis lossyAlphaAnalysis) error {
+func writeLossyExtended(w io.Writer, readPixel pixelReader, bounds image.Rectangle, width int, height int, frame []byte, alphaAnalysis lossyAlphaAnalysis, alphaConfig lossyAlphaConfig) error {
 	framePayloadSize := uint64(len(frame))
-	alphaPayload, err := makeAlphaPayload(readPixel, bounds, width, height, alphaAnalysis)
+	alphaPayload, err := makeAlphaPayload(readPixel, bounds, width, height, alphaAnalysis, alphaConfig)
 	if err != nil {
 		return err
 	}
@@ -150,7 +154,29 @@ type alphaPayloadCandidate struct {
 	code   alphaCode
 }
 
-func makeAlphaPayload(readPixel pixelReader, bounds image.Rectangle, width int, height int, analysis lossyAlphaAnalysis) (alphaPayload, error) {
+type lossyAlphaConfig struct {
+	filters       [4]bool
+	tryRLE        bool
+	trySpatialRef bool
+}
+
+func lossyAlphaConfigForMode(mode Mode) lossyAlphaConfig {
+	cfg := lossyAlphaConfig{
+		filters:       [4]bool{true, true, true, true},
+		tryRLE:        true,
+		trySpatialRef: true,
+	}
+	switch mode {
+	case ModeFast:
+		cfg.filters = [4]bool{true, false, false, false}
+		cfg.trySpatialRef = false
+	case ModeLowMemory:
+		cfg.trySpatialRef = false
+	}
+	return cfg
+}
+
+func makeAlphaPayload(readPixel pixelReader, bounds image.Rectangle, width int, height int, analysis lossyAlphaAnalysis, cfg lossyAlphaConfig) (alphaPayload, error) {
 	rawSize := uint64(1) + uint64(width)*uint64(height)
 	if rawSize > math.MaxUint32 {
 		return alphaPayload{}, fmt.Errorf("webp: encoded image is too large")
@@ -158,7 +184,7 @@ func makeAlphaPayload(readPixel pixelReader, bounds image.Rectangle, width int, 
 
 	best := alphaPayload{size: rawSize}
 	var candidateBuf [12]alphaPayloadCandidate
-	candidates := appendAlphaPayloadCandidates(candidateBuf[:0], analysis)
+	candidates := appendAlphaPayloadCandidatesConfig(candidateBuf[:0], analysis, cfg)
 	var bestCandidate alphaPayloadCandidate
 	hasBestCandidate := false
 	for _, candidate := range candidates {
@@ -184,8 +210,15 @@ func makeAlphaPayload(readPixel pixelReader, bounds image.Rectangle, width int, 
 }
 
 func appendAlphaPayloadCandidates(candidates []alphaPayloadCandidate, analysis lossyAlphaAnalysis) []alphaPayloadCandidate {
+	return appendAlphaPayloadCandidatesConfig(candidates, analysis, lossyAlphaConfigForMode(ModeDefault))
+}
+
+func appendAlphaPayloadCandidatesConfig(candidates []alphaPayloadCandidate, analysis lossyAlphaAnalysis, cfg lossyAlphaConfig) []alphaPayloadCandidate {
 	var scratch alphaHuffmanScratch
 	for filter, plan := range analysis.residuals {
+		if !cfg.filters[filter] {
+			continue
+		}
 		if !plan.encodable() {
 			continue
 		}
@@ -195,7 +228,13 @@ func appendAlphaPayloadCandidates(candidates []alphaPayloadCandidate, analysis l
 		}
 		candidates = append(candidates, alphaPayloadCandidate{filter: byte(filter), plan: plan, code: code})
 	}
+	if !cfg.tryRLE {
+		return candidates
+	}
 	for filter, plan := range analysis.rleResiduals {
+		if !cfg.filters[filter] {
+			continue
+		}
 		if !plan.hasRefs || !plan.encodable() {
 			continue
 		}
@@ -206,7 +245,13 @@ func appendAlphaPayloadCandidates(candidates []alphaPayloadCandidate, analysis l
 		code.lz77 = true
 		candidates = append(candidates, alphaPayloadCandidate{filter: byte(filter), plan: plan, code: code})
 	}
+	if !cfg.trySpatialRef {
+		return candidates
+	}
 	for filter, plan := range analysis.lz77Residuals {
+		if !cfg.filters[filter] {
+			continue
+		}
 		if !plan.hasRefs || !plan.encodable() {
 			continue
 		}
@@ -350,7 +395,8 @@ func alphaTwoSymbolTreeBits(symbol0 uint8) uint64 {
 
 func alphaNormalTreeBits(lengths []uint8) uint64 {
 	tokenBits, tokenCount := alphaCodeLengthTokenBits(lengths)
-	bits := uint64(1 + 4 + len(normalCodeLengthCodeOrder)*3)
+	nCodes := alphaCodeLengthCodeCountForLengths(lengths)
+	bits := uint64(1 + 4 + nCodes*3)
 	bits += alphaCodeLengthLimitBits(tokenCount, len(lengths))
 	return bits + tokenBits
 }
@@ -410,6 +456,10 @@ func alphaLengthExtraBits(plan alphaResidualPlan) uint64 {
 }
 
 func vp8lLengthPrefixExtraBits(code int) uint8 {
+	return vp8lPrefixExtraBits(code)
+}
+
+func vp8lPrefixExtraBits(code int) uint8 {
 	if code < 4 {
 		return 0
 	}
@@ -444,16 +494,18 @@ func alphaTotalSymbolCount(counts []uint32) uint64 {
 
 func writeAlphaNormalTree(bits *bitWriter, lengths []uint8) {
 	tokens := alphaCodeLengthTokens(lengths)
-	codes := canonicalAlphaCodeLengthCodes(alphaCodeLengthCodeLengths)
+	usage := alphaCodeLengthCodeUsageForTokens(tokens)
+	codeLengthCodeLengths, nCodes := alphaCodeLengthCodeLengthsForUsage(usage)
+	codes := canonicalAlphaCodeLengthCodes(codeLengthCodeLengths)
 
 	bits.writeBits(0, 1)
-	bits.writeBits(15, 4)
-	for _, symbol := range normalCodeLengthCodeOrder {
-		bits.writeBits(uint32(alphaCodeLengthCodeLengths[symbol]), 3)
+	bits.writeBits(uint32(nCodes-4), 4)
+	for _, symbol := range normalCodeLengthCodeOrder[:nCodes] {
+		bits.writeBits(uint32(codeLengthCodeLengths[symbol]), 3)
 	}
 	writeAlphaCodeLengthLimit(bits, len(tokens), len(lengths))
 	for _, token := range tokens {
-		length := alphaCodeLengthCodeLengths[token.symbol]
+		length := codeLengthCodeLengths[token.symbol]
 		bits.writeBits(uint32(reverseBits(codes[token.symbol], length)), length)
 		bits.writeBits(token.extra, token.extraBits)
 	}
@@ -465,32 +517,200 @@ type alphaCodeLengthToken struct {
 	extra     uint32
 }
 
-func alphaCodeLengthTokenBits(lengths []uint8) (uint64, int) {
+func alphaCodeLengthCodeCountForLengths(lengths []uint8) int {
+	usage, _ := alphaCodeLengthCodeUsageForLengths(lengths)
+	return alphaCodeLengthCodeCountForUsage(usage)
+}
+
+func alphaCodeLengthCodeUsageForLengths(lengths []uint8) ([alphaCodeLengthCodeCount]uint32, int) {
 	maxSymbol := alphaCodeLengthLimit(lengths)
-	var bits uint64
+	var usage [alphaCodeLengthCodeCount]uint32
 	tokenCount := 0
 	for i := 0; i < maxSymbol; {
 		length := lengths[i]
 		if length != 0 {
-			bits += uint64(alphaCodeLengthCodeLengths[length])
-			tokenCount++
-			i++
+			run := 1
+			for i+run < maxSymbol && lengths[i+run] == length {
+				run++
+			}
+			tokenCount += countAlphaRepeatedCodeLengthRunCodeSymbols(&usage, length, run)
+			i += run
 			continue
 		}
 		run := 1
 		for i+run < maxSymbol && lengths[i+run] == 0 {
 			run++
 		}
-		runBits, runTokenCount := alphaZeroLengthRunTokenBits(run)
-		bits += runBits
-		tokenCount += runTokenCount
+		tokenCount += countAlphaZeroLengthRunCodeSymbols(&usage, run)
 		i += run
 	}
-	return bits, tokenCount
+	return usage, tokenCount
 }
 
-func alphaZeroLengthRunTokenBits(run int) (uint64, int) {
-	var bits uint64
+func alphaCodeLengthCodeCountForTokens(tokens []alphaCodeLengthToken) int {
+	usage := alphaCodeLengthCodeUsageForTokens(tokens)
+	return alphaCodeLengthCodeCountForUsage(usage)
+}
+
+func alphaCodeLengthCodeUsageForTokens(tokens []alphaCodeLengthToken) [alphaCodeLengthCodeCount]uint32 {
+	var usage [alphaCodeLengthCodeCount]uint32
+	for _, token := range tokens {
+		usage[token.symbol]++
+	}
+	return usage
+}
+
+func alphaCodeLengthCodeCountForUsage(usage [alphaCodeLengthCodeCount]uint32) int {
+	nCodes := 4
+	for i, symbol := range normalCodeLengthCodeOrder {
+		if usage[symbol] != 0 && i+1 > nCodes {
+			nCodes = i + 1
+		}
+	}
+	return nCodes
+}
+
+func alphaCodeLengthCodeLengthsForUsage(usage [alphaCodeLengthCodeCount]uint32) ([alphaCodeLengthCodeCount]uint8, int) {
+	var lengths [alphaCodeLengthCodeCount]uint8
+	var symbols [alphaCodeLengthCodeCount]huffmanSymbol
+	n := 0
+	for symbol, count := range usage {
+		if count == 0 {
+			continue
+		}
+		symbols[n] = huffmanSymbol{count: count, symbol: symbol}
+		n++
+	}
+	switch n {
+	case 0:
+		return lengths, 4
+	case 1:
+		lengths[symbols[0].symbol] = 1
+		return lengths, alphaCodeLengthCodeCountForUsage(usage)
+	case 2:
+		lengths[symbols[0].symbol] = 1
+		lengths[symbols[1].symbol] = 1
+		return lengths, alphaCodeLengthCodeCountForUsage(usage)
+	}
+
+	for i := 1; i < n; i++ {
+		sym := symbols[i]
+		j := i - 1
+		for ; j >= 0; j-- {
+			if symbols[j].count > sym.count || symbols[j].count == sym.count && symbols[j].symbol < sym.symbol {
+				break
+			}
+			symbols[j+1] = symbols[j]
+		}
+		symbols[j+1] = sym
+	}
+
+	if !assignAlphaCodeLengthCodeLengths(&lengths, symbols[:n]) {
+		assignBalancedAlphaCodeLengthCodeLengths(&lengths, symbols[:n])
+	}
+	return lengths, alphaCodeLengthCodeCountForUsage(usage)
+}
+
+func assignAlphaCodeLengthCodeLengths(lengths *[alphaCodeLengthCodeCount]uint8, symbols []huffmanSymbol) bool {
+	const inf = ^uint64(0) >> 2
+
+	var prefix [alphaCodeLengthCodeCount + 1]uint64
+	for i, sym := range symbols {
+		prefix[i+1] = prefix[i] + uint64(sym.count)
+	}
+
+	var dpPrev [alphaCodeLengthCodeCount + 1][alphaCodeLengthCodeKraft + 1]uint64
+	var dpNext [alphaCodeLengthCodeCount + 1][alphaCodeLengthCodeKraft + 1]uint64
+	var choice [alphaCodeLengthCodeMaxLength + 1][alphaCodeLengthCodeCount + 1][alphaCodeLengthCodeKraft + 1]int8
+	for used := range dpPrev {
+		for kraft := range dpPrev[used] {
+			dpPrev[used][kraft] = inf
+			dpNext[used][kraft] = inf
+		}
+	}
+	for length := range choice {
+		for used := range choice[length] {
+			for kraft := range choice[length][used] {
+				choice[length][used][kraft] = -1
+			}
+		}
+	}
+	dpPrev[0][0] = 0
+
+	n := len(symbols)
+	for length := 1; length <= alphaCodeLengthCodeMaxLength; length++ {
+		for used := range dpNext {
+			for kraft := range dpNext[used] {
+				dpNext[used][kraft] = inf
+			}
+		}
+		unit := 1 << (alphaCodeLengthCodeMaxLength - length)
+		for used := 0; used <= n; used++ {
+			for kraft := 0; kraft <= alphaCodeLengthCodeKraft; kraft++ {
+				base := dpPrev[used][kraft]
+				if base == inf {
+					continue
+				}
+				for count := 0; used+count <= n; count++ {
+					nextKraft := kraft + count*unit
+					if nextKraft > alphaCodeLengthCodeKraft {
+						break
+					}
+					cost := base + uint64(length)*(prefix[used+count]-prefix[used])
+					if cost >= dpNext[used+count][nextKraft] {
+						continue
+					}
+					dpNext[used+count][nextKraft] = cost
+					choice[length][used+count][nextKraft] = int8(count)
+				}
+			}
+		}
+		dpPrev, dpNext = dpNext, dpPrev
+	}
+	if dpPrev[n][alphaCodeLengthCodeKraft] == inf {
+		return false
+	}
+
+	used := n
+	kraft := alphaCodeLengthCodeKraft
+	var countsByLength [alphaCodeLengthCodeMaxLength + 1]int
+	for length := alphaCodeLengthCodeMaxLength; length >= 1; length-- {
+		count := int(choice[length][used][kraft])
+		if count < 0 {
+			return false
+		}
+		countsByLength[length] = count
+		used -= count
+		kraft -= count * (1 << (alphaCodeLengthCodeMaxLength - length))
+	}
+	if used != 0 || kraft != 0 {
+		return false
+	}
+
+	i := 0
+	for length := 1; length <= alphaCodeLengthCodeMaxLength; length++ {
+		for range countsByLength[length] {
+			lengths[symbols[i].symbol] = uint8(length)
+			i++
+		}
+	}
+	return i == n
+}
+
+func assignBalancedAlphaCodeLengthCodeLengths(lengths *[alphaCodeLengthCodeCount]uint8, symbols []huffmanSymbol) {
+	longLength := ceilLog2(len(symbols))
+	shortLength := longLength - 1
+	shortCount := (1 << longLength) - len(symbols)
+	for i, sym := range symbols {
+		length := longLength
+		if i < shortCount {
+			length = shortLength
+		}
+		lengths[sym.symbol] = uint8(length)
+	}
+}
+
+func countAlphaZeroLengthRunCodeSymbols(usage *[alphaCodeLengthCodeCount]uint32, run int) int {
 	tokenCount := 0
 	for run > 0 {
 		switch {
@@ -499,7 +719,7 @@ func alphaZeroLengthRunTokenBits(run int) (uint64, int) {
 			if n > 138 {
 				n = 138
 			}
-			bits += uint64(alphaCodeLengthCodeLengths[alphaCodeLengthRepeatZeroBig] + 7)
+			usage[alphaCodeLengthRepeatZeroBig]++
 			tokenCount++
 			run -= n
 		case run >= 3:
@@ -507,16 +727,107 @@ func alphaZeroLengthRunTokenBits(run int) (uint64, int) {
 			if n > 10 {
 				n = 10
 			}
-			bits += uint64(alphaCodeLengthCodeLengths[alphaCodeLengthRepeatZero] + 3)
+			usage[alphaCodeLengthRepeatZero]++
 			tokenCount++
 			run -= n
 		default:
-			bits += uint64(alphaCodeLengthCodeLengths[0])
+			usage[0]++
 			tokenCount++
 			run--
 		}
 	}
-	return bits, tokenCount
+	return tokenCount
+}
+
+func countAlphaRepeatedCodeLengthRunCodeSymbols(usage *[alphaCodeLengthCodeCount]uint32, length uint8, run int) int {
+	usage[length]++
+	tokenCount := 1
+	run--
+	for run > 0 {
+		if run >= 3 {
+			n := alphaRepeatedCodeLengthRunChunk(run)
+			usage[alphaCodeLengthRepeatPrevious]++
+			tokenCount++
+			run -= n
+			continue
+		}
+		usage[length]++
+		tokenCount++
+		run--
+	}
+	return tokenCount
+}
+
+func alphaCodeLengthTokenBits(lengths []uint8) (uint64, int) {
+	usage, tokenCount := alphaCodeLengthCodeUsageForLengths(lengths)
+	codeLengthCodeLengths, _ := alphaCodeLengthCodeLengthsForUsage(usage)
+	return alphaCodeLengthTokenBitsWithCodeLengths(lengths, codeLengthCodeLengths), tokenCount
+}
+
+func alphaCodeLengthTokenBitsWithCodeLengths(lengths []uint8, codeLengthCodeLengths [alphaCodeLengthCodeCount]uint8) uint64 {
+	maxSymbol := alphaCodeLengthLimit(lengths)
+	var bits uint64
+	for i := 0; i < maxSymbol; {
+		length := lengths[i]
+		if length != 0 {
+			run := 1
+			for i+run < maxSymbol && lengths[i+run] == length {
+				run++
+			}
+			bits += alphaRepeatedCodeLengthRunTokenBitsWithCodeLengths(length, run, codeLengthCodeLengths)
+			i += run
+			continue
+		}
+		run := 1
+		for i+run < maxSymbol && lengths[i+run] == 0 {
+			run++
+		}
+		bits += alphaZeroLengthRunTokenBitsWithCodeLengths(run, codeLengthCodeLengths)
+		i += run
+	}
+	return bits
+}
+
+func alphaRepeatedCodeLengthRunTokenBitsWithCodeLengths(length uint8, run int, codeLengthCodeLengths [alphaCodeLengthCodeCount]uint8) uint64 {
+	bits := uint64(codeLengthCodeLengths[length])
+	run--
+	for run > 0 {
+		if run >= 3 {
+			n := alphaRepeatedCodeLengthRunChunk(run)
+			bits += uint64(codeLengthCodeLengths[alphaCodeLengthRepeatPrevious] + 2)
+			run -= n
+			continue
+		}
+		bits += uint64(codeLengthCodeLengths[length])
+		run--
+	}
+	return bits
+}
+
+func alphaZeroLengthRunTokenBitsWithCodeLengths(run int, codeLengthCodeLengths [alphaCodeLengthCodeCount]uint8) uint64 {
+	var bits uint64
+	for run > 0 {
+		switch {
+		case run >= 11:
+			n := run
+			if n > 138 {
+				n = 138
+			}
+			bits += uint64(codeLengthCodeLengths[alphaCodeLengthRepeatZeroBig] + 7)
+			run -= n
+		case run >= 3:
+			n := run
+			if n > 10 {
+				n = 10
+			}
+			bits += uint64(codeLengthCodeLengths[alphaCodeLengthRepeatZero] + 3)
+			run -= n
+		default:
+			bits += uint64(codeLengthCodeLengths[0])
+			run--
+		}
+	}
+	return bits
 }
 
 func alphaCodeLengthTokens(lengths []uint8) []alphaCodeLengthToken {
@@ -525,8 +836,12 @@ func alphaCodeLengthTokens(lengths []uint8) []alphaCodeLengthToken {
 	for i := 0; i < maxSymbol; {
 		length := lengths[i]
 		if length != 0 {
-			tokens = append(tokens, alphaCodeLengthToken{symbol: length})
-			i++
+			run := 1
+			for i+run < maxSymbol && lengths[i+run] == length {
+				run++
+			}
+			tokens = appendAlphaRepeatedCodeLengthRun(tokens, length, run)
+			i += run
 			continue
 		}
 		run := 1
@@ -550,6 +865,36 @@ func alphaCodeLengthLimit(lengths []uint8) int {
 		return i + 1
 	}
 	return 2
+}
+
+func appendAlphaRepeatedCodeLengthRun(tokens []alphaCodeLengthToken, length uint8, run int) []alphaCodeLengthToken {
+	tokens = append(tokens, alphaCodeLengthToken{symbol: length})
+	run--
+	for run > 0 {
+		if run >= 3 {
+			n := alphaRepeatedCodeLengthRunChunk(run)
+			tokens = append(tokens, alphaCodeLengthToken{
+				symbol:    alphaCodeLengthRepeatPrevious,
+				extraBits: 2,
+				extra:     uint32(n - 3),
+			})
+			run -= n
+			continue
+		}
+		tokens = append(tokens, alphaCodeLengthToken{symbol: length})
+		run--
+	}
+	return tokens
+}
+
+func alphaRepeatedCodeLengthRunChunk(run int) int {
+	if run <= 6 {
+		return run
+	}
+	if run%6 == 1 {
+		return 4
+	}
+	return 6
 }
 
 func appendAlphaZeroLengthRun(tokens []alphaCodeLengthToken, run int) []alphaCodeLengthToken {
@@ -827,11 +1172,17 @@ func makeAlphaFilterRows(previous [][]uint8, current [][]uint8, width int) {
 }
 
 func analyzeLossyAlpha(readPixel pixelReader, bounds image.Rectangle, width int, height int) lossyAlphaAnalysis {
+	return analyzeLossyAlphaConfig(readPixel, bounds, width, height, lossyAlphaConfigForMode(ModeDefault))
+}
+
+func analyzeLossyAlphaConfig(readPixel pixelReader, bounds image.Rectangle, width int, height int, cfg lossyAlphaConfig) lossyAlphaAnalysis {
 	var analysis lossyAlphaAnalysis
 	previous, current := makeAlphaRowPair(width)
 	var previousResiduals [4][]uint8
 	var currentResiduals [4][]uint8
-	makeAlphaFilterRows(previousResiduals[:], currentResiduals[:], width)
+	if cfg.trySpatialRef {
+		makeAlphaFilterRows(previousResiduals[:], currentResiduals[:], width)
+	}
 	for y := 0; y < height; y++ {
 		left := uint8(0)
 		for x := 0; x < width; x++ {
@@ -851,30 +1202,43 @@ func analyzeLossyAlpha(readPixel pixelReader, bounds image.Rectangle, width int,
 			horizontal := alpha - alphaPredictor(alphFilterHorizontal, x, y, left, above, upperLeft)
 			vertical := alpha - alphaPredictor(alphFilterVertical, x, y, left, above, upperLeft)
 			gradient := alpha - alphaPredictor(alphFilterGradient, x, y, left, above, upperLeft)
-			analysis.residuals[alphFilterNone].observe(int(none))
-			analysis.residuals[alphFilterHorizontal].observe(int(horizontal))
-			analysis.residuals[alphFilterVertical].observe(int(vertical))
-			analysis.residuals[alphFilterGradient].observe(int(gradient))
-			analysis.rleResiduals[alphFilterNone].observeRLE(none)
-			analysis.rleResiduals[alphFilterHorizontal].observeRLE(horizontal)
-			analysis.rleResiduals[alphFilterVertical].observeRLE(vertical)
-			analysis.rleResiduals[alphFilterGradient].observeRLE(gradient)
-			currentResiduals[alphFilterNone][x] = none
-			currentResiduals[alphFilterHorizontal][x] = horizontal
-			currentResiduals[alphFilterVertical][x] = vertical
-			currentResiduals[alphFilterGradient][x] = gradient
+			residuals := [4]uint8{none, horizontal, vertical, gradient}
+			for filter, residual := range residuals {
+				if !cfg.filters[filter] {
+					continue
+				}
+				analysis.residuals[filter].observe(int(residual))
+				if cfg.tryRLE {
+					analysis.rleResiduals[filter].observeRLE(residual)
+				}
+				if cfg.trySpatialRef {
+					currentResiduals[filter][x] = residual
+				}
+			}
 			current[x] = alpha
 			left = alpha
 		}
-		for filter := range currentResiduals {
-			analysis.lz77Residuals[filter].observeLZ77Row(currentResiduals[filter], previousResiduals[filter], y > 0)
-			previousResiduals[filter], currentResiduals[filter] = currentResiduals[filter], previousResiduals[filter]
+		if cfg.trySpatialRef {
+			for filter := range currentResiduals {
+				if !cfg.filters[filter] {
+					continue
+				}
+				analysis.lz77Residuals[filter].observeLZ77Row(currentResiduals[filter], previousResiduals[filter], y > 0)
+				previousResiduals[filter], currentResiduals[filter] = currentResiduals[filter], previousResiduals[filter]
+			}
 		}
 		previous, current = current, previous
 	}
-	for i := range analysis.rleResiduals {
-		analysis.rleResiduals[i].flushRLE()
-		analysis.lz77Residuals[i].flushRLE()
+	for i := range cfg.filters {
+		if !cfg.filters[i] {
+			continue
+		}
+		if cfg.tryRLE {
+			analysis.rleResiduals[i].flushRLE()
+		}
+		if cfg.trySpatialRef {
+			analysis.lz77Residuals[i].flushRLE()
+		}
 	}
 	return analysis
 }
@@ -1039,11 +1403,19 @@ type vp8lPrefix struct {
 }
 
 func vp8lPrefixCode(value int) vp8lPrefix {
+	return vp8lPrefixCodeForCodeCount(value, nLengthCodes)
+}
+
+func vp8lDistancePrefixCode(value int) vp8lPrefix {
+	return vp8lPrefixCodeForCodeCount(value, nDistanceCodes)
+}
+
+func vp8lPrefixCodeForCodeCount(value int, codeCount int) vp8lPrefix {
 	if value <= 4 {
 		return vp8lPrefix{code: value - 1}
 	}
-	for code := 4; code < nLengthCodes; code++ {
-		extraBits := uint8((code - 2) >> 1)
+	for code := 4; code < codeCount; code++ {
+		extraBits := vp8lPrefixExtraBits(code)
 		offset := (2 + code&1) << extraBits
 		minValue := offset + 1
 		maxValue := offset + 1<<extraBits
@@ -1055,10 +1427,14 @@ func vp8lPrefixCode(value int) vp8lPrefix {
 			}
 		}
 	}
+	code := codeCount - 1
+	extraBits := vp8lPrefixExtraBits(code)
+	offset := (2 + code&1) << extraBits
+	minValue := offset + 1
 	return vp8lPrefix{
-		code:      nLengthCodes - 1,
-		extraBits: 11,
-		extra:     alphaMaxBackwardRefLength - 2049,
+		code:      code,
+		extraBits: extraBits,
+		extra:     uint32(value - minValue),
 	}
 }
 
@@ -1149,7 +1525,7 @@ type huffmanNode struct {
 }
 
 const (
-	maxAlphaHuffmanSymbols = nLiteralCodes + nLengthCodes
+	maxAlphaHuffmanSymbols = nColorCacheGreenCodes
 	maxAlphaHuffmanNodes   = maxAlphaHuffmanSymbols*2 - 1
 )
 
@@ -1403,27 +1779,6 @@ var normalCodeLengthCodeOrder = [...]uint8{
 	17, 18, 0, 1, 2, 3, 4, 5, 16, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
 }
 
-var alphaCodeLengthCodeLengths = [alphaCodeLengthCodeCount]uint8{
-	0:  4,
-	1:  4,
-	2:  4,
-	3:  4,
-	4:  4,
-	5:  4,
-	6:  4,
-	7:  4,
-	8:  4,
-	9:  4,
-	10: 4,
-	11: 4,
-	12: 4,
-	13: 4,
-	14: 5,
-	15: 5,
-	17: 5,
-	18: 5,
-}
-
 func alphaPredictor(filter byte, x int, y int, left uint8, above uint8, upperLeft uint8) uint8 {
 	switch filter {
 	case alphFilterHorizontal:
@@ -1481,22 +1836,70 @@ func writeChunkPadding(w *bufio.Writer, payloadSize uint64) error {
 	return w.WriteByte(0)
 }
 
+type vp8LossyConfig struct {
+	qIndex          int
+	quant           vp8Quant
+	filter          vp8LoopFilter
+	rd              vp8RDConfig
+	tryY4           bool
+	trySkip         bool
+	updateTokenProb bool
+}
+
+func vp8LossyConfigForModeQuality(mode Mode, quality int) vp8LossyConfig {
+	return vp8LossyConfigForQIndex(mode, qualityToVP8QIndex(quality))
+}
+
+func vp8LossyConfigForQIndex(mode Mode, qIndex int) vp8LossyConfig {
+	qIndex = clipInt(qIndex, 0, 127)
+	quant := vp8QuantForIndex(qIndex)
+	cfg := vp8LossyConfig{
+		qIndex:          qIndex,
+		quant:           quant,
+		filter:          vp8LoopFilterForQuant(quant),
+		rd:              newVP8RDConfig(quant),
+		tryY4:           false,
+		trySkip:         true,
+		updateTokenProb: true,
+	}
+	if mode == ModeBestCompression {
+		cfg.tryY4 = true
+	}
+	if mode == ModeFast {
+		cfg.tryY4 = false
+		cfg.trySkip = false
+		cfg.updateTokenProb = false
+	}
+	return cfg
+}
+
 func encodeVP8KeyFrame(readLuma lumaReader, readChroma chromaReader, bounds image.Rectangle, width int, height int, qIndex int) ([]byte, error) {
+	return encodeVP8KeyFrameConfig(readLuma, readChroma, bounds, width, height, vp8LossyConfigForQIndex(ModeDefault, qIndex))
+}
+
+func encodeVP8KeyFrameConfig(readLuma lumaReader, readChroma chromaReader, bounds image.Rectangle, width int, height int, cfg vp8LossyConfig) ([]byte, error) {
 	mbw := (width + 15) >> 4
 	mbh := (height + 15) >> 4
-	quant := vp8QuantForIndex(qIndex)
-	filter := vp8LoopFilterForQuant(quant)
 	work := newVP8EncodeBuffers(mbw, mbh)
-	modes := analyzeVP8Modes(readLuma, readChroma, bounds, mbw, mbh, quant, work)
-	clear(work.recY)
-	tokenStats := collectVP8TokenStats(readLuma, readChroma, bounds, mbw, mbh, quant, modes, work)
-	tokenProbs := chooseVP8TokenProbs(&tokenStats)
-	firstPart, err := vp8FirstPartition(mbw, mbh, qIndex, filter, modes, tokenProbs)
+	modes := analyzeVP8ModesConfig(readLuma, readChroma, bounds, mbw, mbh, cfg, work)
+	tokenProbs := vp8DefaultTokenProbs
+	var skipMap []bool
+	if cfg.trySkip {
+		clear(work.recY)
+		skipMap = analyzeVP8MacroblockSkips(readLuma, readChroma, bounds, mbw, mbh, cfg.quant, modes, work)
+	}
+	if cfg.updateTokenProb {
+		clear(work.recY)
+		tokenStats := collectVP8TokenStatsConfig(readLuma, readChroma, bounds, mbw, mbh, cfg.quant, modes, work, skipMap)
+		tokenProbs = chooseVP8TokenProbsConfig(&tokenStats, cfg.updateTokenProb)
+	}
+	skipProb := vp8SkipProbability(skipMap)
+	firstPart, err := vp8FirstPartition(mbw, mbh, cfg.qIndex, cfg.filter, modes, tokenProbs, skipMap, skipProb)
 	if err != nil {
 		return nil, err
 	}
 	clear(work.recY)
-	residualPart := encodeVP8Residuals(readLuma, readChroma, bounds, width, height, mbw, mbh, quant, modes, work, &tokenProbs)
+	residualPart := encodeVP8ResidualsConfig(readLuma, readChroma, bounds, width, height, mbw, mbh, cfg.quant, modes, work, &tokenProbs, skipMap)
 	frameLen := 10 + len(firstPart) + len(residualPart)
 	frame := make([]byte, 0, frameLen)
 
@@ -1635,7 +2038,7 @@ func vp8FirstPartitionCapacity(mbw int, mbh int) int {
 	return capacity
 }
 
-func vp8FirstPartition(mbw int, mbh int, qIndex int, filter vp8LoopFilter, modes []vp8MBMode, tokenProbs vp8TokenProbs) ([]byte, error) {
+func vp8FirstPartition(mbw int, mbh int, qIndex int, filter vp8LoopFilter, modes []vp8MBMode, tokenProbs vp8TokenProbs, skipMap []bool, skipProb uint8) ([]byte, error) {
 	enc := newVP8BoolEncoderWithCapacity(vp8FirstPartitionCapacity(mbw, mbh))
 	writeVP8Literal(enc, 0, 1)           // color space
 	writeVP8Literal(enc, 0, 1)           // pixel clamp
@@ -1651,11 +2054,19 @@ func vp8FirstPartition(mbw int, mbh int, qIndex int, filter vp8LoopFilter, modes
 	}
 	enc.writeBitEqualProb(false) // do not refresh last frame buffer
 	writeVP8TokenProbUpdates(enc, tokenProbs)
-	enc.writeBitEqualProb(false) // no macroblock skip probability
+	if skipMap == nil {
+		enc.writeBitEqualProb(false) // no macroblock skip probability
+	} else {
+		enc.writeBitEqualProb(true)
+		writeVP8Literal(enc, uint32(skipProb), 8)
+	}
 	upPred := make([][4]uint8, mbw)
 	for mby := 0; mby < mbh; mby++ {
 		var leftPred [4]uint8
 		for mbx := 0; mbx < mbw; mbx++ {
+			if skipMap != nil {
+				enc.writeBit(skipProb, skipMap[mby*mbw+mbx])
+			}
 			mode := modes[mby*mbw+mbx]
 			enc.writeBit(145, mode.useY16)
 			if mode.useY16 {
@@ -2049,6 +2460,7 @@ func qualityToVP8QIndex(quality int) int {
 	if quality >= 100 {
 		return 0
 	}
+	quality = maxInt(quality-25, 1)
 	inv := 100 - quality
 	linear := (inv*127 + 99/2) / 99
 	curved := (inv*inv*127 + 99*99/2) / (99 * 99)
@@ -2082,6 +2494,10 @@ func (rd vp8RDConfig) chromaScore(distortion int64, bitCost int64) int64 {
 }
 
 func analyzeVP8Modes(readLuma lumaReader, readChroma chromaReader, bounds image.Rectangle, mbw int, mbh int, quant vp8Quant, work *vp8EncodeBuffers) []vp8MBMode {
+	return analyzeVP8ModesConfig(readLuma, readChroma, bounds, mbw, mbh, vp8LossyConfigForQIndex(ModeDefault, quant.qIndex), work)
+}
+
+func analyzeVP8ModesConfig(readLuma lumaReader, readChroma chromaReader, bounds image.Rectangle, mbw int, mbh int, cfg vp8LossyConfig, work *vp8EncodeBuffers) []vp8MBMode {
 	yStride := mbw * 16
 	cStride := mbw * 8
 	recY := work.recY
@@ -2109,8 +2525,6 @@ func analyzeVP8Modes(readLuma lumaReader, readChroma chromaReader, bounds image.
 		clear(upUV)
 		clear(upY16)
 	}
-	rd := newVP8RDConfig(quant)
-
 	for mby := 0; mby < mbh; mby++ {
 		var leftPred [4]uint8
 		var leftY [4]uint8
@@ -2121,7 +2535,7 @@ func analyzeVP8Modes(readLuma lumaReader, readChroma chromaReader, bounds image.
 			lumaBlocks := &lumaTarget.blocks
 			chromaTarget := makeChromaTargetMB(readChroma, bounds, mbx, mby)
 			mode := vp8MBMode{
-				cMode: chooseVP8ChromaModeFromTarget(&chromaTarget, mbx, mby, recCb, recCr, cStride, quant, rd, &leftUV, &upUV[mbx]),
+				cMode: chooseVP8ChromaModeFromTarget(&chromaTarget, mbx, mby, recCb, recCr, cStride, cfg.quant, cfg.rd, &leftUV, &upUV[mbx]),
 			}
 			savedLeftPred := leftPred
 			savedUpPred := upPred[mbx]
@@ -2130,24 +2544,29 @@ func analyzeVP8Modes(readLuma lumaReader, readChroma chromaReader, bounds image.
 			savedLeftY16 := leftY16
 			savedUpY16 := upY16[mbx]
 
-			y16Mode, y16Score := chooseVP8Y16Mode(lumaBlocks, mbx, mby, recY, yStride, quant, rd, &leftY, &upY[mbx], &leftY16, &upY16[mbx])
-			y4Score := chooseVP8Y4Modes(lumaBlocks, mbx, mby, recY, yStride, quant, rd, &leftPred, &upPred[mbx], &leftY, &upY[mbx], &mode)
-			if y16Score <= y4Score {
+			y16Mode, y16Score := chooseVP8Y16Mode(lumaBlocks, mbx, mby, recY, yStride, cfg.quant, cfg.rd, &leftY, &upY[mbx], &leftY16, &upY16[mbx])
+			if cfg.tryY4 {
+				y4Score := chooseVP8Y4Modes(lumaBlocks, mbx, mby, recY, yStride, cfg.quant, cfg.rd, &leftPred, &upPred[mbx], &leftY, &upY[mbx], &mode)
+				if y16Score > y4Score {
+					processVP8ChromaTargetMB(&chromaTarget, nil, mbx, mby, recCb, recCr, cStride, cfg.quant, mode, &leftUV, &upUV[mbx], nil, nil)
+					modes[mby*mbw+mbx] = mode
+					continue
+				}
 				leftPred = savedLeftPred
 				upPred[mbx] = savedUpPred
 				leftY = savedLeftY
 				upY[mbx] = savedUpY
 				leftY16 = savedLeftY16
 				upY16[mbx] = savedUpY16
-				mode.useY16 = true
-				mode.yMode = y16Mode
-				for i := 0; i < 4; i++ {
-					leftPred[i] = y16Mode
-					upPred[mbx][i] = y16Mode
-				}
-				processVP8Luma16MB(nil, readLuma, bounds, mbx, mby, recY, yStride, quant, mode, &leftY, &upY[mbx], &leftY16, &upY16[mbx], nil, nil)
 			}
-			processVP8ChromaTargetMB(&chromaTarget, nil, mbx, mby, recCb, recCr, cStride, quant, mode, &leftUV, &upUV[mbx], nil, nil)
+			mode.useY16 = true
+			mode.yMode = y16Mode
+			for i := 0; i < 4; i++ {
+				leftPred[i] = y16Mode
+				upPred[mbx][i] = y16Mode
+			}
+			processVP8Luma16MB(nil, readLuma, bounds, mbx, mby, recY, yStride, cfg.quant, mode, &leftY, &upY[mbx], &leftY16, &upY16[mbx], nil, nil)
+			processVP8ChromaTargetMB(&chromaTarget, nil, mbx, mby, recCb, recCr, cStride, cfg.quant, mode, &leftUV, &upUV[mbx], nil, nil)
 			modes[mby*mbw+mbx] = mode
 		}
 	}
@@ -2155,6 +2574,10 @@ func analyzeVP8Modes(readLuma lumaReader, readChroma chromaReader, bounds image.
 }
 
 func collectVP8TokenStats(readLuma lumaReader, readChroma chromaReader, bounds image.Rectangle, mbw int, mbh int, quant vp8Quant, modes []vp8MBMode, work *vp8EncodeBuffers) vp8TokenStats {
+	return collectVP8TokenStatsConfig(readLuma, readChroma, bounds, mbw, mbh, quant, modes, work, nil)
+}
+
+func collectVP8TokenStatsConfig(readLuma lumaReader, readChroma chromaReader, bounds image.Rectangle, mbw int, mbh int, quant vp8Quant, modes []vp8MBMode, work *vp8EncodeBuffers, skipMap []bool) vp8TokenStats {
 	yStride := mbw * 16
 	cStride := mbw * 8
 	var stats vp8TokenStats
@@ -2180,6 +2603,11 @@ func collectVP8TokenStats(readLuma lumaReader, readChroma chromaReader, bounds i
 		var leftY16 uint8
 		for mbx := 0; mbx < mbw; mbx++ {
 			mode := modes[mby*mbw+mbx]
+			if skipMap != nil && skipMap[mby*mbw+mbx] {
+				processVP8LumaMB(nil, readLuma, bounds, mbx, mby, work.recY, yStride, quant, mode, &leftY, &upY[mbx], &leftY16, &upY16[mbx], nil, nil)
+				processVP8ChromaMB(nil, readChroma, bounds, mbx, mby, work.recCb, work.recCr, cStride, quant, mode, &leftUV, &upUV[mbx], nil, nil)
+				continue
+			}
 			processVP8LumaMB(nil, readLuma, bounds, mbx, mby, work.recY, yStride, quant, mode, &leftY, &upY[mbx], &leftY16, &upY16[mbx], nil, &stats)
 			processVP8ChromaMB(nil, readChroma, bounds, mbx, mby, work.recCb, work.recCr, cStride, quant, mode, &leftUV, &upUV[mbx], nil, &stats)
 		}
@@ -2187,7 +2615,70 @@ func collectVP8TokenStats(readLuma lumaReader, readChroma chromaReader, bounds i
 	return stats
 }
 
+func analyzeVP8MacroblockSkips(readLuma lumaReader, readChroma chromaReader, bounds image.Rectangle, mbw int, mbh int, quant vp8Quant, modes []vp8MBMode, work *vp8EncodeBuffers) []bool {
+	yStride := mbw * 16
+	cStride := mbw * 8
+	var upY [][4]uint8
+	var upUV [][4]uint8
+	var upY16 []uint8
+	if work.top == nil {
+		upY = make([][4]uint8, mbw)
+		upUV = make([][4]uint8, mbw)
+		upY16 = make([]uint8, mbw)
+	} else {
+		upY = work.top.upY
+		upUV = work.top.upUV
+		upY16 = work.top.upY16
+		clear(upY)
+		clear(upUV)
+		clear(upY16)
+	}
+
+	skipMap := make([]bool, mbw*mbh)
+	skipCount := 0
+	for mby := 0; mby < mbh; mby++ {
+		var leftY [4]uint8
+		var leftUV [4]uint8
+		var leftY16 uint8
+		for mbx := 0; mbx < mbw; mbx++ {
+			mode := modes[mby*mbw+mbx]
+			lumaNZ := processVP8LumaMB(nil, readLuma, bounds, mbx, mby, work.recY, yStride, quant, mode, &leftY, &upY[mbx], &leftY16, &upY16[mbx], nil, nil)
+			chromaNZ := processVP8ChromaMB(nil, readChroma, bounds, mbx, mby, work.recCb, work.recCr, cStride, quant, mode, &leftUV, &upUV[mbx], nil, nil)
+			if !lumaNZ && !chromaNZ {
+				skipMap[mby*mbw+mbx] = true
+				skipCount++
+			}
+		}
+	}
+	if !vp8ShouldUseMacroblockSkip(len(skipMap), skipCount) {
+		return nil
+	}
+	return skipMap
+}
+
+func vp8ShouldUseMacroblockSkip(total int, skipped int) bool {
+	return skipped > 0 && skipped*8 > total+9
+}
+
+func vp8SkipProbability(skipMap []bool) uint8 {
+	if skipMap == nil {
+		return 0
+	}
+	notSkipped := 0
+	for _, skipped := range skipMap {
+		if !skipped {
+			notSkipped++
+		}
+	}
+	prob := (notSkipped*255 + len(skipMap)/2) / len(skipMap)
+	return uint8(clipInt(prob, 1, 255))
+}
+
 func encodeVP8Residuals(readLuma lumaReader, readChroma chromaReader, bounds image.Rectangle, width int, height int, mbw int, mbh int, quant vp8Quant, modes []vp8MBMode, work *vp8EncodeBuffers, tokenProbs *vp8TokenProbs) []byte {
+	return encodeVP8ResidualsConfig(readLuma, readChroma, bounds, width, height, mbw, mbh, quant, modes, work, tokenProbs, nil)
+}
+
+func encodeVP8ResidualsConfig(readLuma lumaReader, readChroma chromaReader, bounds image.Rectangle, width int, height int, mbw int, mbh int, quant vp8Quant, modes []vp8MBMode, work *vp8EncodeBuffers, tokenProbs *vp8TokenProbs, skipMap []bool) []byte {
 	yStride := mbw * 16
 	cStride := mbw * 8
 	recY := work.recY
@@ -2217,6 +2708,11 @@ func encodeVP8Residuals(readLuma lumaReader, readChroma chromaReader, bounds ima
 		var leftY16 uint8
 		for mbx := 0; mbx < mbw; mbx++ {
 			mode := modes[mby*mbw+mbx]
+			if skipMap != nil && skipMap[mby*mbw+mbx] {
+				processVP8LumaMB(nil, readLuma, bounds, mbx, mby, recY, yStride, quant, mode, &leftY, &upY[mbx], &leftY16, &upY16[mbx], nil, nil)
+				processVP8ChromaMB(nil, readChroma, bounds, mbx, mby, recCb, recCr, cStride, quant, mode, &leftUV, &upUV[mbx], nil, nil)
+				continue
+			}
 			processVP8LumaMB(enc, readLuma, bounds, mbx, mby, recY, yStride, quant, mode, &leftY, &upY[mbx], &leftY16, &upY16[mbx], tokenProbs, nil)
 			processVP8ChromaMB(enc, readChroma, bounds, mbx, mby, recCb, recCr, cStride, quant, mode, &leftUV, &upUV[mbx], tokenProbs, nil)
 		}
@@ -2232,17 +2728,17 @@ func reconstructVP8LumaMB(readLuma lumaReader, bounds image.Rectangle, mbx int, 
 	processVP8Luma4MB(nil, readLuma, bounds, mbx, mby, recY, stride, quant, nil, nil, mode, nil, nil)
 }
 
-func processVP8LumaMB(enc *vp8BoolEncoder, readLuma lumaReader, bounds image.Rectangle, mbx int, mby int, recY []uint8, stride int, quant vp8Quant, mode vp8MBMode, left *[4]uint8, up *[4]uint8, leftY16 *uint8, upY16 *uint8, tokenProbs *vp8TokenProbs, stats *vp8TokenStats) {
+func processVP8LumaMB(enc *vp8BoolEncoder, readLuma lumaReader, bounds image.Rectangle, mbx int, mby int, recY []uint8, stride int, quant vp8Quant, mode vp8MBMode, left *[4]uint8, up *[4]uint8, leftY16 *uint8, upY16 *uint8, tokenProbs *vp8TokenProbs, stats *vp8TokenStats) bool {
 	if mode.useY16 {
-		processVP8Luma16MB(enc, readLuma, bounds, mbx, mby, recY, stride, quant, mode, left, up, leftY16, upY16, tokenProbs, stats)
-		return
+		return processVP8Luma16MB(enc, readLuma, bounds, mbx, mby, recY, stride, quant, mode, left, up, leftY16, upY16, tokenProbs, stats)
 	}
-	processVP8Luma4MB(enc, readLuma, bounds, mbx, mby, recY, stride, quant, left, up, mode, tokenProbs, stats)
+	nz := processVP8Luma4MB(enc, readLuma, bounds, mbx, mby, recY, stride, quant, left, up, mode, tokenProbs, stats)
 	*leftY16 = 0
 	*upY16 = 0
+	return nz
 }
 
-func processVP8Luma4MB(enc *vp8BoolEncoder, readLuma lumaReader, bounds image.Rectangle, mbx int, mby int, recY []uint8, stride int, quant vp8Quant, left *[4]uint8, up *[4]uint8, mode vp8MBMode, tokenProbs *vp8TokenProbs, stats *vp8TokenStats) {
+func processVP8Luma4MB(enc *vp8BoolEncoder, readLuma lumaReader, bounds image.Rectangle, mbx int, mby int, recY []uint8, stride int, quant vp8Quant, left *[4]uint8, up *[4]uint8, mode vp8MBMode, tokenProbs *vp8TokenProbs, stats *vp8TokenStats) bool {
 	var localLeft [4]uint8
 	var localUp [4]uint8
 	if left == nil {
@@ -2251,6 +2747,7 @@ func processVP8Luma4MB(enc *vp8BoolEncoder, readLuma lumaReader, bounds image.Re
 	if up == nil {
 		up = &localUp
 	}
+	hasNZ := false
 	for by := 0; by < 4; by++ {
 		nz := left[by]
 		for bx := 0; bx < 4; bx++ {
@@ -2268,6 +2765,7 @@ func processVP8Luma4MB(enc *vp8BoolEncoder, readLuma lumaReader, bounds image.Re
 			} else if hasNonZeroBlockCoeff(coeff) {
 				blockNZ = 1
 			}
+			hasNZ = hasNZ || blockNZ != 0
 			recon := reconstructVP8Block(pred, coeff, quant.y1DC, quant.y1AC)
 			put4(recY, stride, x, y, recon)
 			nz = blockNZ
@@ -2275,9 +2773,10 @@ func processVP8Luma4MB(enc *vp8BoolEncoder, readLuma lumaReader, bounds image.Re
 		}
 		left[by] = nz
 	}
+	return hasNZ
 }
 
-func processVP8Luma16MB(enc *vp8BoolEncoder, readLuma lumaReader, bounds image.Rectangle, mbx int, mby int, recY []uint8, stride int, quant vp8Quant, mode vp8MBMode, left *[4]uint8, up *[4]uint8, leftY16 *uint8, upY16 *uint8, tokenProbs *vp8TokenProbs, stats *vp8TokenStats) {
+func processVP8Luma16MB(enc *vp8BoolEncoder, readLuma lumaReader, bounds image.Rectangle, mbx int, mby int, recY []uint8, stride int, quant vp8Quant, mode vp8MBMode, left *[4]uint8, up *[4]uint8, leftY16 *uint8, upY16 *uint8, tokenProbs *vp8TokenProbs, stats *vp8TokenStats) bool {
 	var localLeft [4]uint8
 	var localUp [4]uint8
 	var localLeftY16 uint8
@@ -2320,6 +2819,7 @@ func processVP8Luma16MB(enc *vp8BoolEncoder, readLuma lumaReader, bounds image.R
 	} else if hasNonZeroBlockCoeff(y2Coeff) {
 		y16NZ = 1
 	}
+	hasNZ := y16NZ != 0
 	*leftY16 = y16NZ
 	*upY16 = y16NZ
 	y2Recon := inverseWHT4(dequantizeVP8Block(y2Coeff, quant.y2DC, quant.y2AC))
@@ -2338,6 +2838,7 @@ func processVP8Luma16MB(enc *vp8BoolEncoder, readLuma lumaReader, bounds image.R
 			} else if hasNonZeroBlockCoeffFrom(coeff, 1) {
 				blockNZ = 1
 			}
+			hasNZ = hasNZ || blockNZ != 0
 			reconCoeff := dequantizeVP8Block(coeff, 0, quant.y1AC)
 			reconCoeff[0] = y2Recon[index]
 			recon := inverseDCT4(subLuma16Block(&pred16, bx, by), reconCoeff)
@@ -2347,6 +2848,7 @@ func processVP8Luma16MB(enc *vp8BoolEncoder, readLuma lumaReader, bounds image.R
 		}
 		left[by] = nz
 	}
+	return hasNZ
 }
 
 func reconstructVP8ChromaMB(readChroma chromaReader, bounds image.Rectangle, mbx int, mby int, recCb []uint8, recCr []uint8, stride int, quant vp8Quant, mode vp8MBMode) {
@@ -2355,17 +2857,18 @@ func reconstructVP8ChromaMB(readChroma chromaReader, bounds image.Rectangle, mbx
 	processVP8ChromaPlane(nil, target.cr[:], mbx, mby, recCr, stride, quant, nil, nil, mode.cMode, false, nil, nil)
 }
 
-func processVP8ChromaMB(enc *vp8BoolEncoder, readChroma chromaReader, bounds image.Rectangle, mbx int, mby int, recCb []uint8, recCr []uint8, stride int, quant vp8Quant, mode vp8MBMode, left *[4]uint8, up *[4]uint8, tokenProbs *vp8TokenProbs, stats *vp8TokenStats) {
+func processVP8ChromaMB(enc *vp8BoolEncoder, readChroma chromaReader, bounds image.Rectangle, mbx int, mby int, recCb []uint8, recCr []uint8, stride int, quant vp8Quant, mode vp8MBMode, left *[4]uint8, up *[4]uint8, tokenProbs *vp8TokenProbs, stats *vp8TokenStats) bool {
 	target := makeChromaTargetMB(readChroma, bounds, mbx, mby)
-	processVP8ChromaTargetMB(&target, enc, mbx, mby, recCb, recCr, stride, quant, mode, left, up, tokenProbs, stats)
+	return processVP8ChromaTargetMB(&target, enc, mbx, mby, recCb, recCr, stride, quant, mode, left, up, tokenProbs, stats)
 }
 
-func processVP8ChromaTargetMB(target *chromaTargetMB, enc *vp8BoolEncoder, mbx int, mby int, recCb []uint8, recCr []uint8, stride int, quant vp8Quant, mode vp8MBMode, left *[4]uint8, up *[4]uint8, tokenProbs *vp8TokenProbs, stats *vp8TokenStats) {
-	processVP8ChromaPlane(enc, target.cb[:], mbx, mby, recCb, stride, quant, left, up, mode.cMode, true, tokenProbs, stats)
-	processVP8ChromaPlane(enc, target.cr[:], mbx, mby, recCr, stride, quant, left, up, mode.cMode, false, tokenProbs, stats)
+func processVP8ChromaTargetMB(target *chromaTargetMB, enc *vp8BoolEncoder, mbx int, mby int, recCb []uint8, recCr []uint8, stride int, quant vp8Quant, mode vp8MBMode, left *[4]uint8, up *[4]uint8, tokenProbs *vp8TokenProbs, stats *vp8TokenStats) bool {
+	cbNZ := processVP8ChromaPlane(enc, target.cb[:], mbx, mby, recCb, stride, quant, left, up, mode.cMode, true, tokenProbs, stats)
+	crNZ := processVP8ChromaPlane(enc, target.cr[:], mbx, mby, recCr, stride, quant, left, up, mode.cMode, false, tokenProbs, stats)
+	return cbNZ || crNZ
 }
 
-func processVP8ChromaPlane(enc *vp8BoolEncoder, target []uint8, mbx int, mby int, rec []uint8, stride int, quant vp8Quant, left *[4]uint8, up *[4]uint8, mode uint8, cb bool, tokenProbs *vp8TokenProbs, stats *vp8TokenStats) {
+func processVP8ChromaPlane(enc *vp8BoolEncoder, target []uint8, mbx int, mby int, rec []uint8, stride int, quant vp8Quant, left *[4]uint8, up *[4]uint8, mode uint8, cb bool, tokenProbs *vp8TokenProbs, stats *vp8TokenStats) bool {
 	var localLeft [4]uint8
 	var localUp [4]uint8
 	if left == nil {
@@ -2374,6 +2877,7 @@ func processVP8ChromaPlane(enc *vp8BoolEncoder, target []uint8, mbx int, mby int
 	if up == nil {
 		up = &localUp
 	}
+	hasNZ := false
 	base := 0
 	if !cb {
 		base = 2
@@ -2396,6 +2900,7 @@ func processVP8ChromaPlane(enc *vp8BoolEncoder, target []uint8, mbx int, mby int
 			} else if hasNonZeroBlockCoeff(coeff) {
 				blockNZ = 1
 			}
+			hasNZ = hasNZ || blockNZ != 0
 			recon := reconstructVP8Block(pred, coeff, quant.uvDC, quant.uvAC)
 			put4(rec, stride, x, y, recon)
 			nz = blockNZ
@@ -2403,6 +2908,7 @@ func processVP8ChromaPlane(enc *vp8BoolEncoder, target []uint8, mbx int, mby int
 		}
 		left[base+by] = nz
 	}
+	return hasNZ
 }
 
 func chooseVP8Y4Modes(target *lumaTargetBlocks, mbx int, mby int, recY []uint8, stride int, quant vp8Quant, rd vp8RDConfig, leftPred *[4]uint8, upPred *[4]uint8, leftNZ *[4]uint8, upNZ *[4]uint8, mode *vp8MBMode) int64 {

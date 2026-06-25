@@ -68,6 +68,22 @@ err := webp.Encode(w, img, &webp.Options{
 zero use the default, values greater than 100 are clamped to 100, and the field
 is ignored for lossless encoding.
 
+`Mode` can tune the encoder search profile or select an explicit output family:
+
+```go
+err := webp.Encode(w, img, &webp.Options{
+	Mode:    webp.ModeNearLossless,
+	Quality: 75,
+})
+```
+
+`ModeDefault` preserves the behavior selected by `Compression` and `Quality`.
+`ModeFast`, `ModeBalanced`, `ModeBestCompression`, `ModeLowMemory`, and
+`ModeAuto` tune the selected compression mode. `ModeNearLossless` writes VP8L
+with alpha preserved and RGB quantized according to `Quality`; quality 100, or
+an omitted quality, is equivalent to lossless. `ModeLossyQuality` writes VP8
+lossy output and uses `Quality`, regardless of `Compression`.
+
 ```go
 type Encoder struct {
 	Options *Options
@@ -83,15 +99,33 @@ room for future options.
 
 - The encoder is pure Go and does not use cgo.
 - See [BENCHMARKS.md](BENCHMARKS.md) for current local benchmark references.
-- It scans the source image twice and does not keep a full converted image in
-  memory for lossless encoding.
+- It scans the source image multiple times and does not keep a full converted
+  image in memory for lossless encoding.
 - Constant channels are encoded with single-symbol Huffman trees.
-- The lossless encoder does not use VP8L transforms, color cache, or LZ77
-  backwards references, so lossless output can be larger than highly optimized
-  WebP encoders.
+- The lossless encoder can use VP8L predictor, color, color-indexing, and
+  subtract-green transforms when they are estimated to reduce output size.
+  `ModeBestCompression` also tries a block-adaptive predictor candidate. The
+  encoder can use simple VP8L LZ77 backwards references with a bounded
+  multi-candidate hash match finder and one-step lazy matching. It can use a
+  limited VP8L color cache path for literal streams when a sample and bit-cost
+  estimate indicate that it should help, including bounded LZ77 plus color
+  cache paths for untransformed streams and selected predictor or color
+  transform residual streams. It does not use unbounded hash chains, so
+  lossless output can be larger than highly optimized WebP encoders.
+- `ModeFast` and `ModeLowMemory` intentionally reduce lossless search work and
+  may produce larger VP8L files. `ModeAuto` uses conservative image-feature
+  checks, only chooses the fast lossless profile for very small indexed payloads,
+  and does not guarantee the smallest or fastest output for every image.
+- For lossy images with alpha, `ModeFast` limits `ALPH` search to unfiltered
+  alpha and repeated-run coding, while `ModeLowMemory` keeps filter search but
+  skips previous-row spatial reference candidates.
+- For lossy VP8 output, `ModeFast` keeps the requested quality mapping but
+  disables macroblock skip signaling and token probability update search.
+  `ModeBestCompression` additionally enables luma4x4 mode search.
 - Lossy encoding uses a low-complexity VP8 key frame encoder with 4:2:0 chroma
-  subsampling, adaptive chroma downsampling, selected intra16x16, luma4x4, and
-  chroma prediction modes, and quantized DC and AC coefficients. It writes
+  subsampling, adaptive chroma downsampling, selected intra16x16 and chroma
+  prediction modes, optional luma4x4 modes in `ModeBestCompression`, and
+  quantized DC and AC coefficients. It writes
   residual token probability updates when they are estimated to reduce the
   frame size and enables the normal VP8 loop filter with quality-scaled
   sharpness and a mode delta for luma4x4 macroblocks.
@@ -131,6 +165,24 @@ room for future options.
 go test ./...
 go vet ./...
 go tool goimports -w .
+```
+
+Optional external decoder check:
+
+```sh
+go run ./scripts/verify_lossless_external
+```
+
+The external decoder check verifies lossless fixtures with exact pixel
+comparison and lossy fixtures with bounded RGB error. It prefers `dwebp` when
+it is available, otherwise it uses a temporary `golang.org/x/image/webp` decoder
+through `go run`, and falls back to macOS `sips` only when the other decoders
+are unavailable.
+
+For a local lossless comparison against libwebp:
+
+```sh
+go run ./scripts/compare_lossless_libwebp -runs 3
 ```
 
 ## License
