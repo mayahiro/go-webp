@@ -258,6 +258,20 @@ func TestVP8LAutoLosslessModeClassifiesLargeLowColorImagesAsFast(t *testing.T) {
 	}
 }
 
+func TestVP8LAutoLosslessModeKeepsSmallLowColorImagesBalanced(t *testing.T) {
+	img := newBenchmarkFixtureImage(lossyBenchmarkCase{
+		kind:   benchmarkImageChecker,
+		width:  128,
+		height: 128,
+	})
+	readPixel := pixelReaderFor(img)
+	bounds := img.Bounds()
+
+	if got := vp8lAutoLosslessMode(img, readPixel, bounds, bounds.Dx(), bounds.Dy()); got != ModeBalanced {
+		t.Fatalf("vp8lAutoLosslessMode = %d, want ModeBalanced", got)
+	}
+}
+
 func TestVP8LAutoLosslessModeAvoidsFastWhenIndexedPayloadIsLarge(t *testing.T) {
 	img := newBenchmarkFixtureImage(lossyBenchmarkCase{
 		kind:   benchmarkImageUI,
@@ -1210,6 +1224,47 @@ func TestChooseVP8LEncodingPlanNRGBAColorIndexEarlyExitMatchesExhaustive(t *test
 	}
 }
 
+func TestChooseVP8LEncodingPlanSmallColorIndexEarlyExitMatchesExhaustive(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		img  image.Image
+	}{
+		{
+			name: "NRGBA",
+			img: newBenchmarkFixtureImage(lossyBenchmarkCase{
+				kind:   benchmarkImageUI,
+				width:  256,
+				height: 256,
+			}),
+		},
+		{name: "Paletted", img: newBenchmarkLimitedPalettedFixtureImage(256, 256)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			readPixel := pixelReaderFor(tc.img)
+			bounds := tc.img.Bounds()
+			width, height := bounds.Dx(), bounds.Dy()
+			analysis := analyzeImage(readPixel, bounds)
+			colorIndexPlan, ok := makeVP8LColorIndexingPlanForImage(tc.img, readPixel, bounds, width, height, analysis.alpha)
+			if !ok {
+				t.Fatal("makeVP8LColorIndexingPlanForImage returned false")
+			}
+			literalPlan := vp8lEncodingPlan{analysis: analysis, alpha: analysis.alpha}
+			if !vp8lShouldUseColorIndexEarlyExit(tc.img, colorIndexPlan, vp8lPayloadBits(width, height, colorIndexPlan), vp8lPayloadBits(width, height, literalPlan), width, height) {
+				t.Fatal("small color index early exit was not enabled for the fixture")
+			}
+
+			fast := chooseVP8LEncodingPlanForImage(tc.img, readPixel, bounds, width, height)
+			exhaustive := chooseVP8LEncodingPlanForImageExhaustive(tc.img, readPixel, bounds, width, height)
+			if !fast.colorIndexing {
+				t.Fatal("fast plan did not use color indexing")
+			}
+			if got, want := vp8lPayloadBits(width, height, fast), vp8lPayloadBits(width, height, exhaustive); got != want {
+				t.Fatalf("fast plan bits = %d, want exhaustive bits %d", got, want)
+			}
+		})
+	}
+}
+
 func TestVP8LPalettedColorIndexedImageReaderMatchesGenericReader(t *testing.T) {
 	for _, paletteSize := range []int{2, 4, 16, 32} {
 		t.Run(fmt.Sprintf("palette-%d", paletteSize), func(t *testing.T) {
@@ -1242,6 +1297,32 @@ func TestVP8LPalettedColorIndexedImageReaderMatchesGenericReader(t *testing.T) {
 				t.Fatal("missing paletted color indexing fast reader")
 			}
 		})
+	}
+}
+
+func TestVP8LMaterializedColorIndexReaderReadsSourceOnce(t *testing.T) {
+	bounds := image.Rect(3, 5, 11, 9)
+	reads := 0
+	readPixel := func(x int, y int) color.NRGBA {
+		reads++
+		return color.NRGBA{G: uint8(x + y), A: 255}
+	}
+
+	readMaterialized := vp8lMaterializedColorIndexReader(readPixel, bounds)
+	if got, want := reads, bounds.Dx()*bounds.Dy(); got != want {
+		t.Fatalf("source reads during materialization = %d, want %d", got, want)
+	}
+	for range 2 {
+		for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+			for x := bounds.Min.X; x < bounds.Max.X; x++ {
+				if got, want := readMaterialized(x, y), (color.NRGBA{G: uint8(x + y), A: 255}); got != want {
+					t.Fatalf("pixel (%d,%d) = %#v, want %#v", x, y, got, want)
+				}
+			}
+		}
+	}
+	if got, want := reads, bounds.Dx()*bounds.Dy(); got != want {
+		t.Fatalf("source reads after repeated access = %d, want %d", got, want)
 	}
 }
 
@@ -2563,6 +2644,29 @@ func TestChannelTreeSelectionUsesHeaderAndDataCost(t *testing.T) {
 	}
 }
 
+func TestChannelNormalCostCacheMatchesUncachedCost(t *testing.T) {
+	img := image.NewNRGBA(image.Rect(0, 0, 96, 1))
+	values := []uint8{17, 93, 211}
+	for x := 0; x < img.Rect.Dx(); x++ {
+		img.SetNRGBA(x, 0, color.NRGBA{G: values[x%len(values)], A: 255})
+	}
+
+	ch := analyzeImage(pixelReaderFor(img), img.Bounds()).channels[0]
+	if !ch.normalCostCached {
+		t.Fatal("normal channel cost was not cached")
+	}
+	uncached := ch
+	uncached.normalCostCached = false
+	for _, alphabetSize := range []int{nLiteralCodes, nLiteralCodes + nLengthCodes} {
+		if got, want := channelNormalTreeBits(ch, alphabetSize), channelNormalTreeBits(uncached, alphabetSize); got != want {
+			t.Fatalf("cached tree bits for alphabet %d = %d, want %d", alphabetSize, got, want)
+		}
+	}
+	if got, want := channelNormalDataBits(ch), channelNormalDataBits(uncached); got != want {
+		t.Fatalf("cached data bits = %d, want %d", got, want)
+	}
+}
+
 func TestChannelPlanObserveSymbolCountTracksRepeatedSymbols(t *testing.T) {
 	var ch channelPlan
 	ch.observeSymbolCount(9, 1)
@@ -3511,6 +3615,38 @@ func TestEncodeLossyWritesVP8Chunk(t *testing.T) {
 		t.Fatalf("chunk name = %q, want VP8 ", chunks[0].name)
 	}
 	assertLossyVP8Frame(t, chunks[0].payload, 17, 19)
+}
+
+func TestLossyStandardImageOpaque(t *testing.T) {
+	nrgba := image.NewNRGBA(image.Rect(0, 0, 2, 1))
+	nrgba.SetNRGBA(0, 0, color.NRGBA{R: 1, A: 255})
+	nrgba.SetNRGBA(1, 0, color.NRGBA{G: 2, A: 255})
+	nrgbaAlpha := image.NewNRGBA(image.Rect(0, 0, 1, 1))
+	nrgbaAlpha.SetNRGBA(0, 0, color.NRGBA{A: 254})
+	rgba := image.NewRGBA(image.Rect(0, 0, 1, 1))
+	rgba.SetRGBA(0, 0, color.RGBA{R: 1, A: 255})
+	paletted := image.NewPaletted(image.Rect(0, 0, 1, 1), color.Palette{color.NRGBA{A: 255}})
+
+	for _, tc := range []struct {
+		name string
+		img  image.Image
+		want bool
+	}{
+		{name: "NRGBA", img: nrgba, want: true},
+		{name: "NRGBAAlpha", img: nrgbaAlpha, want: false},
+		{name: "RGBA", img: rgba, want: true},
+		{name: "Gray", img: image.NewGray(image.Rect(0, 0, 1, 1)), want: true},
+		{name: "YCbCr", img: image.NewYCbCr(image.Rect(0, 0, 1, 1), image.YCbCrSubsampleRatio420), want: true},
+		{name: "Paletted", img: paletted, want: true},
+		{name: "Uniform", img: image.NewUniform(color.NRGBA{A: 255}), want: true},
+		{name: "Wrapped", img: benchmarkImageWrapper{Image: nrgba}, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := lossyStandardImageOpaque(tc.img); got != tc.want {
+				t.Fatalf("lossyStandardImageOpaque = %v, want %v", got, tc.want)
+			}
+		})
+	}
 }
 
 func TestEncodeLossyQualityOption(t *testing.T) {

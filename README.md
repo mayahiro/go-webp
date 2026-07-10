@@ -101,6 +101,8 @@ room for future options.
 - See [BENCHMARKS.md](BENCHMARKS.md) for current local benchmark references.
 - It scans the source image multiple times and does not keep a full converted
   image in memory for lossless encoding.
+- Small low-color inputs can keep a bounded packed color-index stream so
+  repeated LZ77 evaluation does not repeat source color lookup.
 - Constant channels are encoded with single-symbol Huffman trees.
 - The lossless encoder can use VP8L predictor, color, color-indexing, and
   subtract-green transforms when they are estimated to reduce output size.
@@ -113,12 +115,18 @@ room for future options.
   transform residual streams. It does not use unbounded hash chains, so
   lossless output can be larger than highly optimized WebP encoders.
 - `ModeFast` and `ModeLowMemory` intentionally reduce lossless search work and
-  may produce larger VP8L files. `ModeAuto` uses conservative image-feature
-  checks, only chooses the fast lossless profile for very small indexed payloads,
-  and does not guarantee the smallest or fastest output for every image.
+  may produce larger VP8L files. Balanced profiles can stop transform search
+  early when color indexing is clearly better on a low-color image, while
+  `ModeBestCompression` retains exhaustive transform search. `ModeAuto` uses
+  conservative image-feature checks, only chooses the fast lossless profile
+  for very small indexed payloads, and does not guarantee the smallest or
+  fastest output for every image.
 - For lossy images with alpha, `ModeFast` limits `ALPH` search to unfiltered
   alpha and repeated-run coding, while `ModeLowMemory` keeps filter search but
   skips previous-row spatial reference candidates.
+- Lossy encoding uses the standard image types' opacity checks to skip `ALPH`
+  candidate analysis when the input is fully opaque. Custom image types retain
+  the general pixel-analysis path.
 - For lossy VP8 output, `ModeFast` keeps the requested quality mapping but
   disables macroblock skip signaling and token probability update search.
   `ModeBestCompression` additionally enables luma4x4 mode search.

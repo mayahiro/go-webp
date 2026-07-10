@@ -93,6 +93,7 @@ func (enc *Encoder) Encode(w io.Writer, m image.Image) error
 - pure Goで実装しておりcgoは使いません
 - 現在のローカルbenchmark参考値は [BENCHMARKS.md](BENCHMARKS.md) に記載しています
 - lossless encodingでは入力画像を複数回走査し、変換済み画像全体は保持しません
+- 小さいlow-color画像では、LZ77評価時の色参照を繰り返さないよう、上限付きのpacked color-index streamを保持する場合があります
 - 単一値のチャンネルはsingle-symbol Huffman treeでエンコードします
 - lossless encoderは出力サイズ削減が見込める場合、VP8L predictor transform、color transform、color indexing transform、subtract-green transformを使います。`ModeBestCompression` ではblock-adaptive predictor候補も試します
 - 固定幅の複数候補hash match finderと1手先のlazy matchingによる単純なVP8L LZ77 backwards referencesも使えます
@@ -100,8 +101,10 @@ func (enc *Encoder) Encode(w io.Writer, m image.Image) error
 - predictorやcolor transform後の一部residual streamでも、条件付きでLZ77とcolor cacheを併用できます
 - 制限なしのhash chainは使わないため、高度に最適化されたWebP encoderよりlossless出力が大きくなることがあります
 - `ModeFast` と `ModeLowMemory` は意図的にlossless探索を減らすため、VP8L出力が大きくなる場合があります
+- Balanced profileはlow-color画像でcolor indexingが明確に有利な場合にtransform探索を早期終了し、`ModeBestCompression` は全transform探索を維持します
 - `ModeAuto` は保守的な画像特徴の判定を使い、losslessのFast profileはindexed payloadが十分小さい場合だけ選びます。すべての画像で最小または最速の出力を保証するものではありません
 - alpha付きlossy画像では、`ModeFast` は `ALPH` 探索をunfiltered alphaとrun符号化に限定し、`ModeLowMemory` はfilter探索を維持しつつ前行空間参照候補を省きます
+- lossy encodingでは標準画像型のopacity判定を使い、完全にopaqueな入力では `ALPH` 候補解析を省きます。custom画像型は従来のpixel解析経路を使います
 - lossy VP8出力では、`ModeFast` は指定されたquality mappingを維持しつつ、macroblock skip signalingとtoken probability update探索を無効化します。`ModeBestCompression` は追加でluma4x4 mode探索を有効化します
 - lossy encodingは4:2:0 chroma subsampling、adaptive chroma downsampling、選択されたintra16x16とchroma prediction mode、`ModeBestCompression` で使う任意のluma4x4 mode、量子化されたDC/AC係数を使う低複雑度VP8 key frame encoderです
 - 出力サイズ削減が見込める場合はresidual token probability updateを書き込み、qualityに応じたsharpnessとluma4x4 macroblock向けmode deltaを持つnormal VP8 loop filterを有効化します

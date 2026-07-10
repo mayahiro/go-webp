@@ -39,6 +39,7 @@ const (
 	vp8lMaxMetaPrefixBlocks           = 1024
 	vp8lMaxMetaPrefixColorCacheTokens = 1 << 18
 	vp8lMaxChannelSmallSymbols        = 16
+	vp8lMaxMaterializedIndexPixels    = 1 << 16
 	nColorCacheGreenCodes             = nLiteralCodes + nLengthCodes + vp8lMaxColorCacheSize
 )
 
@@ -370,17 +371,21 @@ const (
 )
 
 type channelPlan struct {
-	constant bool
-	value    uint8
-	n        int
-	symbols  [vp8lMaxChannelSmallSymbols]uint8
-	counts   [vp8lMaxChannelSmallSymbols]uint32
-	lengths  [vp8lMaxChannelSmallSymbols]uint8
-	codes    [vp8lMaxChannelSmallSymbols]uint16
-	normal   bool
-	last     uint8
-	lastPos  uint8
-	lastOK   bool
+	constant             bool
+	value                uint8
+	n                    int
+	symbols              [vp8lMaxChannelSmallSymbols]uint8
+	counts               [vp8lMaxChannelSmallSymbols]uint32
+	lengths              [vp8lMaxChannelSmallSymbols]uint8
+	codes                [vp8lMaxChannelSmallSymbols]uint16
+	normal               bool
+	normalTreeBaseBits   uint32
+	normalTreeTokenCount uint16
+	normalCostCached     bool
+	normalDataBits       uint64
+	last                 uint8
+	lastPos              uint8
+	lastOK               bool
 }
 
 type pixelReader func(x int, y int) color.NRGBA
@@ -482,6 +487,10 @@ func (a *imageAnalysis) finalizeChannels() {
 
 func (p *channelPlan) finalize() {
 	p.normal = false
+	p.normalTreeBaseBits = 0
+	p.normalTreeTokenCount = 0
+	p.normalDataBits = 0
+	p.normalCostCached = false
 	clear(p.lengths[:])
 	clear(p.codes[:])
 	if p.constant || p.n < 3 {
@@ -500,7 +509,12 @@ func (p *channelPlan) finalize() {
 		symbol := p.symbols[i]
 		p.lengths[i] = lengths[symbol]
 		p.codes[i] = codes[symbol]
+		p.normalDataBits += uint64(p.counts[i]) * uint64(p.lengths[i])
 	}
+	normalTreeBaseBits, normalTreeTokenCount := alphaNormalTreeBaseBits(lengths[:])
+	p.normalTreeBaseBits = uint32(normalTreeBaseBits)
+	p.normalTreeTokenCount = normalTreeTokenCount
+	p.normalCostCached = true
 	p.normal = true
 }
 
@@ -707,7 +721,7 @@ func vp8lAutoLosslessMode(m image.Image, readPixel pixelReader, bounds image.Rec
 
 func vp8lAutoLosslessProfile(m image.Image, readPixel pixelReader, bounds image.Rectangle, width int, height int) (Mode, vp8lAutoLosslessReason) {
 	total := width * height
-	sampledLowColor := total >= vp8lMinColorIndexEarlyExitPixels && vp8lSampleUniqueColors(readPixel, bounds, width) <= 16
+	sampledLowColor := total >= vp8lAutoMinColorIndexPixels && vp8lSampleUniqueColors(readPixel, bounds, width) <= 16
 	verifiedLowColor := false
 	if sampledLowColor {
 		analysis := analyzeImage(readPixel, bounds)
@@ -854,7 +868,8 @@ func vp8lShouldUseColorIndexEarlyExitConfig(m image.Image, plan vp8lEncodingPlan
 }
 
 const (
-	vp8lMinColorIndexEarlyExitPixels                 = 512 * 512
+	vp8lMinColorIndexEarlyExitPixels                 = 64 * 64
+	vp8lAutoMinColorIndexPixels                      = 512 * 512
 	vp8lAutoFastColorIndexMaxBitsPerPixelNumerator   = 1
 	vp8lAutoFastColorIndexMaxBitsPerPixelDenominator = 4
 	vp8lAutoMaxSamples                               = 2048
@@ -1838,6 +1853,9 @@ func channelUseNormal(ch channelPlan, alphabetSize int) bool {
 }
 
 func channelNormalTreeBits(ch channelPlan, alphabetSize int) uint64 {
+	if ch.normalCostCached {
+		return uint64(ch.normalTreeBaseBits) + alphaCodeLengthLimitBits(int(ch.normalTreeTokenCount), alphabetSize)
+	}
 	var lengths [nColorCacheGreenCodes]uint8
 	for i := 0; i < ch.n; i++ {
 		lengths[ch.symbols[i]] = ch.lengths[i]
@@ -1846,6 +1864,9 @@ func channelNormalTreeBits(ch channelPlan, alphabetSize int) uint64 {
 }
 
 func channelNormalDataBits(ch channelPlan) uint64 {
+	if ch.normalCostCached {
+		return ch.normalDataBits
+	}
 	var bits uint64
 	for i := 0; i < ch.n; i++ {
 		bits += uint64(ch.counts[i]) * uint64(ch.lengths[i])
@@ -2002,6 +2023,9 @@ func makeVP8LColorIndexingPlan(readPixel pixelReader, bounds image.Rectangle, wi
 	mainWidth := divRoundUp(width, 1<<widthBits)
 	mainBounds := image.Rect(0, 0, mainWidth, height)
 	readIndexed := vp8lColorIndexedImageReader(readPixel, bounds, width, widthBits, index)
+	if len(table) <= 16 && mainWidth*height <= vp8lMaxMaterializedIndexPixels {
+		readIndexed = vp8lMaterializedColorIndexReader(readIndexed, mainBounds)
+	}
 	best := vp8lEncodingPlan{
 		analysis:            analyzeVP8LColorIndexedImage(readIndexed, mainBounds),
 		alpha:               alpha,
@@ -2109,6 +2133,22 @@ func makeVP8LColorIndexingPlanForIndexedReader(width int, height int, alpha bool
 		colorIndex:          index,
 		colorIndexReader:    readIndexed,
 		colorIndexAnalysis:  tableAnalysis,
+	}
+}
+
+func vp8lMaterializedColorIndexReader(readPixel pixelReader, bounds image.Rectangle) pixelReader {
+	width := bounds.Dx()
+	pixels := make([]uint8, width*bounds.Dy())
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			pixels[(y-bounds.Min.Y)*width+x-bounds.Min.X] = readPixel(x, y).G
+		}
+	}
+	return func(x int, y int) color.NRGBA {
+		return color.NRGBA{
+			G: pixels[(y-bounds.Min.Y)*width+x-bounds.Min.X],
+			A: 255,
+		}
 	}
 }
 

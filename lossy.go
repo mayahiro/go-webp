@@ -50,7 +50,10 @@ func encodeLossy(w io.Writer, m image.Image, bounds image.Rectangle, width int, 
 	readLuma := lumaReaderFor(m)
 	readChroma := chromaReaderFor(m)
 	alphaConfig := lossyAlphaConfigForMode(mode)
-	alphaAnalysis := analyzeLossyAlphaConfig(readPixel, bounds, width, height, alphaConfig)
+	var alphaAnalysis lossyAlphaAnalysis
+	if !lossyStandardImageOpaque(m) {
+		alphaAnalysis = analyzeLossyAlphaConfig(readPixel, bounds, width, height, alphaConfig)
+	}
 	lossyConfig := vp8LossyConfigForModeQuality(mode, quality)
 	frame, err := encodeVP8KeyFrameConfig(readLuma, readChroma, bounds, width, height, lossyConfig)
 	if err != nil {
@@ -60,6 +63,25 @@ func encodeLossy(w io.Writer, m image.Image, bounds image.Rectangle, width int, 
 		return writeLossyExtended(w, readPixel, bounds, width, height, frame, alphaAnalysis, alphaConfig)
 	}
 	return writeLossySimple(w, frame)
+}
+
+func lossyStandardImageOpaque(m image.Image) bool {
+	switch img := m.(type) {
+	case *image.NRGBA:
+		return img.Opaque()
+	case *image.RGBA:
+		return img.Opaque()
+	case *image.Gray:
+		return img.Opaque()
+	case *image.YCbCr:
+		return img.Opaque()
+	case *image.Paletted:
+		return img.Opaque()
+	case *image.Uniform:
+		return img.Opaque()
+	default:
+		return false
+	}
 }
 
 func writeLossySimple(w io.Writer, frame []byte) error {
@@ -394,11 +416,16 @@ func alphaTwoSymbolTreeBits(symbol0 uint8) uint64 {
 }
 
 func alphaNormalTreeBits(lengths []uint8) uint64 {
-	tokenBits, tokenCount := alphaCodeLengthTokenBits(lengths)
-	nCodes := alphaCodeLengthCodeCountForLengths(lengths)
-	bits := uint64(1 + 4 + nCodes*3)
-	bits += alphaCodeLengthLimitBits(tokenCount, len(lengths))
-	return bits + tokenBits
+	baseBits, tokenCount := alphaNormalTreeBaseBits(lengths)
+	return baseBits + alphaCodeLengthLimitBits(int(tokenCount), len(lengths))
+}
+
+func alphaNormalTreeBaseBits(lengths []uint8) (uint64, uint16) {
+	usage, tokenCount := alphaCodeLengthCodeUsageForLengths(lengths)
+	codeLengthCodeLengths, _ := alphaCodeLengthCodeLengthsForUsage(usage)
+	tokenBits := alphaCodeLengthTokenBitsWithCodeLengths(lengths, codeLengthCodeLengths)
+	nCodes := alphaCodeLengthCodeCountForUsage(usage)
+	return uint64(1+4+nCodes*3) + tokenBits, uint16(tokenCount)
 }
 
 func alphaCodeLengthLimitBits(maxSymbol int, alphabetSize int) uint64 {
