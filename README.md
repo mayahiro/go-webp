@@ -80,9 +80,14 @@ err := webp.Encode(w, img, &webp.Options{
 `ModeDefault` preserves the behavior selected by `Compression` and `Quality`.
 `ModeFast`, `ModeBalanced`, `ModeBestCompression`, `ModeLowMemory`, and
 `ModeAuto` tune the selected compression mode. `ModeNearLossless` writes VP8L
-with alpha preserved and RGB quantized according to `Quality`; quality 100, or
-an omitted quality, is equivalent to lossless. `ModeLossyQuality` writes VP8
-lossy output and uses `Quality`, regardless of `Compression`.
+with alpha preserved and edge-aware RGB quantization controlled by `Quality`;
+quality 100, or an omitted quality, is equivalent to lossless. Qualities 80-99,
+60-79, 40-59, 20-39, and 1-19 limit the maximum RGB channel error to 1, 2, 4,
+8, and 16 respectively. Images with both dimensions below 64 pixels, or with
+height below 3 pixels, are kept unchanged, matching cwebp's small-image
+near-lossless behavior.
+`ModeLossyQuality` writes VP8 lossy output and uses `Quality`, regardless of
+`Compression`.
 
 ```go
 type Encoder struct {
@@ -99,8 +104,9 @@ room for future options.
 
 - The encoder is pure Go and does not use cgo.
 - See [BENCHMARKS.md](BENCHMARKS.md) for current local benchmark references.
-- It scans the source image multiple times and does not keep a full converted
-  image in memory for lossless encoding.
+- It scans the source image multiple times. Lossless BestCompression may use a
+  converted pixel plane up to 32 MiB for safe parallel reads of custom image
+  types; other lossless profiles keep direct readers.
 - Small low-color inputs can keep a bounded packed color-index stream so
   repeated LZ77 evaluation does not repeat source color lookup.
 - Constant channels are encoded with single-symbol Huffman trees.
@@ -108,7 +114,9 @@ room for future options.
   subtract-green transforms when they are estimated to reduce output size.
   `ModeBestCompression` also tries a block-adaptive predictor candidate. The
   encoder can use simple VP8L LZ77 backwards references with a bounded
-  multi-candidate hash match finder and one-step lazy matching. It can use a
+  multi-candidate hash match finder and one-step lazy matching. Indexed streams
+  can use bounded cost-based optimal parsing, and indexed data can be combined
+  with a spatial predictor when its complete bit cost is lower. It can use a
   limited VP8L color cache path for literal streams when a sample and bit-cost
   estimate indicate that it should help, including bounded LZ77 plus color
   cache paths for untransformed streams and selected predictor or color
@@ -125,18 +133,31 @@ room for future options.
   fastest output for every image.
 - For lossy images with alpha, `ModeFast` limits `ALPH` search to unfiltered
   alpha and repeated-run coding, while `ModeLowMemory` keeps filter search but
-  skips previous-row spatial reference candidates.
+  skips previous-row spatial reference candidates. `ModeBestCompression`
+  additionally applies bounded optimal parsing to the run and previous-row
+  match candidates.
+- `ModeBestCompression` can analyze independent lossless transform candidates
+  with up to four workers. Standard image types are read directly; custom
+  image types use a pixel plane limited to 32 MiB, and larger inputs fall back
+  to sequential analysis.
+- Lossy VP8 frame planning and `ALPH` analysis can run with two workers for
+  standard image types. `ModeFast`, `ModeLowMemory`, small images, custom image
+  types, and single-threaded runtimes use the sequential path.
 - Lossy encoding uses the standard image types' opacity checks to skip `ALPH`
   candidate analysis when the input is fully opaque. Custom image types retain
   the general pixel-analysis path.
 - For lossy VP8 output, `ModeFast` keeps the requested quality mapping but
   disables macroblock skip signaling and token probability update search.
-  `ModeBestCompression` additionally enables luma4x4 mode search.
+  `ModeBestCompression` additionally enables luma4x4 mode search, a second
+  rate-distortion pass, trellis quantization, and bounded sharp-chroma search.
 - Lossy profiles that use skip or token probability analysis can retain the
   selected quantized residuals and reuse them for statistics and final coding,
   instead of repeating the macroblock DCT and reconstruction passes. This
   buffer is limited to an estimated 32 MiB. `ModeFast`, `ModeLowMemory`, and
   images above the limit use the repeated-pass path without this buffer.
+- VP8 mode passes reuse reconstruction, top-row context, skip-map, and residual
+  workspaces within one encode. `ModeLowMemory` does not retain a source plane,
+  VP8 residual buffer, VP8L token stream, meta-prefix plan, or color-cache plan.
 - Lossy encoding uses a low-complexity VP8 key frame encoder with 4:2:0 chroma
   subsampling, adaptive chroma downsampling, selected intra16x16 and chroma
   prediction modes, optional luma4x4 modes in `ModeBestCompression`, and
@@ -146,12 +167,12 @@ room for future options.
   sharpness and a mode delta for luma4x4 macroblocks.
 - Lossy `Quality` currently uses a non-linear mapping to the VP8 base quantizer
   and quality-dependent Y2/UV quantization and loop filter settings. The
-  encoder uses a simple rate-distortion mode decision heuristic.
+  encoder uses activity-based segmentation and rate-distortion mode decisions.
 - Lossy images with alpha are written as extended WebP files with an `ALPH`
   chunk. The encoder uses compressed alpha when it is smaller and falls back to
   raw alpha otherwise. Compressed alpha uses frequency-coded residuals and
-  backward references for repeated residual runs, previous-row residual
-  matches, and neighboring previous-row residual matches.
+  backward references for repeated residual runs and previous-row residual
+  matches across the VP8L spatial-distance neighborhood.
 
 ## Limitations
 
@@ -163,10 +184,10 @@ room for future options.
   types are read through `color.NRGBAModel`-equivalent conversion before
   encoding.
 - Lossy alpha compression is intentionally simple and currently uses one global
-  `ALPH` filter, frequency-coded residuals, and limited backward references for
-  repeated residual runs, previous-row residual matches, and neighboring
-  previous-row residual matches. It does not yet perform general LZ77 match
-  search or block-adaptive alpha entropy coding.
+  `ALPH` filter, frequency-coded residuals, and bounded backward-reference
+  parsing for repeated residual runs and previous-row spatial matches. It does
+  not yet perform general hash-chain LZ77 search or block-adaptive alpha entropy
+  coding.
 - Lossy loop filter settings are intentionally conservative and are not yet
   tuned with image-specific perceptual metrics.
 
@@ -179,7 +200,7 @@ room for future options.
 ```sh
 go test ./...
 go vet ./...
-go tool goimports -w .
+go tool goimports -l .
 ```
 
 Optional external decoder check:
@@ -194,11 +215,28 @@ it is available, otherwise it uses a temporary `golang.org/x/image/webp` decoder
 through `go run`, and falls back to macOS `sips` only when the other decoders
 are unavailable.
 
-For a local lossless comparison against libwebp:
+For local lossless, profile, or near-lossless comparisons against libwebp:
 
 ```sh
-go run ./scripts/compare_lossless_libwebp -runs 3
+go run ./scripts/compare_lossless_libwebp -runs 3 -mode default -method 4
+go run ./scripts/compare_lossless_libwebp -runs 3 -mode best -method 6
+go run ./scripts/compare_lossless_libwebp -runs 3 -mode near-lossless -quality 75 -method 4
 ```
+
+The table reports decoded RGB error and alpha equality. Ordinary lossless
+profiles require exact pixels.
+
+For a local lossy rate-distortion comparison against libwebp:
+
+```sh
+go run ./scripts/compare_lossy_libwebp -runs 3 -go-mode default -json report.json
+```
+
+The lossy comparison requires `cwebp` and `dwebp`. Its JSON report contains
+quality sweeps, decoded RGB/YUV and alpha metrics, encode timing, and the
+nearest sampled cwebp points by encoded size and RGB PSNR. The go-webp timing
+covers the in-process `Encode` call, while the cwebp timing also includes
+process startup, PNG decoding, and output writing.
 
 ## License
 

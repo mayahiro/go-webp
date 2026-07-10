@@ -456,21 +456,33 @@ func vp8BlockBitCostWithProbs(probs *vp8TokenProbs, plane int, context uint8, co
 }
 
 func vp8BlockBitCostFromWithProbs(probs *vp8TokenProbs, plane int, context uint8, coeff vp8QuantizedBlock, start int) int64 {
+	cost, _ := vp8BlockBitCostFromWithProbsAndNonZeroPtr(probs, plane, context, &coeff, start)
+	return cost
+}
+
+func vp8BlockBitCostAndNonZeroWithProbsPtr(probs *vp8TokenProbs, plane int, context uint8, coeff *vp8QuantizedBlock) (int64, bool) {
+	return vp8BlockBitCostFromWithProbsAndNonZeroPtr(probs, plane, context, coeff, 0)
+}
+
+func vp8BlockBitCostFromWithProbsAndNonZeroPtr(probs *vp8TokenProbs, plane int, context uint8, coeff *vp8QuantizedBlock, start int) (int64, bool) {
+	if probs == nil {
+		return vp8BlockBitCostFromDefaultAndNonZeroPtr(plane, context, coeff, start)
+	}
 	if context > 2 {
 		context = 2
 	}
 	n := start
 	prob := vp8TokenProbPtr(probs, plane, int(vp8Bands[n]), context)
-	last := vp8LastNonZeroCoeff(coeff, n)
+	last := vp8LastNonZeroCoeffPtr(coeff, n)
 	if last < n {
-		return vp8BitCost(prob[0], false)
+		return vp8BitCost(prob[0], false), false
 	}
 	cost := vp8BitCost(prob[0], true)
 
 	for n != 16 {
 		n++
 		z := int(vp8Zigzag[n-1])
-		v := coeff[z]
+		v := (*coeff)[z]
 		if v == 0 {
 			cost += vp8BitCost(prob[1], false)
 			prob = vp8TokenProbPtr(probs, plane, int(vp8Bands[n]), 0)
@@ -486,16 +498,16 @@ func vp8BlockBitCostFromWithProbs(probs *vp8TokenProbs, plane int, context uint8
 		cost += vp8BitCost(128, v < 0)
 		prob = vp8TokenProbPtr(probs, plane, int(vp8Bands[n]), coeffContext(absCoeff))
 		if n == 16 {
-			return cost
+			return cost, true
 		}
 		if n > last {
 			cost += vp8BitCost(prob[0], false)
-			return cost
+			return cost, true
 		}
 		cost += vp8BitCost(prob[0], true)
 	}
 
-	return cost
+	return cost, true
 }
 
 func vp8BlockBitCostFromDefault(plane int, context uint8, coeff vp8QuantizedBlock, start int) int64 {

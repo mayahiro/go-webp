@@ -11,9 +11,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	webp "github.com/mayahiro/go-webp"
+	"github.com/mayahiro/go-webp/internal/benchmarkfixture"
 )
 
 type fixture struct {
@@ -21,21 +24,49 @@ type fixture struct {
 	img  image.Image
 }
 
+type comparisonConfig struct {
+	name      string
+	goOptions webp.Options
+	cwebpArgs []string
+	exact     bool
+}
+
+type distortionMetrics struct {
+	rgbMAE     float64
+	rgbMaxAbs  int
+	alphaExact bool
+	exact      bool
+}
+
 type result struct {
-	fixture string
-	encoder string
-	runs    int
-	size    int64
-	avg     time.Duration
+	fixture    string
+	encoder    string
+	runs       int
+	size       int64
+	avg        time.Duration
+	distortion distortionMetrics
 }
 
 func main() {
 	runs := flag.Int("runs", 3, "number of encode runs per fixture and encoder")
+	mode := flag.String("mode", "default", "go-webp profile: default, fast, balanced, best, low-memory, auto, or near-lossless")
+	quality := flag.Int("quality", 75, "near-lossless quality from 1 to 100")
+	method := flag.Int("method", 4, "cwebp method from 0 to 6")
 	outDir := flag.String("out", "", "directory for generated PNG and WebP files")
 	keep := flag.Bool("keep", false, "keep generated files when out is empty")
 	flag.Parse()
 	if *runs <= 0 {
 		fatal(errors.New("runs must be positive"))
+	}
+	if *quality < 1 || *quality > 100 {
+		fatal(errors.New("quality must be between 1 and 100"))
+	}
+	if *method < 0 || *method > 6 {
+		fatal(errors.New("method must be between 0 and 6"))
+	}
+	cfg, err := makeComparisonConfig(*mode, *quality, *method)
+	if err != nil {
+		fatal(err)
 	}
 	if _, err := exec.LookPath("cwebp"); err != nil {
 		fatal(fmt.Errorf("cwebp not found in PATH: %w", err))
@@ -58,34 +89,82 @@ func main() {
 		fatal(err)
 	}
 
+	version, err := commandVersion("cwebp", "-version")
+	if err != nil {
+		fatal(err)
+	}
 	fmt.Printf("workdir=%s\n", dir)
-	fmt.Printf("%-14s %-10s %4s %12s %12s\n", "fixture", "encoder", "runs", "encoded_B", "avg_ms")
+	fmt.Printf("mode=%s method=%d quality=%d cwebp=%s\n", cfg.name, *method, *quality, version)
+	fmt.Printf("%-14s %-10s %4s %12s %10s %10s %8s %11s\n", "fixture", "encoder", "runs", "encoded_B", "avg_ms", "rgb_mae", "rgb_max", "alpha_exact")
 	for _, f := range fixtures() {
 		pngPath := filepath.Join(dir, f.name+".png")
 		if err := writePNG(pngPath, f.img); err != nil {
 			fatal(fmt.Errorf("%s: write png: %w", f.name, err))
 		}
-		goResult, err := runGoWebP(dir, f, *runs)
+		goResult, err := runGoWebP(dir, f, *runs, cfg)
 		if err != nil {
 			fatal(err)
 		}
-		libwebpResult, err := runLibWebP(dir, f, pngPath, *runs)
+		libwebpResult, err := runLibWebP(dir, f, pngPath, *runs, cfg)
 		if err != nil {
 			fatal(err)
 		}
 		for _, r := range []result{goResult, libwebpResult} {
-			fmt.Printf("%-14s %-10s %4d %12d %12.3f\n", r.fixture, r.encoder, r.runs, r.size, float64(r.avg.Microseconds())/1000)
+			fmt.Printf(
+				"%-14s %-10s %4d %12d %10.3f %10.4f %8d %11t\n",
+				r.fixture,
+				r.encoder,
+				r.runs,
+				r.size,
+				float64(r.avg.Microseconds())/1000,
+				r.distortion.rgbMAE,
+				r.distortion.rgbMaxAbs,
+				r.distortion.alphaExact,
+			)
 		}
 	}
 }
 
-func runGoWebP(dir string, f fixture, runs int) (result, error) {
+func makeComparisonConfig(mode string, quality int, method int) (comparisonConfig, error) {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	cfg := comparisonConfig{
+		name:      mode,
+		goOptions: webp.Options{Compression: webp.CompressionLossless},
+		cwebpArgs: []string{"-lossless", "-m", strconv.Itoa(method)},
+		exact:     true,
+	}
+	switch mode {
+	case "default":
+		cfg.goOptions.Mode = webp.ModeDefault
+	case "fast":
+		cfg.goOptions.Mode = webp.ModeFast
+	case "balanced":
+		cfg.goOptions.Mode = webp.ModeBalanced
+	case "best", "best-compression":
+		cfg.name = "best"
+		cfg.goOptions.Mode = webp.ModeBestCompression
+	case "low-memory":
+		cfg.goOptions.Mode = webp.ModeLowMemory
+	case "auto":
+		cfg.goOptions.Mode = webp.ModeAuto
+	case "near-lossless":
+		cfg.goOptions.Mode = webp.ModeNearLossless
+		cfg.goOptions.Quality = quality
+		cfg.cwebpArgs = append(cfg.cwebpArgs, "-near_lossless", strconv.Itoa(quality))
+		cfg.exact = quality == 100
+	default:
+		return comparisonConfig{}, fmt.Errorf("unsupported mode %q", mode)
+	}
+	return cfg, nil
+}
+
+func runGoWebP(dir string, f fixture, runs int, cfg comparisonConfig) (result, error) {
 	var total time.Duration
 	var encoded []byte
 	for i := 0; i < runs; i++ {
 		var buf bytes.Buffer
 		start := time.Now()
-		if err := webp.Encode(&buf, f.img, &webp.Options{Compression: webp.CompressionLossless}); err != nil {
+		if err := webp.Encode(&buf, f.img, &cfg.goOptions); err != nil {
 			return result{}, fmt.Errorf("%s/go-webp: encode: %w", f.name, err)
 		}
 		total += time.Since(start)
@@ -95,17 +174,27 @@ func runGoWebP(dir string, f fixture, runs int) (result, error) {
 	if err := os.WriteFile(webpPath, encoded, 0o600); err != nil {
 		return result{}, fmt.Errorf("%s/go-webp: write webp: %w", f.name, err)
 	}
-	if err := verifyDWebP(dir, f, webpPath, "go-webp"); err != nil {
+	metrics, err := decodeAndMeasure(dir, f, webpPath, "go-webp", cfg.exact)
+	if err != nil {
 		return result{}, err
 	}
-	return result{fixture: f.name, encoder: "go-webp", runs: runs, size: int64(len(encoded)), avg: total / time.Duration(runs)}, nil
+	return result{
+		fixture:    f.name,
+		encoder:    "go-webp",
+		runs:       runs,
+		size:       int64(len(encoded)),
+		avg:        total / time.Duration(runs),
+		distortion: metrics,
+	}, nil
 }
 
-func runLibWebP(dir string, f fixture, pngPath string, runs int) (result, error) {
+func runLibWebP(dir string, f fixture, pngPath string, runs int, cfg comparisonConfig) (result, error) {
 	webpPath := filepath.Join(dir, f.name+".libwebp.webp")
 	var total time.Duration
 	for i := 0; i < runs; i++ {
-		cmd := exec.Command("cwebp", "-quiet", "-lossless", pngPath, "-o", webpPath)
+		args := append([]string{"-quiet"}, cfg.cwebpArgs...)
+		args = append(args, pngPath, "-o", webpPath)
+		cmd := exec.Command("cwebp", args...)
 		start := time.Now()
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return result{}, fmt.Errorf("%s/libwebp: cwebp: %w: %s", f.name, err, string(out))
@@ -116,26 +205,82 @@ func runLibWebP(dir string, f fixture, pngPath string, runs int) (result, error)
 	if err != nil {
 		return result{}, fmt.Errorf("%s/libwebp: stat webp: %w", f.name, err)
 	}
-	if err := verifyDWebP(dir, f, webpPath, "libwebp"); err != nil {
+	metrics, err := decodeAndMeasure(dir, f, webpPath, "libwebp", cfg.exact)
+	if err != nil {
 		return result{}, err
 	}
-	return result{fixture: f.name, encoder: "libwebp", runs: runs, size: info.Size(), avg: total / time.Duration(runs)}, nil
+	return result{
+		fixture:    f.name,
+		encoder:    "libwebp",
+		runs:       runs,
+		size:       info.Size(),
+		avg:        total / time.Duration(runs),
+		distortion: metrics,
+	}, nil
 }
 
-func verifyDWebP(dir string, f fixture, webpPath string, suffix string) error {
+func decodeAndMeasure(dir string, f fixture, webpPath string, suffix string, requireExact bool) (distortionMetrics, error) {
 	pngPath := filepath.Join(dir, f.name+"."+suffix+".decoded.png")
 	cmd := exec.Command("dwebp", "-quiet", webpPath, "-o", pngPath)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("%s/%s: dwebp: %w: %s", f.name, suffix, err, string(out))
+		return distortionMetrics{}, fmt.Errorf("%s/%s: dwebp: %w: %s", f.name, suffix, err, string(out))
 	}
 	got, err := readPNG(pngPath)
 	if err != nil {
-		return fmt.Errorf("%s/%s: read decoded png: %w", f.name, suffix, err)
+		return distortionMetrics{}, fmt.Errorf("%s/%s: read decoded png: %w", f.name, suffix, err)
 	}
-	if err := compareImage(got, f.img); err != nil {
-		return fmt.Errorf("%s/%s: decoded image mismatch: %w", f.name, suffix, err)
+	metrics, err := measureImage(got, f.img)
+	if err != nil {
+		return distortionMetrics{}, fmt.Errorf("%s/%s: decoded image: %w", f.name, suffix, err)
 	}
-	return nil
+	if requireExact && !metrics.exact {
+		return distortionMetrics{}, fmt.Errorf("%s/%s: decoded image is not exact", f.name, suffix)
+	}
+	return metrics, nil
+}
+
+func measureImage(got image.Image, want image.Image) (distortionMetrics, error) {
+	gotBounds := got.Bounds()
+	wantBounds := want.Bounds()
+	if gotBounds.Dx() != wantBounds.Dx() || gotBounds.Dy() != wantBounds.Dy() {
+		return distortionMetrics{}, fmt.Errorf("dimensions = %dx%d, want %dx%d", gotBounds.Dx(), gotBounds.Dy(), wantBounds.Dx(), wantBounds.Dy())
+	}
+	metrics := distortionMetrics{alphaExact: true, exact: true}
+	var totalAbs uint64
+	for y := 0; y < wantBounds.Dy(); y++ {
+		for x := 0; x < wantBounds.Dx(); x++ {
+			gotPixel := color.NRGBAModel.Convert(got.At(gotBounds.Min.X+x, gotBounds.Min.Y+y)).(color.NRGBA)
+			wantPixel := color.NRGBAModel.Convert(want.At(wantBounds.Min.X+x, wantBounds.Min.Y+y)).(color.NRGBA)
+			for _, diff := range []int{
+				absDiff(gotPixel.R, wantPixel.R),
+				absDiff(gotPixel.G, wantPixel.G),
+				absDiff(gotPixel.B, wantPixel.B),
+			} {
+				totalAbs += uint64(diff)
+				if diff > metrics.rgbMaxAbs {
+					metrics.rgbMaxAbs = diff
+				}
+			}
+			if gotPixel.A != wantPixel.A {
+				metrics.alphaExact = false
+			}
+			if gotPixel != wantPixel {
+				metrics.exact = false
+			}
+		}
+	}
+	samples := wantBounds.Dx() * wantBounds.Dy() * 3
+	if samples != 0 {
+		metrics.rgbMAE = float64(totalAbs) / float64(samples)
+	}
+	return metrics, nil
+}
+
+func absDiff(a uint8, b uint8) int {
+	if a >= b {
+		return int(a - b)
+	}
+	return int(b - a)
 }
 
 func writePNG(path string, img image.Image) error {
@@ -156,136 +301,22 @@ func readPNG(path string) (image.Image, error) {
 	return png.Decode(file)
 }
 
-func compareImage(got image.Image, want image.Image) error {
-	gotBounds := got.Bounds()
-	wantBounds := want.Bounds()
-	if gotBounds.Dx() != wantBounds.Dx() || gotBounds.Dy() != wantBounds.Dy() {
-		return fmt.Errorf("dimensions = %dx%d, want %dx%d", gotBounds.Dx(), gotBounds.Dy(), wantBounds.Dx(), wantBounds.Dy())
+func commandVersion(name string, args ...string) (string, error) {
+	cmd := exec.Command(name, args...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("%v: %w: %s", cmd.Args, err, output)
 	}
-	for y := 0; y < wantBounds.Dy(); y++ {
-		for x := 0; x < wantBounds.Dx(); x++ {
-			gotPixel := color.NRGBAModel.Convert(got.At(gotBounds.Min.X+x, gotBounds.Min.Y+y)).(color.NRGBA)
-			wantPixel := color.NRGBAModel.Convert(want.At(wantBounds.Min.X+x, wantBounds.Min.Y+y)).(color.NRGBA)
-			if gotPixel != wantPixel {
-				return fmt.Errorf("pixel (%d,%d) = %#v, want %#v", x, y, gotPixel, wantPixel)
-			}
-		}
-	}
-	return nil
+	return strings.TrimSpace(string(output)), nil
 }
 
 func fixtures() []fixture {
-	return []fixture{
-		{name: "gradient128", img: gradientFixture(128, 128)},
-		{name: "ui256", img: uiFixture(256, 256)},
-		{name: "flat128", img: flatFixture(128, 128)},
-		{name: "palette256", img: paletteFixture(256, 256)},
-		{name: "alpha128", img: alphaFixture(128, 128)},
-		{name: "photo512", img: photoLikeFixture(512, 512)},
+	shared := benchmarkfixture.Standard()
+	result := make([]fixture, len(shared))
+	for i, f := range shared {
+		result[i] = fixture{name: f.Name, img: f.Image}
 	}
-}
-
-func gradientFixture(width int, height int) *image.NRGBA {
-	img := image.NewNRGBA(image.Rect(0, 0, width, height))
-	fill(img, func(x int, y int) color.NRGBA {
-		return color.NRGBA{
-			R: uint8((x*3 + y) & 0xff),
-			G: uint8((x + y*5) & 0xff),
-			B: uint8((x*7 + y*11) & 0xff),
-			A: 255,
-		}
-	})
-	return img
-}
-
-func uiFixture(width int, height int) *image.NRGBA {
-	palette := []color.NRGBA{
-		{R: 22, G: 27, B: 34, A: 255},
-		{R: 36, G: 41, B: 47, A: 255},
-		{R: 87, G: 166, B: 74, A: 255},
-		{R: 210, G: 214, B: 220, A: 255},
-		{R: 246, G: 248, B: 250, A: 255},
-		{R: 48, G: 116, B: 190, A: 255},
-	}
-	img := image.NewNRGBA(image.Rect(0, 0, width, height))
-	fill(img, func(x int, y int) color.NRGBA {
-		if x < width/8 || y < height/10 {
-			return palette[0]
-		}
-		if (x/24+y/18)%7 == 0 {
-			return palette[2]
-		}
-		if (x/48+y/32)%5 == 0 {
-			return palette[5]
-		}
-		if (x+y)%19 == 0 {
-			return palette[3]
-		}
-		return palette[(x/64+y/40)%2+3]
-	})
-	return img
-}
-
-func flatFixture(width int, height int) *image.NRGBA {
-	img := image.NewNRGBA(image.Rect(0, 0, width, height))
-	fill(img, func(int, int) color.NRGBA {
-		return color.NRGBA{R: 16, G: 32, B: 48, A: 255}
-	})
-	return img
-}
-
-func paletteFixture(width int, height int) *image.Paletted {
-	palette := make(color.Palette, 16)
-	for i := range palette {
-		palette[i] = color.NRGBA{
-			R: uint8(i * 17),
-			G: uint8((i*37 + 19) & 0xff),
-			B: uint8((i*53 + 7) & 0xff),
-			A: 255,
-		}
-	}
-	img := image.NewPaletted(image.Rect(0, 0, width, height), palette)
-	for y := img.Rect.Min.Y; y < img.Rect.Max.Y; y++ {
-		for x := img.Rect.Min.X; x < img.Rect.Max.X; x++ {
-			img.SetColorIndex(x, y, uint8((x/4+y/4+x*y)%len(palette)))
-		}
-	}
-	return img
-}
-
-func alphaFixture(width int, height int) *image.NRGBA {
-	img := image.NewNRGBA(image.Rect(0, 0, width, height))
-	fill(img, func(x int, y int) color.NRGBA {
-		return color.NRGBA{
-			R: uint8((x*5 + y*2) & 0xff),
-			G: uint8((x*3 + y*7 + 11) & 0xff),
-			B: uint8((x*13 + y*17 + 29) & 0xff),
-			A: uint8(64 + (x*3+y*5)%192),
-		}
-	})
-	return img
-}
-
-func photoLikeFixture(width int, height int) *image.NRGBA {
-	img := image.NewNRGBA(image.Rect(0, 0, width, height))
-	fill(img, func(x int, y int) color.NRGBA {
-		base := (x*37 + y*53 + x*y*3) & 0xff
-		return color.NRGBA{
-			R: uint8((base + x/3 + y/5) & 0xff),
-			G: uint8((base + x/7 + y/2 + 17) & 0xff),
-			B: uint8((base + x/5 + y/11 + 41) & 0xff),
-			A: 255,
-		}
-	})
-	return img
-}
-
-func fill(img *image.NRGBA, fn func(x int, y int) color.NRGBA) {
-	for y := img.Rect.Min.Y; y < img.Rect.Max.Y; y++ {
-		for x := img.Rect.Min.X; x < img.Rect.Max.X; x++ {
-			img.SetNRGBA(x, y, fn(x-img.Rect.Min.X, y-img.Rect.Min.Y))
-		}
-	}
+	return result
 }
 
 func fatal(err error) {

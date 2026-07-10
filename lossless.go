@@ -3,37 +3,35 @@ package webp
 import (
 	"bufio"
 	"fmt"
-	"image"
 	"io"
 	"math"
 )
 
-func encodeLossless(w io.Writer, m image.Image, bounds image.Rectangle, width int, height int, mode Mode) error {
-	if width > maxVP8LDimension || height > maxVP8LDimension {
-		return fmt.Errorf("webp: image dimensions %dx%d exceed VP8L limit %dx%d", width, height, maxVP8LDimension, maxVP8LDimension)
+func encodeLossless(w io.Writer, source encoderSource, mode Mode) error {
+	if source.width > maxVP8LDimension || source.height > maxVP8LDimension {
+		return fmt.Errorf("webp: image dimensions %dx%d exceed VP8L limit %dx%d", source.width, source.height, maxVP8LDimension, maxVP8LDimension)
 	}
 
-	readPixel := pixelReaderFor(m)
-	plan := chooseVP8LEncodingPlanForImageMode(m, readPixel, bounds, width, height, mode)
-	return writeLosslessVP8L(w, readPixel, bounds, width, height, plan)
+	readPixel := source.pixels()
+	plan := chooseVP8LEncodingPlanForImageMode(source.image, readPixel, source.bounds, source.width, source.height, mode)
+	return writeLosslessVP8L(w, source, readPixel, plan)
 }
 
-func encodeNearLossless(w io.Writer, m image.Image, bounds image.Rectangle, width int, height int, quality int, mode Mode) error {
-	if width > maxVP8LDimension || height > maxVP8LDimension {
-		return fmt.Errorf("webp: image dimensions %dx%d exceed VP8L limit %dx%d", width, height, maxVP8LDimension, maxVP8LDimension)
+func encodeNearLossless(w io.Writer, source encoderSource, quality int, mode Mode) error {
+	if source.width > maxVP8LDimension || source.height > maxVP8LDimension {
+		return fmt.Errorf("webp: image dimensions %dx%d exceed VP8L limit %dx%d", source.width, source.height, maxVP8LDimension, maxVP8LDimension)
 	}
 
-	step := nearLosslessQuantizationStep(quality)
-	if step <= 1 {
-		return encodeLossless(w, m, bounds, width, height, mode)
+	if nearLosslessQuantizationBits(quality) == 0 {
+		return encodeLossless(w, source, ModeDefault)
 	}
-	readPixel := nearLosslessReader(pixelReaderFor(m), step)
-	plan := chooseVP8LEncodingPlanForImageMode(nil, readPixel, bounds, width, height, mode)
-	return writeLosslessVP8L(w, readPixel, bounds, width, height, plan)
+	readPixel := newNearLosslessReader(source, quality)
+	plan := chooseVP8LEncodingPlanForImageMode(nil, readPixel, source.bounds, source.width, source.height, mode)
+	return writeLosslessVP8L(w, source, readPixel, plan)
 }
 
-func writeLosslessVP8L(w io.Writer, readPixel pixelReader, bounds image.Rectangle, width int, height int, plan vp8lEncodingPlan) error {
-	payloadBits := vp8lPayloadBits(width, height, plan)
+func writeLosslessVP8L(w io.Writer, source encoderSource, readPixel pixelReader, plan vp8lEncodingPlan) error {
+	payloadBits := vp8lPayloadBits(source.width, source.height, plan)
 	payloadSize := (payloadBits + 7) / 8
 	padding := payloadSize & 1
 	riffSize := uint64(4) + 8 + payloadSize + padding
@@ -47,7 +45,7 @@ func writeLosslessVP8L(w io.Writer, readPixel pixelReader, bounds image.Rectangl
 	}
 
 	bits := newBitWriter(bw)
-	writeVP8L(bits, readPixel, bounds, width, height, plan)
+	writeVP8L(bits, readPixel, source.bounds, source.width, source.height, plan)
 	if err := bits.flush(); err != nil {
 		return err
 	}

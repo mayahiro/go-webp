@@ -97,11 +97,20 @@ func (b *vp8ResidualBuffer) finishMacroblock(nonZero bool) {
 	})
 }
 
-func (b *vp8ResidualBuffer) skipMap(enabled bool) []bool {
+func (b *vp8ResidualBuffer) candidateSkipMap(enabled bool) []bool {
+	return b.candidateSkipMapInto(enabled, nil)
+}
+
+func (b *vp8ResidualBuffer) candidateSkipMapInto(enabled bool, skipMap []bool) []bool {
 	if !enabled {
 		return nil
 	}
-	skipMap := make([]bool, len(b.macroblocks))
+	if cap(skipMap) < len(b.macroblocks) {
+		skipMap = make([]bool, len(b.macroblocks))
+	} else {
+		skipMap = skipMap[:len(b.macroblocks)]
+		clear(skipMap)
+	}
 	skipped := 0
 	for i, macroblock := range b.macroblocks {
 		if !macroblock.nonZero {
@@ -109,10 +118,39 @@ func (b *vp8ResidualBuffer) skipMap(enabled bool) []bool {
 			skipped++
 		}
 	}
-	if !vp8ShouldUseMacroblockSkip(len(skipMap), skipped) {
+	if skipped == 0 {
 		return nil
 	}
 	return skipMap
+}
+
+func (b *vp8ResidualBuffer) shouldUseSkipMap(skipMap []bool, probs *vp8TokenProbs) bool {
+	if skipMap == nil || len(skipMap) != len(b.macroblocks) {
+		return false
+	}
+	skipProb := vp8SkipProbability(skipMap)
+	noSkipCost := int64(256) + b.tokenBitCost(probs, nil)
+	withSkipCost := int64(9 * 256)
+	for _, skipped := range skipMap {
+		withSkipCost += vp8BitCost(skipProb, skipped)
+	}
+	withSkipCost += b.tokenBitCost(probs, skipMap)
+	return withSkipCost < noSkipCost
+}
+
+func (b *vp8ResidualBuffer) tokenBitCost(probs *vp8TokenProbs, skipMap []bool) int64 {
+	var cost int64
+	blockStart := 0
+	for i, macroblock := range b.macroblocks {
+		blockEnd := int(macroblock.blockEnd)
+		if skipMap == nil || !skipMap[i] {
+			for _, block := range b.blocks[blockStart:blockEnd] {
+				cost += vp8BlockBitCostFromWithProbs(probs, int(block.plane), block.context, block.coeff, int(block.start))
+			}
+		}
+		blockStart = blockEnd
+	}
+	return cost
 }
 
 func (b *vp8ResidualBuffer) tokenStats(skipMap []bool) vp8TokenStats {
@@ -145,7 +183,7 @@ func (b *vp8ResidualBuffer) encodeWithSkipMap(probs *vp8TokenProbs, skipMap []bo
 	return enc.bytes()
 }
 
-func collectVP8ResidualBuffer(readLuma lumaReader, readChroma chromaReader, bounds image.Rectangle, mbw int, mbh int, quant vp8Quant, modes []vp8MBMode, work *vp8EncodeBuffers) *vp8ResidualBuffer {
+func collectVP8ResidualBuffer(readLuma lumaReader, readChroma chromaReader, bounds image.Rectangle, mbw int, mbh int, baseQuant vp8Quant, segmentation *vp8Segmentation, modes []vp8MBMode, work *vp8EncodeBuffers) *vp8ResidualBuffer {
 	yStride := mbw * 16
 	cStride := mbw * 8
 	var upY [][4]uint8
@@ -164,14 +202,16 @@ func collectVP8ResidualBuffer(readLuma lumaReader, readChroma chromaReader, boun
 		clear(upY16)
 	}
 
-	buffer := newVP8ResidualBuffer(mbw * mbh)
+	buffer := work.resetResidualBuffer(mbw * mbh)
 	sink := vp8ResidualSink{buffer: buffer}
 	for mby := 0; mby < mbh; mby++ {
 		var leftY [4]uint8
 		var leftUV [4]uint8
 		var leftY16 uint8
 		for mbx := 0; mbx < mbw; mbx++ {
-			mode := modes[mby*mbw+mbx]
+			macroblock := mby*mbw + mbx
+			quant := segmentation.quantForMacroblock(macroblock, baseQuant)
+			mode := modes[macroblock]
 			lumaNZ := processVP8LumaMB(readLuma, bounds, mbx, mby, work.recY, yStride, quant, mode, &leftY, &upY[mbx], &leftY16, &upY16[mbx], &sink)
 			chromaNZ := processVP8ChromaMB(readChroma, bounds, mbx, mby, work.recCb, work.recCr, cStride, quant, mode, &leftUV, &upUV[mbx], &sink)
 			buffer.finishMacroblock(lumaNZ || chromaNZ)

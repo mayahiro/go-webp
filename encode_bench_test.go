@@ -605,7 +605,7 @@ type nearLosslessErrorMetrics struct {
 func estimateNearLosslessError(img image.Image, quality int) nearLosslessErrorMetrics {
 	bounds := img.Bounds()
 	readPixel := pixelReaderFor(img)
-	quantized := nearLosslessReader(readPixel, nearLosslessQuantizationStep(quality))
+	quantized := newNearLosslessReader(newEncoderSource(img), quality)
 	var totalAbs int64
 	maxAbs := 0
 	alphaExact := 1

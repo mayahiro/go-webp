@@ -1,199 +1,180 @@
 # Benchmarks
 
-This document records reproducible local benchmark results for the current
-encoder implementation. Treat the numbers as development references, not as
-portable performance guarantees.
+This document records reproducible development measurements for the current
+encoder. The numbers are not portable performance guarantees.
 
 ## Environment
 
-- Date: 2026-06-18, 2026-06-25, and 2026-07-10
+- Date: 2026-07-10
 - OS: darwin
 - Architecture: arm64
 - CPU: Apple M1 Max
-- Go command: Go 1.26.5 for the 2026-07-10 results; local default Go
-  toolchain unless otherwise noted for earlier results
+- Go: 1.26.5
+- cwebp and dwebp: 1.6.0
+- libsharpyuv: 0.4.2
+
+go-webp timings cover the in-process `Encode` call. cwebp timings include
+process startup, PNG decoding, encoding, and output writing. Compare sizes and
+decoded quality directly, but treat cross-encoder timing as an orientation
+signal rather than an encoder-core ranking.
 
 ## Commands
 
 ```sh
-go test ./... -run '^$' -bench 'BenchmarkEncodeLossy(Alpha128|AlphaBands512|AlphaNeighborhood512|Gradient1024|YCbCr512|Paletted512)$' -benchmem -count=3
+go run ./scripts/compare_lossless_libwebp -runs 3 -mode default -method 4
+go run ./scripts/compare_lossless_libwebp -runs 3 -mode best -method 6
+go run ./scripts/compare_lossless_libwebp -runs 3 -mode near-lossless -quality 75 -method 4
 ```
 
 ```sh
-go test . -run '^$' -bench 'BenchmarkEncodeLosslessSmallFixtures/(Gradient128|UI256|Flat128|Palette256)$' -benchmem -count=5
-go test . -run '^$' -bench 'BenchmarkEncodeModeProfiles/(Gradient128|UI256|Palette256)/(Fast|Balanced|BestCompression|LowMemory|Auto|NearLossless75|LossyQ75)$' -benchmem -benchtime=1x
-go test . -run '^$' -bench 'BenchmarkEncodeModeLargeProfiles/(UI1024|Palette1024)/(Fast|LowMemory|Auto)$' -benchmem -benchtime=1x
-go test . -run '^$' -bench 'BenchmarkEncodeModeHugeProfiles/(Gradient4096|UI4096|Palette4096)/(Fast|LowMemory|Auto)$' -benchmem -benchtime=1x
-go run ./scripts/compare_lossless_libwebp -runs 7
+go run ./scripts/compare_lossy_libwebp \
+  -runs 3 \
+  -qualities 1,5,10,25,40,50,60,70,75,80,85,90,95,100 \
+  -method 4 \
+  -go-mode default \
+  -json report.json
+
+go run ./scripts/compare_lossy_libwebp \
+  -runs 3 -qualities 75 -method 4 -go-mode best -json best-report.json
 ```
 
 ```sh
-go test . -run '^$' -bench 'BenchmarkEncodeLossyGradient1024$' -benchmem -benchtime=10x -cpuprofile /tmp/go-webp-lossy-gradient1024.cpu -memprofile /tmp/go-webp-lossy-gradient1024.mem
-go tool pprof -top -nodecount=20 /tmp/go-webp-lossy-gradient1024.cpu
-go tool pprof -top -nodecount=20 -alloc_space /tmp/go-webp-lossy-gradient1024.mem
+go test . -run '^$' \
+  -bench 'BenchmarkEncodeModeProfiles/(Gradient128|UI256|Palette256)/(Fast|Balanced|BestCompression|LowMemory|Auto|NearLossless75|LossyQ75)$' \
+  -benchmem -benchtime=3x -count=1
 ```
 
-## Lossless Results
+Every comparison output was decoded with `dwebp`. Lossless outputs were checked
+for exact pixels. Near-lossless and lossy outputs were measured against the
+source, including alpha.
 
-These lossless numbers are five-run local ranges from the current development
-fixtures. Use them to compare local changes, not to claim portable performance.
+## Lossless Comparison
 
-| Benchmark | Time | Encoded bytes | Encoded/input | B/op | allocs/op |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| `BenchmarkEncodeLosslessSmallFixtures/Gradient128` | 28.15-28.29 ms/op | 1,160 | 0.01770 | 613,424-613,567 | 68 |
-| `BenchmarkEncodeLosslessSmallFixtures/UI256` | 4.11-4.14 ms/op | 250 | 0.0009537 | 68,200 | 34 |
-| `BenchmarkEncodeLosslessSmallFixtures/Flat128` | 3.10-3.13 ms/op | 32 | 0.0004883 | 8,120 | 13 |
-| `BenchmarkEncodeLosslessSmallFixtures/Palette256` | 9.32-9.36 ms/op | 3,078 | 0.04692 | 739,320-739,323 | 48 |
+Default go-webp is compared with `cwebp -lossless -m 4`.
 
-## Lossless libwebp Comparison
+| Fixture | Go bytes | Go time | cwebp bytes | cwebp time |
+| --- | ---: | ---: | ---: | ---: |
+| `gradient128` | 62 | 12.875 ms | 72 | 17.871 ms |
+| `ui256` | 1,572 | 53.028 ms | 1,472 | 7.820 ms |
+| `flat128` | 32 | 3.329 ms | 44 | 4.374 ms |
+| `palette256` | 876 | 26.098 ms | 886 | 8.589 ms |
+| `alpha128` | 428 | 15.795 ms | 398 | 21.880 ms |
+| `photo512` | 27,108 | 136.429 ms | 108,242 | 156.408 ms |
 
-This comparison uses fixed generated PNG fixtures, `cwebp -lossless`, and
-`dwebp` exact pixel verification for both encoders. The command measures
-go-webp in-process and measures libwebp through the `cwebp` command, so startup
-cost is included for libwebp. Treat the timing numbers as local development
-references, not as a portable speed ranking.
+`ModeBestCompression` is compared with `cwebp -lossless -m 6`.
 
-- Date: 2026-07-10
-- libwebp tools: `cwebp` 1.6.0, `dwebp` 1.6.0
-- Command: `go run ./scripts/compare_lossless_libwebp -runs 7 -out <output-dir>`
+| Fixture | Go bytes | Go time | cwebp bytes | cwebp time |
+| --- | ---: | ---: | ---: | ---: |
+| `gradient128` | 62 | 18.324 ms | 72 | 47.920 ms |
+| `ui256` | 1,008 | 177.195 ms | 1,472 | 8.602 ms |
+| `flat128` | 32 | 8.116 ms | 44 | 4.464 ms |
+| `palette256` | 876 | 118.171 ms | 836 | 11.511 ms |
+| `alpha128` | 412 | 28.290 ms | 398 | 57.084 ms |
+| `photo512` | 26,856 | 570.814 ms | 108,242 | 609.069 ms |
 
-| Fixture | Encoder | Runs | Encoded bytes | Average encode time |
-| --- | --- | ---: | ---: | ---: |
-| `gradient128` | `go-webp` | 7 | 62 | 10.098 ms |
-| `gradient128` | `libwebp` | 7 | 72 | 17.684 ms |
-| `ui256` | `go-webp` | 7 | 2,900 | 7.500 ms |
-| `ui256` | `libwebp` | 7 | 1,472 | 7.618 ms |
-| `flat128` | `go-webp` | 7 | 32 | 3.109 ms |
-| `flat128` | `libwebp` | 7 | 44 | 4.453 ms |
-| `palette256` | `go-webp` | 7 | 1,532 | 6.731 ms |
-| `palette256` | `libwebp` | 7 | 886 | 8.569 ms |
-| `alpha128` | `go-webp` | 7 | 428 | 16.253 ms |
-| `alpha128` | `libwebp` | 7 | 398 | 22.933 ms |
-| `photo512` | `go-webp` | 7 | 27,108 | 137.681 ms |
-| `photo512` | `libwebp` | 7 | 108,242 | 156.989 ms |
+The pure Go encoder is already smaller on the gradient, flat, and photo-like
+fixtures. Best compression also beats cwebp on the UI fixture. cwebp remains
+smaller and usually much faster on the palette and alpha fixtures.
 
-## Mode Profile Results
+## Near-Lossless Q75 Comparison
 
-The mode profile benchmark uses the same fixtures with explicit `Options.Mode`
-settings. `Fast` and `LowMemory` are expected to trade compression ratio for
-less search work. `Auto` is conservative and does not force the fast profile on
-these 128-256px fixtures. For `Auto` rows, the benchmark also reports
-`auto_mode` and `auto_reason`; the values are the numeric `Mode` and internal
-classification category selected by the encoder. The benchmark also reports
-`pixels` and `workspace_est_B`. `workspace_est_B` is a rough structural estimate,
-not a measured peak RSS. For `NearLossless` rows, the benchmark also reports
-`rgb_mae`, `rgb_max_abs`, and `alpha_exact`.
+Both encoders use lossless WebP with near-lossless quality 75. The maximum RGB
+channel error is 2 for every changed fixture.
 
-| Fixture | Mode | Time | Encoded bytes | Encoded/input | B/op | allocs/op |
-| --- | --- | ---: | ---: | ---: | ---: | ---: |
-| `Gradient128` | `Fast` | 0.78 ms/op | 49,294 | 0.7522 | 12,552 | 23 |
-| `Gradient128` | `Balanced` | 29.16 ms/op | 1,160 | 0.01770 | 613,432 | 68 |
-| `Gradient128` | `BestCompression` | 39.29 ms/op | 1,160 | 0.01770 | 741,896 | 79 |
-| `Gradient128` | `LowMemory` | 4.27 ms/op | 10,510 | 0.1604 | 16,792 | 28 |
-| `Gradient128` | `Auto` | 28.00 ms/op | 1,160 | 0.01770 | 618,912 | 75 |
-| `Gradient128` | `NearLossless75` | 64.41 ms/op | 3,412 | 0.05206 | 1,354,296 | 78 |
-| `Gradient128` | `LossyQ75` | 1.89 ms/op | 2,658 | 0.04056 | 107,760 | 14 |
-| `UI256` | `Fast` | 2.83 ms/op | 7,518 | 0.02868 | 45,192 | 17 |
-| `UI256` | `Balanced` | 4.05 ms/op | 250 | 0.0009537 | 68,200 | 34 |
-| `UI256` | `BestCompression` | 59.80 ms/op | 250 | 0.0009537 | 68,232 | 36 |
-| `UI256` | `LowMemory` | 2.84 ms/op | 7,518 | 0.02868 | 45,192 | 17 |
-| `UI256` | `Auto` | 4.16 ms/op | 250 | 0.0009537 | 69,008 | 37 |
-| `UI256` | `NearLossless75` | 30.50 ms/op | 248 | 0.0009460 | 68,224 | 35 |
-| `UI256` | `LossyQ75` | 7.38 ms/op | 1,170 | 0.004463 | 379,232 | 18 |
-| `Palette256` | `Fast` | 2.67 ms/op | 32,930 | 0.5020 | 11,336 | 18 |
-| `Palette256` | `Balanced` | 9.25 ms/op | 3,078 | 0.04692 | 739,320 | 48 |
-| `Palette256` | `BestCompression` | 70.41 ms/op | 3,078 | 0.04692 | 739,352 | 50 |
-| `Palette256` | `LowMemory` | 2.55 ms/op | 32,930 | 0.5020 | 11,336 | 18 |
-| `Palette256` | `Auto` | 9.22 ms/op | 3,078 | 0.04692 | 739,320 | 48 |
-| `Palette256` | `NearLossless75` | 27.04 ms/op | 3,088 | 0.04707 | 773,488 | 53 |
-| `Palette256` | `LossyQ75` | 7.78 ms/op | 11,850 | 0.1806 | 390,976 | 21 |
+| Fixture | Go bytes / time | Go RGB MAE | Go alpha exact | cwebp bytes / time | cwebp RGB MAE | cwebp alpha exact |
+| --- | ---: | ---: | --- | ---: | ---: | --- |
+| `gradient128` | 1,298 / 15.263 ms | 0.9627 | yes | 2,210 / 26.184 ms | 0.6977 | yes |
+| `ui256` | 2,752 / 22.492 ms | 0.2158 | yes | 1,472 / 7.285 ms | 0.0000 | yes |
+| `flat128` | 32 / 3.863 ms | 0.0000 | yes | 44 / 4.082 ms | 0.0000 | yes |
+| `palette256` | 2,304 / 38.806 ms | 0.9639 | yes | 886 / 8.502 ms | 0.0000 | yes |
+| `alpha128` | 2,342 / 16.308 ms | 0.9615 | yes | 5,048 / 29.414 ms | 0.8417 | no |
+| `photo512` | 169,162 / 456.544 ms | 0.9857 | yes | 198,950 / 243.382 ms | 0.9903 | yes |
 
-## Large Mode Profile Results
+go-webp preserves alpha by contract. The cwebp alpha fixture changes alpha at
+this setting. cwebp is substantially smaller on unchanged low-color UI and
+palette fixtures, while go-webp is smaller on gradient, flat, alpha, and
+photo-like fixtures.
 
-These large mode-profile rows are single-run checks for comparing mode tradeoffs
-on larger low-color fixtures. Use `B/op` as the Go benchmark allocation signal
-and `workspace_est_B` only as a rough internal workspace estimate.
+## Lossy Q75 Comparison
 
-| Fixture | Mode | Time | Encoded bytes | Encoded/input | Workspace estimate | B/op | allocs/op |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `UI1024` | `Fast` | 42.85 ms/op | 100,240 | 0.02390 | 42,939,216 | 12,344 | 15 |
-| `UI1024` | `LowMemory` | 42.22 ms/op | 100,240 | 0.02390 | 42,939,216 | 12,344 | 15 |
-| `UI1024` | `Auto` | 136.05 ms/op | 6,762 | 0.001612 | 42,939,216 | 1,035,296 | 47 |
-| `Palette1024` | `Fast` | 36.86 ms/op | 524,450 | 0.5001 | 42,939,216 | 11,336 | 18 |
-| `Palette1024` | `LowMemory` | 37.05 ms/op | 524,450 | 0.5001 | 42,939,216 | 11,336 | 18 |
-| `Palette1024` | `Auto` | 106.15 ms/op | 130,468 | 0.1244 | 42,939,216 | 17,609,952 | 74 |
+The table compares the Default and BestCompression profiles with
+`cwebp -q 75 -m 4`. RGB PSNR is measured after `dwebp` decoding.
 
-## Huge Mode Profile Results
+| Fixture | Default bytes / PSNR / time | Best bytes / PSNR / time | cwebp bytes / PSNR / time |
+| --- | ---: | ---: | ---: |
+| `gradient128` | 3,958 / 22.714 dB / 1.977 ms | 3,544 / 22.894 dB / 19.434 ms | 3,334 / 22.619 dB / 5.408 ms |
+| `ui256` | 3,268 / 35.651 dB / 6.363 ms | 2,874 / 35.552 dB / 55.032 ms | 3,002 / 35.310 dB / 7.499 ms |
+| `flat128` | 84 / 48.131 dB / 1.343 ms | 84 / 48.131 dB / 12.822 ms | 98 / 52.509 dB / 4.051 ms |
+| `palette256` | 37,316 / 12.671 dB / 11.243 ms | 40,922 / 12.986 dB / 89.741 ms | 40,586 / 12.965 dB / 12.909 ms |
+| `alpha128` | 6,178 / 20.256 dB / 3.703 ms | 5,538 / 20.515 dB / 99.270 ms | 5,520 / 20.363 dB / 8.803 ms |
+| `photo512` | 141,366 / 13.219 dB / 49.813 ms | 150,058 / 13.465 dB / 367.382 ms | 148,664 / 13.465 dB / 42.599 ms |
 
-These 4096px rows are single-run checks for explicit memory-oriented mode
-profiles. `Fast` and `LowMemory` keep benchmark heap allocations low, but
-`Fast` can greatly increase output size. `Auto` maps these huge fixtures to
-`ModeLowMemory` in this sample. RSS was not recorded in this sandbox because
-`/usr/bin/time -l` could not read `kern.clockrate`; use the Go benchmark `B/op`
-and memprofile data as the available local evidence.
+BestCompression is close to cwebp at the same nominal quality on the UI,
+palette, alpha, and photo-like fixtures, with equal or higher measured PSNR.
+Its broader search is still much slower.
 
-| Fixture | Mode | Time | Encoded bytes | Encoded/input | Workspace estimate | B/op | allocs/op |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `Gradient4096` | `Fast` | 777.65 ms/op | 50,331,790 | 0.7500 | 672,084,816 | 12,552 | 23 |
-| `Gradient4096` | `LowMemory` | 4,378.39 ms/op | 20,972,622 | 0.3125 | 672,084,816 | 12,712 | 26 |
-| `Gradient4096` | `Auto` | 4,387.15 ms/op | 20,972,622 | 0.3125 | 672,084,816 | 13,136 | 29 |
-| `UI4096` | `Fast` | 673.20 ms/op | 1,418,030 | 0.02113 | 672,084,816 | 12,344 | 15 |
-| `UI4096` | `LowMemory` | 674.92 ms/op | 1,418,030 | 0.02113 | 672,084,816 | 12,344 | 15 |
-| `UI4096` | `Auto` | 1,049.20 ms/op | 1,418,030 | 0.02113 | 672,084,816 | 14,552 | 26 |
-| `Palette4096` | `Fast` | 647.28 ms/op | 8,388,770 | 0.5000 | 672,084,816 | 11,336 | 18 |
-| `Palette4096` | `LowMemory` | 633.99 ms/op | 8,388,770 | 0.5000 | 672,084,816 | 11,336 | 18 |
-| `Palette4096` | `Auto` | 1,055.38 ms/op | 8,388,770 | 0.5000 | 672,084,816 | 12,648 | 32 |
+## Lossy Quality Sweep
 
-## Lossy Results
+For each go-webp Q75 point, the first match is the sampled cwebp point with the
+nearest encoded size. The second is the point with the nearest RGB PSNR.
+Deltas are `cwebp - go-webp`.
 
-| Benchmark | Time | Encoded bytes | Encoded/input | B/op | allocs/op |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| `BenchmarkEncodeLossyAlpha128` | 3.19-3.30 ms/op | 3,230 | 0.04929 | 116,672-116,687 | 24 |
-| `BenchmarkEncodeLossyAlphaBands512` | 46.13-47.07 ms/op | 55,752 | 0.05317 | 1,531,844-1,531,857 | 26 |
-| `BenchmarkEncodeLossyAlphaNeighborhood512` | 47.30-48.04 ms/op | 56,290 | 0.05368 | 1,533,508-1,533,512 | 28 |
-| `BenchmarkEncodeLossyYCbCr512` | 42.83-43.02 ms/op | 93,220 | 0.2371 | 1,674,512-1,674,524 | 19 |
-| `BenchmarkEncodeLossyPaletted512` | 46.82-46.89 ms/op | 124,004 | 0.4712 | 1,856,352-1,856,356 | 23 |
-| `BenchmarkEncodeLossyGradient1024` | 134.47-141.60 ms/op | 228,814 | 0.05455 | 6,033,872-6,033,886 | 18 |
+| Fixture | Go Q75 bytes / PSNR | Nearest size: cwebp Q / size delta / PSNR delta | Nearest PSNR: cwebp Q / size delta / PSNR delta |
+| --- | ---: | ---: | ---: |
+| `gradient128` | 3,958 / 22.714 dB | Q80 / -3.03% / +0.138 dB | Q75 / -15.77% / -0.095 dB |
+| `ui256` | 3,268 / 35.651 dB | Q80 / -0.86% / +0.026 dB | Q80 / -0.86% / +0.026 dB |
+| `flat128` | 84 / 48.131 dB | Q1 / +11.90% / -7.081 dB | Q50 / +47.62% / -0.277 dB |
+| `palette256` | 37,316 / 12.671 dB | Q60 / -0.94% / +0.230 dB | Q25 / -25.66% / +0.061 dB |
+| `alpha128` | 6,178 / 20.256 dB | Q80 / +0.03% / +0.256 dB | Q70 / -14.08% / +0.037 dB |
+| `photo512` | 141,366 / 13.219 dB | Q70 / +2.22% / +0.233 dB | Q25 / -31.00% / +0.014 dB |
 
-The bounded residual buffer keeps encoded output unchanged while reducing the
-repeated macroblock work. Compared with the preceding 2026-07-10 local sample,
-`BenchmarkEncodeLossyGradient1024` decreased from 237.58-237.97 ms/op to
-145.15-146.10 ms/op. Its estimated workspace increased from 2,060,809 bytes to
-5,779,977 bytes.
+The nearest-size results show that nominal quality mapping and local
+rate-distortion behavior are now close on five non-flat fixtures. At closely
+matched PSNR, cwebp still has a meaningful size advantage on the gradient,
+palette, alpha, and photo-like fixtures. UI is within one percent in this
+sample.
 
-Quantized VP8 coefficients use a fixed `int16` block type after clamping to
-`[-2047, 2047]`. An alternating fixed-iteration comparison against the prior
-`int` block type measured 145.03-145.79 ms/op versus 151.23-151.77 ms/op on the
-same fixture, with unchanged output and heap allocation.
+## Mode Profiles
 
-Y16 and chroma prediction buffers use a 4x4 block-major layout, matching their
-transform consumers and avoiding repeated extraction from raster-order
-macroblock buffers. Four alternating 20-iteration comparisons measured
-139.70-141.66 ms/op versus 141.80-147.43 ms/op for the preceding implementation
-on `BenchmarkEncodeLossyGradient1024`. Two alternating comparisons also reduced
-`Gradient128` from 1.85-1.89 ms/op to 1.78-1.79 ms/op, `YCbCr512` from
-44.94-45.17 ms/op to 42.53 ms/op, and `Paletted512` from 48.68-49.01 ms/op to
-46.47-47.55 ms/op. Encoded size, proxy quality metrics, and heap allocations
-were unchanged.
+These Go benchmark rows use three timed iterations. `B/op` is measured heap
+allocation. The structural `workspace_est_B` metric printed by the benchmark is
+not a measured peak and is intentionally omitted here.
 
-The lossy benchmark reports internal proxy metrics:
+| Fixture | Mode | Time | Encoded bytes | B/op | allocs/op |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `Gradient128` | Fast | 1.603 ms | 49,294 | 12,552 | 23 |
+| `Gradient128` | Balanced | 28.278 ms | 1,160 | 236,594 | 61 |
+| `Gradient128` | BestCompression | 32.281 ms | 1,160 | 291,629 | 82 |
+| `Gradient128` | LowMemory | 4.295 ms | 10,510 | 16,792 | 28 |
+| `UI256` | Fast | 2.838 ms | 7,518 | 45,192 | 17 |
+| `UI256` | Balanced | 138.556 ms | 220 | 1,149,784 | 43 |
+| `UI256` | BestCompression | 312.314 ms | 212 | 2,247,949 | 66 |
+| `UI256` | LowMemory | 5.371 ms | 4,240 | 46,616 | 18 |
+| `Palette256` | Fast | 2.561 ms | 32,930 | 11,336 | 18 |
+| `Palette256` | Balanced | 27.682 ms | 2,786 | 1,820,664 | 54 |
+| `Palette256` | BestCompression | 110.531 ms | 2,778 | 2,929,085 | 78 |
+| `Palette256` | LowMemory | 5.564 ms | 32,930 | 11,336 | 18 |
 
-- `encoded_B`: encoded WebP size for one encode
-- `encoded_per_input`: encoded size divided by the input byte count used by the benchmark
-- `y_psnr_proxy` and `uv_psnr_proxy`: encoder-side pre-loop-filter reconstruction metrics used for relative development checks
-- `residual_workspace_B`: estimated bounded quantized-residual buffer size
-- `workspace_est_B`: estimated major lossy workspace size, not full heap peak
+On these fixtures, Auto selected Balanced. NearLossless75 measured 17.787,
+32.046, and 58.194 ms for Gradient128, UI256, and Palette256 respectively.
+LossyQ75 measured 1.894, 5.316, and 8.350 ms.
 
-## Final Lossy pprof Snapshot
+The bounded parallel lossless search reduced single-run BestCompression time
+from 37.46 to 33.01 ms on Gradient128, 328.36 to 306.51 ms on UI256, and
+130.43 to 108.61 ms on Palette256 while preserving byte-identical output.
+The associated B/op increase was 27-33 KiB. Alpha optimal parsing and parallel
+frame analysis reduced the Best alpha fixture from about 462 to 99 ms while
+keeping its 5,538-byte output.
 
-For `BenchmarkEncodeLossyGradient1024` with `-benchtime=10x`:
+## Interpretation and Remaining Gaps
 
-- CPU top: `vp8ResidualBuffer.appendBlock` 250ms flat, `vp8BoolEncoder.writeBit` 130ms flat, `put4` 130ms flat, `vp8BlockBitCostFromDefaultAndNonZeroPtr` 90ms flat and 170ms cumulative, and `vp8LastNonZeroCoeffPtr` 70ms flat
-- Allocation top: `newVP8ResidualBuffer` 39.22 MiB, `newVP8EncodeBuffers` 17.90 MiB, `newVP8BoolEncoderWithCapacity` 5.87 MiB, and benchmark fixture `image.NewNRGBA` 4.00 MiB. The profile includes setup plus ten timed encodes
-
-The default lossy encoder keeps full-frame reconstruction buffers and, when it
-fits the 32 MiB limit, a quantized-residual buffer. `ModeLowMemory` and images
-above that limit use the repeated-pass path without the residual buffer. Row or
-tile reconstruction would require prediction boundary changes, especially for
-luma4x4 top-right references, so it remains a separate future low-memory
-change.
+- Lossless photo-like compression is substantially smaller than cwebp on this
+  synthetic fixture, but structured UI and palette speed remains behind cwebp
+- Default lossy rate-distortion is close by encoded size; cwebp still wins
+  several matched-PSNR comparisons
+- BestCompression closes same-quality size and PSNR gaps but spends much more
+  CPU, especially on alpha and photo-like inputs
+- LowMemory keeps heap allocation small by avoiding full-frame source and token
+  buffers, at the cost of larger output or repeated computation
+- Results use generated fixtures and one machine; real image corpora and peak
+  RSS measurements remain valuable follow-up work

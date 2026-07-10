@@ -75,7 +75,9 @@ err := webp.Encode(w, img, &webp.Options{
 
 `ModeDefault` は `Compression` と `Quality` で選ばれる既存挙動を維持します
 `ModeFast`、`ModeBalanced`、`ModeBestCompression`、`ModeLowMemory`、`ModeAuto` は選択中のcompression modeの探索幅を調整します
-`ModeNearLossless` はalphaを保持し、`Quality` に応じてRGBを量子化したVP8Lを書き出します。quality 100、または未指定のqualityはlossless相当です
+`ModeNearLossless` はalphaを保持し、`Quality` に応じたedge-aware RGB量子化を行うVP8Lを書き出します。quality 100、または未指定のqualityはlossless相当です
+quality 80から99、60から79、40から59、20から39、1から19ではRGB各channelの最大誤差をそれぞれ1、2、4、8、16に制限します
+幅と高さがともに64 pixels未満の画像、または高さが3 pixels未満の画像は、cwebpのsmall-image near-lossless挙動に合わせて変更しません
 `ModeLossyQuality` は `Compression` に関係なくVP8 lossy出力を書き、`Quality` を使います
 
 ```go
@@ -92,11 +94,12 @@ func (enc *Encoder) Encode(w io.Writer, m image.Image) error
 
 - pure Goで実装しておりcgoは使いません
 - 現在のローカルbenchmark参考値は [BENCHMARKS.md](BENCHMARKS.md) に記載しています
-- lossless encodingでは入力画像を複数回走査し、変換済み画像全体は保持しません
+- lossless encodingでは入力画像を複数回走査します。lossless BestCompressionはcustom画像型を安全に並列読み取りするため最大32 MiBの変換済みpixel planeを使う場合があり、それ以外のlossless profileはdirect readerを維持します
 - 小さいlow-color画像では、LZ77評価時の色参照を繰り返さないよう、上限付きのpacked color-index streamを保持する場合があります
 - 単一値のチャンネルはsingle-symbol Huffman treeでエンコードします
 - lossless encoderは出力サイズ削減が見込める場合、VP8L predictor transform、color transform、color indexing transform、subtract-green transformを使います。`ModeBestCompression` ではblock-adaptive predictor候補も試します
 - 固定幅の複数候補hash match finderと1手先のlazy matchingによる単純なVP8L LZ77 backwards referencesも使えます
+- indexed streamではbit costに基づく上限付きoptimal parsingを使え、全体bit costが小さくなる場合はindexed dataとspatial predictorを組み合わせます
 - sampleとbit costの推定で有利と判断した場合、literal stream向けの限定的なVP8L color cacheも使えます。transformなしのstreamでは、固定幅LZ77とcolor cacheの併用もできます
 - predictorやcolor transform後の一部residual streamでも、条件付きでLZ77とcolor cacheを併用できます
 - `ModeBestCompression` では、領域ごとのentropy差に対応するため、上限付きのtoken主導meta-prefix histogram grouping候補を1つ追加比較します
@@ -104,18 +107,22 @@ func (enc *Encoder) Encode(w io.Writer, m image.Image) error
 - `ModeFast` と `ModeLowMemory` は意図的にlossless探索を減らすため、VP8L出力が大きくなる場合があります
 - Balanced profileはlow-color画像でcolor indexingが明確に有利な場合にtransform探索を早期終了し、`ModeBestCompression` は全transform探索を維持します
 - `ModeAuto` は保守的な画像特徴の判定を使い、losslessのFast profileはindexed payloadが十分小さい場合だけ選びます。すべての画像で最小または最速の出力を保証するものではありません
-- alpha付きlossy画像では、`ModeFast` は `ALPH` 探索をunfiltered alphaとrun符号化に限定し、`ModeLowMemory` はfilter探索を維持しつつ前行空間参照候補を省きます
+- alpha付きlossy画像では、`ModeFast` は `ALPH` 探索をunfiltered alphaとrun符号化に限定し、`ModeLowMemory` はfilter探索を維持しつつ前行空間参照候補を省きます。`ModeBestCompression` はrunと前行match候補へ上限付きoptimal parsingも適用します
+- `ModeBestCompression` は独立したlossless transform候補を最大4 workersで解析できます。標準画像型は直接読み、custom画像型は32 MiBを上限とするpixel planeを使い、上限を超える場合は逐次解析へ戻ります
+- 標準画像型ではlossy VP8 frame planningと `ALPH` 解析を2 workersで実行できます。`ModeFast`、`ModeLowMemory`、小画像、custom画像型、single-thread runtimeでは逐次経路を使います
 - lossy encodingでは標準画像型のopacity判定を使い、完全にopaqueな入力では `ALPH` 候補解析を省きます。custom画像型は従来のpixel解析経路を使います
-- lossy VP8出力では、`ModeFast` は指定されたquality mappingを維持しつつ、macroblock skip signalingとtoken probability update探索を無効化します。`ModeBestCompression` は追加でluma4x4 mode探索を有効化します
+- lossy VP8出力では、`ModeFast` は指定されたquality mappingを維持しつつ、macroblock skip signalingとtoken probability update探索を無効化します。`ModeBestCompression` は追加でluma4x4 mode探索、2回目のrate-distortion pass、trellis quantization、上限付きsharp-chroma探索を有効化します
 - skipまたはtoken probability解析を使うlossy profileでは、選択済みの量子化residualを保持し、統計と最終符号化で再利用することでmacroblockのDCTと再構築の反復を削減します
 - このbufferは推定32 MiBを上限とし、`ModeFast`、`ModeLowMemory`、上限を超える画像ではbufferを使わない反復passへ戻ります
+- VP8 mode pass間ではreconstruction、top-row context、skip map、residual workspaceを1回のencode内で再利用します
+- `ModeLowMemory` はsource plane、VP8 residual buffer、VP8L token stream、meta-prefix plan、color-cache planを保持しません
 - lossy encodingは4:2:0 chroma subsampling、adaptive chroma downsampling、選択されたintra16x16とchroma prediction mode、`ModeBestCompression` で使う任意のluma4x4 mode、量子化されたDC/AC係数を使う低複雑度VP8 key frame encoderです
 - 出力サイズ削減が見込める場合はresidual token probability updateを書き込み、qualityに応じたsharpnessとluma4x4 macroblock向けmode deltaを持つnormal VP8 loop filterを有効化します
 - lossy `Quality` は現時点では非線形mappingでVP8 base quantizerを制御し、quality依存のY2/UV quantizationとloop filter設定を使います
-- mode decisionは単純なrate-distortion heuristicです
+- activity-based segmentationとrate-distortion mode decisionを使います
 - alpha付きのlossy画像はextended WebPとして書き出し、`ALPH` チャンクで透明度を保持します
 - 圧縮したほうが小さい場合はcompressed alphaを使い、それ以外はraw alphaに戻します
-- compressed alphaは頻度ベースのresidual符号化と、連続するresidual run、前行と一致するresidual、前行近傍と一致するresidual向けのbackward referenceを使います
+- compressed alphaは頻度ベースのresidual符号化と、連続するresidual run、VP8L spatial distance neighborhood内の前行residual match向けbackward referenceを使います
 
 ## 制限
 
@@ -124,8 +131,8 @@ func (enc *Encoder) Encode(w io.Writer, m image.Image) error
 - lossy画像サイズは各軸1から16383 pixelsの範囲が必要です
 - `image.NRGBA`、`image.RGBA`、`image.Gray`、`image.YCbCr`、`image.Paletted` などの標準画像型は専用の読み取り経路を使います
 - それ以外の画像型は `color.NRGBAModel` 相当の変換を通してからエンコードします
-- lossy alpha圧縮は意図的に単純な実装で、現時点では単一のglobal `ALPH` filter、頻度ベースのresidual符号化、連続するresidual run、前行と一致するresidual、前行近傍と一致するresidual向けの限定的なbackward referenceを使います
-- general LZ77 match searchやblock-adaptive alpha entropy codingはまだ行っていません
+- lossy alpha圧縮は意図的に単純な実装で、現時点では単一のglobal `ALPH` filter、頻度ベースのresidual符号化、連続するresidual runと前行spatial match向けの上限付きbackward-reference parsingを使います
+- hash chainを使うgeneral LZ77 match searchやblock-adaptive alpha entropy codingはまだ行っていません
 - lossy loop filter設定は保守的で、画像固有のperceptual metricによる調整はまだ行っていません
 
 ## 対応環境
@@ -137,7 +144,7 @@ func (enc *Encoder) Encode(w io.Writer, m image.Image) error
 ```sh
 go test ./...
 go vet ./...
-go tool goimports -w .
+go tool goimports -l .
 ```
 
 任意の外部decoder確認:
@@ -150,11 +157,25 @@ go run ./scripts/verify_lossless_external
 `dwebp` が利用できる場合は優先して使い、それ以外では一時的な `golang.org/x/image/webp` decoderを `go run` で使います
 どちらも利用できない場合のみmacOSの `sips` にfallbackします
 
-libwebpとのlossless比較をローカルで行う場合:
+libwebpとのlossless、profile、near-lossless比較をローカルで行う場合:
 
 ```sh
-go run ./scripts/compare_lossless_libwebp -runs 3
+go run ./scripts/compare_lossless_libwebp -runs 3 -mode default -method 4
+go run ./scripts/compare_lossless_libwebp -runs 3 -mode best -method 6
+go run ./scripts/compare_lossless_libwebp -runs 3 -mode near-lossless -quality 75 -method 4
 ```
+
+表にはdecode後のRGB誤差とalpha一致を表示し、通常のlossless profileではpixel完全一致を必須とします
+
+libwebpとのlossy rate-distortion比較をローカルで行う場合:
+
+```sh
+go run ./scripts/compare_lossy_libwebp -runs 3 -go-mode default -json report.json
+```
+
+lossy比較には `cwebp` と `dwebp` が必要です
+JSON reportにはquality sweep、decode後のRGB/YUVとalpha指標、encode時間、出力sizeとRGB PSNRが最も近いcwebp sampleを記録します
+go-webpの時間はprocess内の `Encode` 呼び出し、cwebpの時間はprocess起動、PNG decode、出力書き込みも含みます
 
 ## ライセンス
 

@@ -329,38 +329,86 @@ func fixtures() []fixture {
 func nearLosslessWant(src image.Image, quality int) image.Image {
 	bounds := src.Bounds()
 	out := image.NewNRGBA(bounds)
-	step := nearLosslessQuantizationStep(quality)
+	width, height := bounds.Dx(), bounds.Dy()
+	pixels := make([]color.NRGBA, width*height)
 	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
 		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			c := color.NRGBAModel.Convert(src.At(x, y)).(color.NRGBA)
-			c.R = quantizeNearLosslessChannel(c.R, step)
-			c.G = quantizeNearLosslessChannel(c.G, step)
-			c.B = quantizeNearLosslessChannel(c.B, step)
-			out.SetNRGBA(x, y, c)
+			pixels[(y-bounds.Min.Y)*width+x-bounds.Min.X] = color.NRGBAModel.Convert(src.At(x, y)).(color.NRGBA)
+		}
+	}
+	bits := nearLosslessQuantizationBits(quality)
+	if bits > 0 && !(width < 64 && height < 64) && height >= 3 {
+		scratch := make([]color.NRGBA, width*3)
+		for passBits := bits; passBits > 0; passBits-- {
+			applyNearLosslessPass(pixels, width, height, passBits, scratch)
+		}
+	}
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			out.SetNRGBA(bounds.Min.X+x, bounds.Min.Y+y, pixels[y*width+x])
 		}
 	}
 	return out
 }
 
-func nearLosslessQuantizationStep(quality int) uint8 {
+func nearLosslessQuantizationBits(quality int) int {
 	if quality >= 100 {
-		return 1
+		return 0
 	}
-	if quality < 1 {
-		quality = 1
+	if quality < 0 {
+		quality = 0
 	}
-	return uint8(1 + ((100-quality)*31+98)/99)
+	return 5 - quality/20
 }
 
-func quantizeNearLosslessChannel(v uint8, step uint8) uint8 {
-	if step <= 1 {
-		return v
+func applyNearLosslessPass(pixels []color.NRGBA, width int, height int, bits int, scratch []color.NRGBA) {
+	previous := scratch[:width]
+	current := scratch[width : width*2]
+	next := scratch[width*2 : width*3]
+	copy(current, pixels[:width])
+	if height > 1 {
+		copy(next, pixels[width:width*2])
 	}
-	q := (int(v) + int(step)/2) / int(step) * int(step)
-	if q > 255 {
+	limit := 1 << bits
+	step := uint8(limit)
+	for y := 0; y < height; y++ {
+		if y > 0 && y < height-1 {
+			copy(next, pixels[(y+1)*width:(y+2)*width])
+			for x := 1; x < width-1; x++ {
+				pixel := current[x]
+				if nearLosslessRGBSmooth(pixel, current[x-1], current[x+1], previous[x], next[x], limit) {
+					continue
+				}
+				pixel.R = quantizeNearLosslessChannel(pixel.R, step)
+				pixel.G = quantizeNearLosslessChannel(pixel.G, step)
+				pixel.B = quantizeNearLosslessChannel(pixel.B, step)
+				pixels[y*width+x] = pixel
+			}
+		}
+		previous, current, next = current, next, previous
+	}
+}
+
+func nearLosslessRGBSmooth(center color.NRGBA, left color.NRGBA, right color.NRGBA, above color.NRGBA, below color.NRGBA, limit int) bool {
+	return nearLosslessRGBNear(center, left, limit) &&
+		nearLosslessRGBNear(center, right, limit) &&
+		nearLosslessRGBNear(center, above, limit) &&
+		nearLosslessRGBNear(center, below, limit)
+}
+
+func nearLosslessRGBNear(a color.NRGBA, b color.NRGBA, limit int) bool {
+	return absDiff8(a.R, b.R) < limit &&
+		absDiff8(a.G, b.G) < limit &&
+		absDiff8(a.B, b.B) < limit
+}
+
+func quantizeNearLosslessChannel(value uint8, step uint8) uint8 {
+	mask := int(step) - 1
+	biased := int(value) + mask/2 + ((int(value) / int(step)) & 1)
+	if biased > 255 {
 		return 255
 	}
-	return uint8(q)
+	return uint8(biased &^ mask)
 }
 
 func flatFixture() *image.NRGBA {

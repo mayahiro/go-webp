@@ -157,7 +157,83 @@ func vp8lClusterLZ77TileHistograms(tileGroups []vp8lLZ77GroupPlan, tileTokens []
 	if vp8lMetaPrefixReferencedGroupCount(groupImage) != len(groups) {
 		return nil, nil, nil, false
 	}
+	groups, groupImage, groupTokens = vp8lRefineLZ77HistogramClusters(groups, groupImage, groupTokens, prefixWidth, prefixHeight)
 	return groups, groupImage, groupTokens, true
+}
+
+func vp8lRefineLZ77HistogramClusters(groups []vp8lLZ77GroupPlan, groupImage []uint16, groupTokens []int, width int, height int) ([]vp8lLZ77GroupPlan, []uint16, []int) {
+	if len(groups) < 2 || len(groups) != len(groupTokens) || len(groupImage) != width*height {
+		return groups, groupImage, groupTokens
+	}
+	bestCost := vp8lLZ77HistogramClusterCost(groups, groupImage, width, height)
+	for len(groups) > 1 {
+		bestLeft := -1
+		bestRight := -1
+		candidateCost := bestCost
+		var bestMerged vp8lLZ77GroupPlan
+		for left := 0; left < len(groups)-1; left++ {
+			for right := left + 1; right < len(groups); right++ {
+				merged, ok := vp8lMergeLZ77Histograms(groups[left], groups[right])
+				if !ok {
+					continue
+				}
+				trialGroups := vp8lMergedHistogramGroups(groups, left, right, merged)
+				trialImage := vp8lMergedHistogramImage(groupImage, left, right)
+				cost := vp8lLZ77HistogramClusterCost(trialGroups, trialImage, width, height)
+				if cost < candidateCost {
+					candidateCost = cost
+					bestLeft = left
+					bestRight = right
+					bestMerged = merged
+				}
+			}
+		}
+		if bestLeft < 0 {
+			break
+		}
+		groups = vp8lMergedHistogramGroups(groups, bestLeft, bestRight, bestMerged)
+		groupImage = vp8lMergedHistogramImage(groupImage, bestLeft, bestRight)
+		groupTokens[bestLeft] += groupTokens[bestRight]
+		groupTokens = append(groupTokens[:bestRight], groupTokens[bestRight+1:]...)
+		bestCost = candidateCost
+	}
+	return groups, groupImage, groupTokens
+}
+
+func vp8lLZ77HistogramClusterCost(groups []vp8lLZ77GroupPlan, groupImage []uint16, width int, height int) uint64 {
+	bits := vp8lImageDataBits(width, height, analyzeImage(vp8lMetaPrefixImageReader(groupImage, width), image.Rect(0, 0, width, height)), false)
+	for _, group := range groups {
+		bits += vp8lLZ77GroupTreeAndDataBits(group)
+	}
+	return bits
+}
+
+func vp8lMergedHistogramGroups(groups []vp8lLZ77GroupPlan, left int, right int, merged vp8lLZ77GroupPlan) []vp8lLZ77GroupPlan {
+	result := make([]vp8lLZ77GroupPlan, 0, len(groups)-1)
+	for i, group := range groups {
+		switch i {
+		case left:
+			result = append(result, merged)
+		case right:
+		default:
+			result = append(result, group)
+		}
+	}
+	return result
+}
+
+func vp8lMergedHistogramImage(groupImage []uint16, left int, right int) []uint16 {
+	result := make([]uint16, len(groupImage))
+	for i, group := range groupImage {
+		id := int(group)
+		if id == right {
+			id = left
+		} else if id > right {
+			id--
+		}
+		result[i] = uint16(id)
+	}
+	return result
 }
 
 func vp8lMergeLZ77Histograms(a vp8lLZ77GroupPlan, b vp8lLZ77GroupPlan) (vp8lLZ77GroupPlan, bool) {

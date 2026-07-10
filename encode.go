@@ -72,8 +72,9 @@ const (
 	ModeBestCompression
 	// ModeLowMemory avoids buffered lossless candidates and lossy residual buffering.
 	ModeLowMemory
-	// ModeNearLossless writes VP8L with alpha preserved and RGB quantized according
-	// to Quality. Quality 100, or an omitted Quality, is equivalent to lossless.
+	// ModeNearLossless writes VP8L with alpha preserved and edge-aware RGB
+	// quantization controlled by Quality. Quality 100, or an omitted Quality,
+	// is equivalent to lossless.
 	ModeNearLossless
 	// ModeLossyQuality writes VP8 lossy output and uses Quality for quality control.
 	ModeLossyQuality
@@ -90,7 +91,7 @@ type Options struct {
 	// Quality controls lossy WebP quality from 1 to 100. Values less than or
 	// equal to zero use the default, and values greater than 100 are clamped to
 	// 100. Quality is ignored for ordinary lossless encoding. In ModeNearLossless,
-	// Quality controls RGB quantization and the default is 100.
+	// Quality controls edge-aware RGB quantization and the default is 100.
 	Quality int
 	// Mode selects an encoder search profile. ModeDefault preserves the behavior
 	// selected by Compression and Quality.
@@ -113,10 +114,9 @@ func Encode(w io.Writer, m image.Image, o *Options) error {
 		return errors.New("webp: nil image")
 	}
 
-	bounds := m.Bounds()
-	width, height := bounds.Dx(), bounds.Dy()
-	if width <= 0 || height <= 0 {
-		return fmt.Errorf("webp: invalid image dimensions %dx%d", width, height)
+	source := newEncoderSource(m)
+	if source.width <= 0 || source.height <= 0 {
+		return fmt.Errorf("webp: invalid image dimensions %dx%d", source.width, source.height)
 	}
 	mode := encodingMode(o)
 	if !validMode(mode) {
@@ -124,15 +124,15 @@ func Encode(w io.Writer, m image.Image, o *Options) error {
 	}
 	switch mode {
 	case ModeNearLossless:
-		return encodeNearLossless(w, m, bounds, width, height, nearLosslessQuality(o), mode)
+		return encodeNearLossless(w, source, nearLosslessQuality(o), mode)
 	case ModeLossyQuality:
-		return encodeLossy(w, m, bounds, width, height, lossyQuality(o), mode)
+		return encodeLossy(w, source, lossyQuality(o), mode)
 	}
 	switch compression(o) {
 	case CompressionLossless:
-		return encodeLossless(w, m, bounds, width, height, mode)
+		return encodeLossless(w, source, mode)
 	case CompressionLossy:
-		return encodeLossy(w, m, bounds, width, height, lossyQuality(o), mode)
+		return encodeLossy(w, source, lossyQuality(o), mode)
 	default:
 		return fmt.Errorf("webp: unsupported compression mode %d", compression(o))
 	}
@@ -344,6 +344,8 @@ type vp8lEncodingConfig struct {
 	tryLZ77ColorCache               bool
 	tryLZ77MetaPrefix               bool
 	tryLZ77TokenMetaPrefix          bool
+	optimalLZ77Passes               int
+	maxOptimalLZ77Pixels            int
 	tryTransformedLZ77ColorCache    bool
 	tryBlockPredictor               bool
 	minColorIndexEarlyExitPixels    int
@@ -355,6 +357,7 @@ type vp8lEncodingConfig struct {
 	prioritizeColorIndexCandidate   bool
 	maxMetaPrefixLZ77Tokens         int
 	maxTransformedLZ77CacheTokens   int
+	parallelTransforms              bool
 }
 
 type vp8lAutoLosslessReason int
@@ -388,10 +391,6 @@ type channelPlan struct {
 	lastPos              uint8
 	lastOK               bool
 }
-
-type pixelReader func(x int, y int) color.NRGBA
-type lumaReader func(x int, y int) uint8
-type chromaReader func(x int, y int) (uint8, uint8)
 
 func analyzeImage(readPixel pixelReader, bounds image.Rectangle) imageAnalysis {
 	var a imageAnalysis
@@ -542,6 +541,7 @@ func chooseVP8LEncodingPlanForImageMode(m image.Image, readPixel pixelReader, bo
 }
 
 func chooseVP8LEncodingPlanForImageWithConfig(m image.Image, readPixel pixelReader, bounds image.Rectangle, width int, height int, cfg vp8lEncodingConfig) vp8lEncodingPlan {
+	readPixel, cfg.parallelTransforms = vp8lPrepareParallelTransformReader(m, readPixel, bounds, width, height, cfg.parallelTransforms)
 	analysis := analyzeImage(readPixel, bounds)
 	best := vp8lEncodingPlan{
 		analysis: analysis,
@@ -555,19 +555,38 @@ func chooseVP8LEncodingPlanForImageWithConfig(m image.Image, readPixel pixelRead
 	candidateCount, literalBestIndex, best, bestBits = vp8lAddEncodingPlanCandidate(&candidates, candidateCount, literalBestIndex, best, width, height, best, bestBits)
 
 	colorIndexPlan, colorIndexOK := makeVP8LColorIndexingPlanForImage(m, readPixel, bounds, width, height, analysis.alpha)
+	indexedPredictorPlan := vp8lEncodingPlan{}
+	indexedPredictorOK := false
+	if colorIndexOK && cfg.tryTransforms {
+		indexedPredictorPlan, indexedPredictorOK = makeVP8LIndexedPredictorPlan(readPixel, bounds, width, height, colorIndexPlan, cfg)
+	}
 	if colorIndexOK && cfg.allowColorIndexEarlyExit {
 		colorIndexBits := vp8lPayloadBits(width, height, colorIndexPlan)
 		if vp8lShouldUseColorIndexEarlyExitConfig(m, colorIndexPlan, colorIndexBits, bestBits, width, height, cfg) {
 			candidateCount, literalBestIndex, best, bestBits = vp8lAddEncodingPlanCandidate(&candidates, candidateCount, literalBestIndex, colorIndexPlan, width, height, best, bestBits)
+			if indexedPredictorOK {
+				candidateCount, literalBestIndex, best, bestBits = vp8lAddEncodingPlanCandidate(&candidates, candidateCount, literalBestIndex, indexedPredictorPlan, width, height, best, bestBits)
+			}
 			return vp8lFinalizeEncodingPlan(readPixel, bounds, width, height, literalPlan, &candidates, candidateCount, literalBestIndex, best, bestBits, cfg)
 		}
 	}
 	if colorIndexOK && cfg.prioritizeColorIndexCandidate {
 		candidateCount, literalBestIndex, best, bestBits = vp8lAddEncodingPlanCandidate(&candidates, candidateCount, literalBestIndex, colorIndexPlan, width, height, best, bestBits)
+		if indexedPredictorOK {
+			candidateCount, literalBestIndex, best, bestBits = vp8lAddEncodingPlanCandidate(&candidates, candidateCount, literalBestIndex, indexedPredictorPlan, width, height, best, bestBits)
+		}
 		colorIndexOK = false
+		indexedPredictorOK = false
 	}
 
-	if cfg.tryTransforms {
+	if cfg.tryTransforms && cfg.parallelTransforms {
+		candidateCount, literalBestIndex, best, bestBits = vp8lAddParallelTransformCandidates(
+			readPixel, bounds, width, height, analysis, cfg,
+			&candidates, candidateCount, literalBestIndex, best, bestBits,
+		)
+	}
+
+	if cfg.tryTransforms && !cfg.parallelTransforms {
 		if cfg.tryBlockPredictor {
 			if blockPredictorPlan, ok := makeVP8LBlockPredictorPlan(readPixel, bounds, width, height, analysis.alpha, cfg); ok {
 				candidateCount, literalBestIndex, best, bestBits = vp8lAddEncodingPlanCandidate(&candidates, candidateCount, literalBestIndex, blockPredictorPlan, width, height, best, bestBits)
@@ -654,6 +673,9 @@ func chooseVP8LEncodingPlanForImageWithConfig(m image.Image, readPixel pixelRead
 	if colorIndexOK {
 		candidateCount, literalBestIndex, best, bestBits = vp8lAddEncodingPlanCandidate(&candidates, candidateCount, literalBestIndex, colorIndexPlan, width, height, best, bestBits)
 	}
+	if indexedPredictorOK {
+		candidateCount, literalBestIndex, best, bestBits = vp8lAddEncodingPlanCandidate(&candidates, candidateCount, literalBestIndex, indexedPredictorPlan, width, height, best, bestBits)
+	}
 
 	return vp8lFinalizeEncodingPlan(readPixel, bounds, width, height, literalPlan, &candidates, candidateCount, literalBestIndex, best, bestBits, cfg)
 }
@@ -669,6 +691,8 @@ func vp8lDefaultEncodingConfig() vp8lEncodingConfig {
 		tryLZ77ColorCache:               true,
 		tryLZ77MetaPrefix:               true,
 		tryTransformedLZ77ColorCache:    true,
+		optimalLZ77Passes:               1,
+		maxOptimalLZ77Pixels:            vp8lMaxOptimalLZ77Pixels,
 		minColorIndexEarlyExitPixels:    vp8lMinColorIndexEarlyExitPixels,
 		palettedColorIndexEarlyExitRate: 2,
 		nrgbaColorIndexEarlyExitRate:    4,
@@ -695,6 +719,7 @@ func vp8lEncodingConfigForMode(mode Mode, m image.Image, readPixel pixelReader, 
 		cfg.tryLZ77ColorCache = false
 		cfg.tryLZ77MetaPrefix = false
 		cfg.tryTransformedLZ77ColorCache = false
+		cfg.optimalLZ77Passes = 0
 	case ModeBestCompression:
 		cfg.allowColorIndexEarlyExit = false
 		cfg.predictorModes = vp8lBestCompressionPredictorModeCandidates[:]
@@ -703,8 +728,11 @@ func vp8lEncodingConfigForMode(mode Mode, m image.Image, readPixel pixelReader, 
 		cfg.tryBlockPredictor = true
 		cfg.prioritizeColorIndexCandidate = true
 		cfg.tryLZ77TokenMetaPrefix = true
+		cfg.optimalLZ77Passes = 2
+		cfg.maxOptimalLZ77Pixels = vp8lBestCompressionMaxOptimalLZ77Pixels
 		cfg.maxMetaPrefixLZ77Tokens = vp8lBestCompressionMaxMetaPrefixLZ77Tokens
 		cfg.maxTransformedLZ77CacheTokens = vp8lBestCompressionMaxTransformedLZ77CacheTokens
+		cfg.parallelTransforms = true
 	case ModeLowMemory:
 		cfg.tryLZ77 = false
 		cfg.tryMetaPrefix = false
@@ -712,6 +740,11 @@ func vp8lEncodingConfigForMode(mode Mode, m image.Image, readPixel pixelReader, 
 		cfg.tryLZ77ColorCache = false
 		cfg.tryLZ77MetaPrefix = false
 		cfg.tryTransformedLZ77ColorCache = false
+		cfg.optimalLZ77Passes = 0
+	case ModeNearLossless:
+		cfg.tryMetaPrefix = false
+		cfg.tryLZ77MetaPrefix = false
+		cfg.optimalLZ77Passes = 0
 	}
 	return cfg
 }
@@ -1306,7 +1339,8 @@ func lumaReaderFor(m image.Image) lumaReader {
 		minX := img.Rect.Min.X
 		minY := img.Rect.Min.Y
 		return func(x int, y int) uint8 {
-			return pix[(y-minY)*stride+x-minX]
+			value := pix[(y-minY)*stride+x-minX]
+			return rgbToLuma(value, value, value)
 		}
 	case *image.YCbCr:
 		yPix := img.Y
@@ -1464,6 +1498,8 @@ const (
 	vp8lMaxMetaPrefixLZ77Tokens                      = 1 << 13
 	vp8lBestCompressionMaxTransformedLZ77CacheTokens = 1 << 19
 	vp8lBestCompressionMaxMetaPrefixLZ77Tokens       = 1 << 15
+	vp8lMaxOptimalLZ77Pixels                         = 1 << 18
+	vp8lBestCompressionMaxOptimalLZ77Pixels          = 1 << 20
 )
 
 var vp8lPredictorModeCandidates = [...]uint8{1, 2, 12}
@@ -1531,7 +1567,11 @@ func vp8lPayloadBitBreakdownFor(width int, height int, plan vp8lEncodingPlan) vp
 	}
 	if plan.predictor {
 		b.predictorHeader = 1 + 2 + 3 // transform present, predictor transform type, block size bits
-		transformWidth, transformHeight := vp8lTransformDimensions(width, height, plan.predictorSizeBits)
+		predictorWidth, predictorHeight := width, height
+		if plan.colorIndexing {
+			predictorWidth, predictorHeight = vp8lPlanImageDimensions(width, height, plan)
+		}
+		transformWidth, transformHeight := vp8lTransformDimensions(predictorWidth, predictorHeight, plan.predictorSizeBits)
 		b.predictorImageData = vp8lImageDataBits(transformWidth, transformHeight, plan.predictorAnalysis, false)
 	}
 	if plan.colorTransform {
@@ -1897,13 +1937,12 @@ func full8TreeBits(alphabetSize int) uint64 {
 
 func writeVP8L(bits *bitWriter, readPixel pixelReader, bounds image.Rectangle, width int, height int, plan vp8lEncodingPlan) {
 	writeVP8LHeader(bits, width, height, plan.alpha)
-	if plan.predictor {
-		bits.writeBits(1, 1)
-		bits.writeBits(0, 2)
-		bits.writeBits(uint32(plan.predictorSizeBits-2), 3)
-		transformWidth, transformHeight := vp8lTransformDimensions(width, height, plan.predictorSizeBits)
-		transformBounds := image.Rect(0, 0, transformWidth, transformHeight)
-		writeVP8LImageData(bits, vp8lPredictorImageReaderForPlan(plan, transformWidth), transformBounds, plan.predictorAnalysis, false)
+	if plan.colorIndexing && plan.predictor {
+		writeVP8LColorIndexTransform(bits, plan)
+		predictorWidth, predictorHeight := vp8lPlanImageDimensions(width, height, plan)
+		writeVP8LPredictorTransform(bits, predictorWidth, predictorHeight, plan)
+	} else if plan.predictor {
+		writeVP8LPredictorTransform(bits, width, height, plan)
 	}
 	if plan.colorTransform {
 		bits.writeBits(1, 1)
@@ -1917,12 +1956,8 @@ func writeVP8L(bits *bitWriter, readPixel pixelReader, bounds image.Rectangle, w
 		bits.writeBits(1, 1)
 		bits.writeBits(2, 2)
 	}
-	if plan.colorIndexing {
-		bits.writeBits(1, 1)
-		bits.writeBits(3, 2)
-		bits.writeBits(uint32(len(plan.colorTable)-1), 8)
-		tableBounds := image.Rect(0, 0, len(plan.colorTable), 1)
-		writeVP8LImageData(bits, vp8lColorTableImageReader(plan.colorTable), tableBounds, plan.colorIndexAnalysis, false)
+	if plan.colorIndexing && !plan.predictor {
+		writeVP8LColorIndexTransform(bits, plan)
 	}
 	bits.writeBits(0, 1)
 	mainWidth, mainHeight := vp8lPlanImageDimensions(width, height, plan)
@@ -1945,6 +1980,23 @@ func writeVP8L(bits *bitWriter, readPixel pixelReader, bounds image.Rectangle, w
 	} else {
 		writeVP8LImageData(bits, vp8lPlanPixelReader(readPixel, bounds, width, height, plan), mainBounds, plan.analysis, true)
 	}
+}
+
+func writeVP8LPredictorTransform(bits *bitWriter, width int, height int, plan vp8lEncodingPlan) {
+	bits.writeBits(1, 1)
+	bits.writeBits(0, 2)
+	bits.writeBits(uint32(plan.predictorSizeBits-2), 3)
+	transformWidth, transformHeight := vp8lTransformDimensions(width, height, plan.predictorSizeBits)
+	transformBounds := image.Rect(0, 0, transformWidth, transformHeight)
+	writeVP8LImageData(bits, vp8lPredictorImageReaderForPlan(plan, transformWidth), transformBounds, plan.predictorAnalysis, false)
+}
+
+func writeVP8LColorIndexTransform(bits *bitWriter, plan vp8lEncodingPlan) {
+	bits.writeBits(1, 1)
+	bits.writeBits(3, 2)
+	bits.writeBits(uint32(len(plan.colorTable)-1), 8)
+	tableBounds := image.Rect(0, 0, len(plan.colorTable), 1)
+	writeVP8LImageData(bits, vp8lColorTableImageReader(plan.colorTable), tableBounds, plan.colorIndexAnalysis, false)
 }
 
 func writeVP8LHeader(bits *bitWriter, width int, height int, alpha bool) {
@@ -2533,7 +2585,7 @@ func makeVP8LTokenMetaPrefixLZ77Plan(readPixel pixelReader, bounds image.Rectang
 	if !ok {
 		return vp8lEncodingPlan{}, false
 	}
-	candidate, ok := makeVP8LTokenMetaPrefixLZ77PlanForBits(readPixel, bounds, width, height, base, tokens, prefixBits)
+	candidate, ok := makeVP8LTokenMetaPrefixLZ77PlanForBits(width, height, base, tokens, prefixBits)
 	if !ok || vp8lPayloadBits(width, height, candidate) >= maxBits {
 		return vp8lEncodingPlan{}, false
 	}
@@ -2712,10 +2764,6 @@ func makeVP8LMetaPrefixLZ77PlanForBits(readPixel pixelReader, bounds image.Recta
 	if !ok {
 		return vp8lEncodingPlan{}, false
 	}
-	tokens, ok = vp8lSplitLZ77TokensAtMetaPrefixBoundaries(readPixel, bounds, candidate.metaPrefix, tokens, width, width*height)
-	if !ok {
-		return vp8lEncodingPlan{}, false
-	}
 	lz77Groups, groupTokens, ok := vp8lBuildMetaPrefixLZ77Groups(candidate.metaPrefix, tokens, width, width*height, base.analysis)
 	if !ok {
 		return vp8lEncodingPlan{}, false
@@ -2726,13 +2774,7 @@ func makeVP8LMetaPrefixLZ77PlanForBits(readPixel pixelReader, bounds image.Recta
 	return candidate, true
 }
 
-func makeVP8LTokenMetaPrefixLZ77PlanForBits(readPixel pixelReader, bounds image.Rectangle, width int, height int, base vp8lEncodingPlan, tokens []vp8lToken, prefixBits uint8) (vp8lEncodingPlan, bool) {
-	tokens, ok := vp8lSplitLZ77TokensAtMetaPrefixBoundaries(readPixel, bounds, &vp8lMetaPrefixPlan{
-		prefixBits: prefixBits,
-	}, tokens, width, width*height)
-	if !ok {
-		return vp8lEncodingPlan{}, false
-	}
+func makeVP8LTokenMetaPrefixLZ77PlanForBits(width int, height int, base vp8lEncodingPlan, tokens []vp8lToken, prefixBits uint8) (vp8lEncodingPlan, bool) {
 	metaPrefix, ok := makeVP8LTokenMetaPrefixPlan(tokens, width, height, prefixBits, base.analysis)
 	if !ok {
 		return vp8lEncodingPlan{}, false
@@ -2801,109 +2843,6 @@ func vp8lBuildMetaPrefixLZ77Groups(metaPrefix *vp8lMetaPrefixPlan, tokens []vp8l
 		lz77Groups[i].distanceNormal = distanceNormal
 	}
 	return lz77Groups, groupTokens, true
-}
-
-func vp8lSplitLZ77TokensAtMetaPrefixBoundaries(readPixel pixelReader, bounds image.Rectangle, metaPrefix *vp8lMetaPrefixPlan, tokens []vp8lToken, width int, total int) ([]vp8lToken, bool) {
-	if metaPrefix == nil || width <= 0 || total < 0 {
-		return nil, false
-	}
-	pos := 0
-	var split []vp8lToken
-	for i, token := range tokens {
-		if pos >= total {
-			return nil, false
-		}
-		if token.copyLength <= 0 {
-			if split != nil {
-				split = append(split, token)
-				if len(split) > vp8lMaxMetaPrefixLZ77Tokens {
-					return nil, false
-				}
-			}
-			pos++
-			continue
-		}
-		if pos+token.copyLength > total {
-			return nil, false
-		}
-		segment := vp8lMetaPrefixCopySegmentLength(metaPrefix, width, pos, token.copyLength)
-		if segment <= 0 {
-			return nil, false
-		}
-		if segment == token.copyLength {
-			if split != nil {
-				split = append(split, token)
-				if len(split) > vp8lMaxMetaPrefixLZ77Tokens {
-					return nil, false
-				}
-			}
-			pos += token.copyLength
-			continue
-		}
-		if split == nil {
-			split = make([]vp8lToken, 0, minInt(vp8lMaxMetaPrefixLZ77Tokens, len(tokens)+1))
-			split = append(split, tokens[:i]...)
-		}
-		remaining := token.copyLength
-		for remaining > 0 {
-			segment = vp8lMetaPrefixCopySegmentLength(metaPrefix, width, pos, remaining)
-			if segment <= 0 {
-				return nil, false
-			}
-			if segment < vp8lMinBackwardRefLength {
-				for i := 0; i < segment; i++ {
-					split = append(split, vp8lToken{pixel: vp8lPixelAt(readPixel, bounds, width, pos+i)})
-				}
-			} else {
-				split = append(split, vp8lToken{
-					copyLength:   segment,
-					distanceCode: token.distanceCode,
-				})
-			}
-			if len(split) > vp8lMaxMetaPrefixLZ77Tokens {
-				return nil, false
-			}
-			pos += segment
-			remaining -= segment
-		}
-	}
-	if pos != total {
-		return nil, false
-	}
-	if split == nil {
-		return tokens, true
-	}
-	return split, true
-}
-
-func vp8lMetaPrefixCopySegmentLength(metaPrefix *vp8lMetaPrefixPlan, width int, pos int, maxLength int) int {
-	if maxLength <= 0 || width <= 0 {
-		return 0
-	}
-	blockSize := 1 << metaPrefix.prefixBits
-	x := pos % width
-	nextBlockX := ((x >> metaPrefix.prefixBits) + 1) * blockSize
-	if nextBlockX > width {
-		nextBlockX = width
-	}
-	length := nextBlockX - x
-	if length <= 0 {
-		return 0
-	}
-	if length > maxLength {
-		return maxLength
-	}
-	return length
-}
-
-func vp8lMetaPrefixCopyStaysInGroup(metaPrefix *vp8lMetaPrefixPlan, width int, pos int, length int) bool {
-	group := vp8lMetaPrefixGroupAt(metaPrefix, pos%width, pos/width)
-	for p := pos + 1; p < pos+length; p++ {
-		if vp8lMetaPrefixGroupAt(metaPrefix, p%width, p/width) != group {
-			return false
-		}
-	}
-	return true
 }
 
 func vp8lDistanceCountsEmpty(counts [nDistanceCodes]uint32) bool {
@@ -3148,6 +3087,7 @@ func makeVP8LLZ77PlanConfigCandidateCount(readPixel pixelReader, bounds image.Re
 		return vp8lEncodingPlan{}, 0, false
 	}
 	mainWidth, mainHeight := vp8lPlanImageDimensions(width, height, base)
+	total := mainWidth * mainHeight
 	mainBounds := image.Rect(0, 0, mainWidth, mainHeight)
 	if !base.colorIndexing {
 		mainBounds = bounds
@@ -3160,31 +3100,28 @@ func makeVP8LLZ77PlanConfigCandidateCount(readPixel pixelReader, bounds image.Re
 	if copyCount == 0 {
 		return vp8lEncodingPlan{}, 0, false
 	}
-	greenLengths, ok := huffmanCodeLengths(greenCounts)
+	literalBase := base
+	base, ok := vp8lPlanWithLZ77(base, lz77Tokens, vp8lLZ77Statistics{
+		literalAnalysis: literalAnalysis,
+		greenCounts:     greenCounts,
+		distanceCounts:  distanceCounts,
+		copyCount:       copyCount,
+	})
 	if !ok {
 		return vp8lEncodingPlan{}, 0, false
 	}
-	distanceN, distanceSymbols, distanceLengths, distanceCodes, distanceNormal, ok := vp8lDistanceCodeFor(distanceCounts)
-	if !ok {
-		return vp8lEncodingPlan{}, 0, false
+	if cfg.optimalLZ77Passes > 0 && base.colorIndexing && total <= cfg.maxOptimalLZ77Pixels && candidateCount == vp8lOptimalLZ77CandidateCount(total) {
+		if optimized, improved := vp8lOptimizeLZ77Plan(read, mainBounds, mainWidth, width, height, literalBase, base, candidateCount, cfg.optimalLZ77Passes); improved {
+			base = optimized
+			lz77Tokens = optimized.lz77Tokens
+			tokenCount = len(lz77Tokens)
+		}
 	}
-	base.lz77 = true
-	base.lz77LiteralAnalysis = literalAnalysis
-	base.lz77GreenCounts = greenCounts
-	base.lz77GreenLengths = greenLengths
-	base.lz77GreenCodes = canonicalCodes(greenLengths)
-	base.lz77DistanceCounts = distanceCounts
-	base.lz77DistanceN = distanceN
-	base.lz77DistanceSymbols = distanceSymbols
-	base.lz77DistanceLengths = distanceLengths
-	base.lz77DistanceCodes = distanceCodes
-	base.lz77DistanceNormal = distanceNormal
 	best := vp8lEncodingPlan{}
 	bestBits := maxBits
 	found := false
 	lz77Bits := vp8lPayloadBits(width, height, base)
 	if lz77Bits < bestBits {
-		base.lz77Tokens = lz77Tokens
 		best = base
 		bestBits = lz77Bits
 		found = true
@@ -3229,6 +3166,11 @@ func vp8lLZ77CandidateCounts(total int) []int {
 	return []int{defaultCount, vp8lMaxHashCandidates}
 }
 
+func vp8lOptimalLZ77CandidateCount(total int) int {
+	counts := vp8lLZ77CandidateCounts(total)
+	return counts[len(counts)-1]
+}
+
 func vp8lShouldTryLZ77ColorCache(base vp8lEncodingPlan, width int, height int, lz77Bits uint64, maxBits uint64, tokenCount int) bool {
 	return vp8lShouldTryLZ77ColorCacheConfig(base, width, height, lz77Bits, maxBits, tokenCount, vp8lDefaultEncodingConfig())
 }
@@ -3248,40 +3190,6 @@ func vp8lShouldTryLZ77ColorCacheConfig(base vp8lEncodingPlan, width int, height 
 	}
 	breakdown := vp8lPayloadBitBreakdownFor(width, height, base)
 	return vp8lShouldTryTransformedLZ77ColorCache(base, breakdown, lz77Bits, maxBits)
-}
-
-func nearLosslessReader(readPixel pixelReader, step uint8) pixelReader {
-	if step <= 1 {
-		return readPixel
-	}
-	return func(x int, y int) color.NRGBA {
-		c := readPixel(x, y)
-		c.R = quantizeNearLosslessChannel(c.R, step)
-		c.G = quantizeNearLosslessChannel(c.G, step)
-		c.B = quantizeNearLosslessChannel(c.B, step)
-		return c
-	}
-}
-
-func nearLosslessQuantizationStep(quality int) uint8 {
-	if quality >= 100 {
-		return 1
-	}
-	if quality < 1 {
-		quality = 1
-	}
-	return uint8(1 + ((100-quality)*31+98)/99)
-}
-
-func quantizeNearLosslessChannel(v uint8, step uint8) uint8 {
-	if step <= 1 {
-		return v
-	}
-	q := (int(v) + int(step)/2) / int(step) * int(step)
-	if q > 255 {
-		return 255
-	}
-	return uint8(q)
 }
 
 func vp8lShouldTryTransformedLZ77ColorCache(base vp8lEncodingPlan, breakdown vp8lPayloadBitBreakdown, lz77Bits uint64, maxBits uint64) bool {
@@ -3854,10 +3762,22 @@ func observeVP8LLiteral(analysis *imageAnalysis, first *bool, pixel color.NRGBA)
 
 func vp8lPlanPixelReader(readPixel pixelReader, bounds image.Rectangle, width int, height int, plan vp8lEncodingPlan) pixelReader {
 	if plan.colorIndexing {
+		var readIndexed pixelReader
 		if plan.colorIndexReader != nil {
-			return plan.colorIndexReader
+			readIndexed = plan.colorIndexReader
+		} else {
+			readIndexed = vp8lColorIndexedImageReader(readPixel, bounds, width, plan.colorIndexWidthBits, plan.colorIndex)
 		}
-		return vp8lColorIndexedImageReader(readPixel, bounds, width, plan.colorIndexWidthBits, plan.colorIndex)
+		if !plan.predictor {
+			return readIndexed
+		}
+		indexedWidth, indexedHeight := vp8lPlanImageDimensions(width, height, plan)
+		indexedBounds := image.Rect(0, 0, indexedWidth, indexedHeight)
+		if len(plan.predictorImage) == 0 {
+			return vp8lPredictorResidualReader(readIndexed, indexedBounds, indexedWidth, indexedHeight, plan.predictorMode)
+		}
+		transformWidth, _ := vp8lTransformDimensions(indexedWidth, indexedHeight, plan.predictorSizeBits)
+		return vp8lBlockPredictorResidualReader(readIndexed, indexedBounds, indexedWidth, indexedHeight, plan.predictorSizeBits, plan.predictorImage, transformWidth)
 	}
 	read := readPixel
 	if plan.predictor {
