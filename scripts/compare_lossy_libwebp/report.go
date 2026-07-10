@@ -1,6 +1,11 @@
 package main
 
-import "math"
+import (
+	"math"
+
+	"github.com/mayahiro/go-webp/internal/benchmarkbitstream"
+	"github.com/mayahiro/go-webp/internal/benchmarkmetric"
+)
 
 type comparisonReport struct {
 	SchemaVersion int                 `json:"schema_version"`
@@ -44,24 +49,14 @@ type fixtureReport struct {
 }
 
 type sample struct {
-	Quality         int               `json:"quality"`
-	EncodedBytes    int               `json:"encoded_bytes"`
-	AverageEncodeNS int64             `json:"average_encode_ns"`
-	Distortion      distortionMetrics `json:"distortion"`
+	Quality         int                            `json:"quality"`
+	EncodedBytes    int                            `json:"encoded_bytes"`
+	AverageEncodeNS int64                          `json:"average_encode_ns"`
+	Layout          benchmarkbitstream.LossyLayout `json:"layout"`
+	Distortion      distortionMetrics              `json:"distortion"`
 }
 
-type distortionMetrics struct {
-	RGBMAE     float64  `json:"rgb_mae"`
-	RGBMSE     float64  `json:"rgb_mse"`
-	RGBPSNRDB  *float64 `json:"rgb_psnr_db"`
-	YPSNRDB    *float64 `json:"y_psnr_db"`
-	UVPSNRDB   *float64 `json:"uv_psnr_db"`
-	YSSIM      float64  `json:"y_ssim"`
-	YSSIMDB    *float64 `json:"y_ssim_db"`
-	AlphaMAE   float64  `json:"alpha_mae"`
-	RGBExact   bool     `json:"rgb_exact"`
-	AlphaExact bool     `json:"alpha_exact"`
-}
+type distortionMetrics = benchmarkmetric.Metrics
 
 type pointMatch struct {
 	GoQuality      int      `json:"go_quality"`

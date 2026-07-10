@@ -41,17 +41,7 @@ func analyzeVP8ModePassEntropy(source vp8Source, cfg vp8LossyConfig, work *vp8En
 			skipWorkspace = work.resetSkipMap(mbw * mbh)
 		}
 		skipMap := pass.residualBuffer.candidateSkipMapInto(cfg.trySkip, skipWorkspace)
-		if cfg.updateTokenProb {
-			tokenStats := pass.residualBuffer.tokenStats(skipMap)
-			tokenProbs = chooseVP8TokenProbsConfig(&tokenStats, true)
-		}
-		if skipMap != nil && !pass.residualBuffer.shouldUseSkipMap(skipMap, &tokenProbs) {
-			skipMap = nil
-			if cfg.updateTokenProb {
-				tokenStats := pass.residualBuffer.tokenStats(nil)
-				tokenProbs = chooseVP8TokenProbsConfig(&tokenStats, true)
-			}
-		}
+		tokenProbs, skipMap = pass.residualBuffer.chooseEntropyPlan(cfg.updateTokenProb, skipMap)
 		return tokenProbs, skipMap
 	}
 

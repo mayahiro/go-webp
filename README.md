@@ -147,9 +147,10 @@ room for future options.
   candidate analysis when the input is fully opaque. Custom image types retain
   the general pixel-analysis path.
 - For lossy VP8 output, `ModeFast` keeps the requested quality mapping but
-  disables macroblock skip signaling and token probability update search.
-  `ModeBestCompression` additionally enables luma4x4 mode search, a second
-  rate-distortion pass, trellis quantization, and bounded sharp-chroma search.
+  disables luma4x4 mode search, macroblock skip signaling, and token
+  probability update search. `ModeLowMemory` also omits luma4x4 mode search.
+  `ModeBestCompression` enables a second rate-distortion pass, trellis
+  quantization, and bounded sharp-chroma search.
 - Lossy profiles that use skip or token probability analysis can retain the
   selected quantized residuals and reuse them for statistics and final coding,
   instead of repeating the macroblock DCT and reconstruction passes. This
@@ -160,8 +161,12 @@ room for future options.
   VP8 residual buffer, VP8L token stream, meta-prefix plan, or color-cache plan.
 - Lossy encoding uses a low-complexity VP8 key frame encoder with 4:2:0 chroma
   subsampling, adaptive chroma downsampling, selected intra16x16 and chroma
-  prediction modes, optional luma4x4 modes in `ModeBestCompression`, and
-  quantized DC and AC coefficients. It writes
+  prediction modes, optional luma4x4 modes, and quantized DC and AC
+  coefficients. The default lossy profiles search luma4x4 modes and can use up
+  to four activity-adaptive quantizer segments. They use quality-dependent
+  quantization bias and rate-distortion weights, including a bounded spectral
+  texture term at medium qualities and bounded sharp-chroma search at high
+  qualities. The encoder writes
   residual token probability updates when they are estimated to reduce the
   frame size and enables the normal VP8 loop filter with quality-scaled
   sharpness and a mode delta for luma4x4 macroblocks.
@@ -234,11 +239,11 @@ go run ./scripts/compare_lossy_libwebp -runs 3 -go-mode default -json report.jso
 
 The lossy comparison requires `cwebp` and `dwebp`. Its JSON report contains
 quality sweeps, decoded RGB/YUV and alpha metrics, weighted 7x7 Y SSIM,
-encode timing, and the nearest sampled cwebp points by encoded size and Y SSIM
-dB. A private local corpus can be selected with `-corpus` and `-split`; source
-names and paths are omitted from the report. The go-webp timing covers the
-in-process `Encode` call, while the cwebp timing also includes process startup,
-PNG decoding, and output writing.
+encode timing, VP8 partition sizes, and the nearest sampled cwebp points by
+encoded size and Y SSIM dB. A private local corpus can be selected with
+`-corpus` and `-split`; source names and paths are omitted from the report. The
+go-webp timing covers the in-process `Encode` call, while the cwebp timing also
+includes process startup, PNG decoding, and output writing.
 
 ## License
 

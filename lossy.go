@@ -42,16 +42,18 @@ const (
 )
 
 func encodeLossy(w io.Writer, source encoderSource, quality int, mode Mode) error {
+	return encodeLossyConfig(w, source, vp8LossyConfigForModeQuality(mode, quality), lossyAlphaConfigForMode(mode))
+}
+
+func encodeLossyConfig(w io.Writer, source encoderSource, lossyConfig vp8LossyConfig, alphaConfig lossyAlphaConfig) error {
 	if source.width > maxVP8Dimension || source.height > maxVP8Dimension {
 		return fmt.Errorf("webp: image dimensions %dx%d exceed VP8 limit %dx%d", source.width, source.height, maxVP8Dimension, maxVP8Dimension)
 	}
 
-	lossyConfig := vp8LossyConfigForModeQuality(mode, quality)
 	vp8Source := newVP8Source(source, lossyConfig.materializeSource)
 	if lossyConfig.sharpYUV && vp8Source.materialized() {
 		vp8Source.applySharpChroma(source.pixels())
 	}
-	alphaConfig := lossyAlphaConfigForMode(mode)
 	var alphaAnalysis lossyAlphaAnalysis
 	var readPixel pixelReader
 	var alphaDone chan lossyAlphaAnalysis
@@ -1928,14 +1930,19 @@ type vp8LossyConfig struct {
 	qIndex            int
 	quant             vp8Quant
 	quantDeltas       vp8QuantDeltas
+	quantBias         vp8QuantBias
 	filter            vp8LoopFilter
 	rd                vp8RDConfig
+	rdYLambdaScale    int
+	rdUVLambdaScale   int
 	tryY4             bool
 	trySkip           bool
 	updateTokenProb   bool
 	bufferResiduals   bool
 	materializeSource bool
 	maxSegments       int
+	segmentStrength   int
+	textureStrength   int
 	rdPasses          int
 	trellis           bool
 	dcDiffusion       bool
@@ -1950,25 +1957,50 @@ func vp8LossyConfigForModeQuality(mode Mode, quality int) vp8LossyConfig {
 func vp8LossyConfigForQIndex(mode Mode, qIndex int) vp8LossyConfig {
 	qIndex = clipInt(qIndex, 0, 127)
 	quantDeltas := vp8QuantDeltas{uvDC: -2}
-	quant := vp8QuantForIndexDeltas(qIndex, quantDeltas)
+	quantBias := vp8MildQuantBiasForIndex(qIndex)
+	yLambdaScale, uvLambdaScale := 64, 96
+	textureStrength := 0
+	highQualitySearch := qIndex <= 9
+	if highQualitySearch {
+		yLambdaScale = 32
+	}
+	conservativeMode := mode == ModeFast || mode == ModeLowMemory || mode == ModeBestCompression
+	if conservativeMode {
+		quantBias = vp8ConservativeQuantBias()
+		yLambdaScale, uvLambdaScale = 256, 256
+		highQualitySearch = false
+	} else if qIndex >= 15 && qIndex <= 30 {
+		quantBias.y1DC = 114
+		quantBias.y1AC = 114
+		quantBias.y2DC = 114
+		quantBias.y2AC = 114
+		textureStrength = 200
+	}
+	quant := vp8QuantForIndexDeltasBias(qIndex, quantDeltas, quantBias)
 	cfg := vp8LossyConfig{
-		qIndex:          qIndex,
-		quant:           quant,
-		quantDeltas:     quantDeltas,
-		filter:          vp8LoopFilterForQuant(quant),
-		rd:              newVP8RDConfig(quant),
-		tryY4:           false,
-		trySkip:         true,
-		updateTokenProb: true,
-		bufferResiduals: true,
-		maxSegments:     2,
-		rdPasses:        1,
-		parallelAlpha:   true,
+		qIndex:            qIndex,
+		quant:             quant,
+		quantDeltas:       quantDeltas,
+		quantBias:         quantBias,
+		filter:            vp8LoopFilterForQuant(quant),
+		rd:                newVP8RDConfigScaledTexture(quant, yLambdaScale, uvLambdaScale, textureStrength),
+		rdYLambdaScale:    yLambdaScale,
+		rdUVLambdaScale:   uvLambdaScale,
+		tryY4:             true,
+		trySkip:           true,
+		updateTokenProb:   true,
+		bufferResiduals:   true,
+		materializeSource: highQualitySearch,
+		maxSegments:       4,
+		textureStrength:   textureStrength,
+		rdPasses:          1,
+		sharpYUV:          highQualitySearch,
+		parallelAlpha:     true,
 	}
 	if mode == ModeBestCompression {
 		cfg.tryY4 = true
 		cfg.materializeSource = true
-		cfg.maxSegments = 2
+		cfg.maxSegments = 4
 		cfg.rdPasses = 2
 		cfg.trellis = true
 		cfg.dcDiffusion = false
@@ -1984,6 +2016,7 @@ func vp8LossyConfigForQIndex(mode Mode, qIndex int) vp8LossyConfig {
 		cfg.parallelAlpha = false
 	}
 	if mode == ModeLowMemory {
+		cfg.tryY4 = false
 		cfg.bufferResiduals = false
 		cfg.materializeSource = false
 		cfg.maxSegments = 1
@@ -2581,6 +2614,7 @@ type vp8Quant struct {
 	y2AC   int
 	uvDC   int
 	uvAC   int
+	bias   vp8QuantBias
 
 	trellisProbs *vp8TokenProbs
 	dcDiffusion  *vp8DCDiffusion
@@ -2656,6 +2690,10 @@ func vp8QuantForIndex(qIndex int) vp8Quant {
 }
 
 func vp8QuantForIndexDeltas(qIndex int, deltas vp8QuantDeltas) vp8Quant {
+	return vp8QuantForIndexDeltasBias(qIndex, deltas, vp8NeutralQuantBias())
+}
+
+func vp8QuantForIndexDeltasBias(qIndex int, deltas vp8QuantDeltas, bias vp8QuantBias) vp8Quant {
 	qIndex = clipInt(qIndex, 0, 127)
 	y1DCIndex := clipInt(qIndex+deltas.y1DC, 0, 127)
 	y2DCIndex := clipInt(qIndex+deltas.y2DC, 0, 127)
@@ -2670,6 +2708,7 @@ func vp8QuantForIndexDeltas(qIndex int, deltas vp8QuantDeltas) vp8Quant {
 		y2AC:   vp8AC2QuantTable[y2ACIndex],
 		uvDC:   vp8DCQuantTable[uvDCIndex],
 		uvAC:   vp8ACQuantTable[uvACIndex],
+		bias:   bias,
 	}
 }
 
@@ -2685,14 +2724,26 @@ func qualityToVP8QIndex(quality int) int {
 }
 
 type vp8RDConfig struct {
-	yLambda  int64
-	uvLambda int64
+	yLambda       int64
+	uvLambda      int64
+	textureLambda int64
 }
 
 func newVP8RDConfig(quant vp8Quant) vp8RDConfig {
+	return newVP8RDConfigScaled(quant, 256, 256)
+}
+
+func newVP8RDConfigScaled(quant vp8Quant, yScale int, uvScale int) vp8RDConfig {
+	return newVP8RDConfigScaledTexture(quant, yScale, uvScale, 0)
+}
+
+func newVP8RDConfigScaledTexture(quant vp8Quant, yScale int, uvScale int, textureStrength int) vp8RDConfig {
+	yScale = maxInt(yScale, 1)
+	uvScale = maxInt(uvScale, 1)
 	return vp8RDConfig{
-		yLambda:  vp8RDLambda(quant.y1AC),
-		uvLambda: vp8RDLambda(quant.uvAC),
+		yLambda:       max(vp8RDLambda(quant.y1AC)*int64(yScale)/256, 1),
+		uvLambda:      max(vp8RDLambda(quant.uvAC)*int64(uvScale)/256, 1),
+		textureLambda: int64(max(textureStrength, 0) * quant.y1AC >> 5),
 	}
 }
 
@@ -3168,7 +3219,7 @@ func chooseVP8Y4ModeWithProbs(target *[16]uint8, x int, y int, recY []uint8, str
 		residual := lumaResidualBlockFromTarget(target, pred)
 		coeff := quant.quantizeY1(residual, vp8PlaneY1SansY2, context)
 		recon := reconstructVP8Block(pred, coeff, quant.y1DC, quant.y1AC)
-		distortion := scoreLuma4FromTarget(target, recon)
+		distortion := rd.lumaDistortion(target, recon)
 		blockBitCost, blockNZ := vp8BlockBitCostAndNonZeroWithProbsPtr(tokenProbs, vp8PlaneY1SansY2, context, &coeff)
 		bitCost := vp8Y4ModeCost(topPred, leftPred, mode) + blockBitCost
 		score := rd.lumaScore(distortion, bitCost)
@@ -3314,7 +3365,7 @@ func scoreLuma16RD(target *lumaTargetBlocks, mbx int, mby int, recY []uint8, str
 			reconCoeff := dequantizeVP8Block(coeff, 0, quant.y1AC)
 			reconCoeff[0] = y2Recon[index]
 			recon := inverseDCT4(pred16[index], reconCoeff)
-			distortion += scoreLuma4FromTarget(&(*target)[index], recon)
+			distortion += rd.lumaDistortion(&(*target)[index], recon)
 			if blockNZ {
 				nz = 1
 				localUp[bx] = 1
@@ -4396,10 +4447,14 @@ func quantizeVP8Block(residual [16]int, dcQ int, acQ int) vp8QuantizedBlock {
 }
 
 func quantizeTransformedVP8Block(transformed [16]int, dcQ int, acQ int) vp8QuantizedBlock {
+	return quantizeTransformedVP8BlockBiased(transformed, dcQ, acQ, 128, 128)
+}
+
+func quantizeTransformedVP8BlockBiased(transformed [16]int, dcQ int, acQ int, dcBias int, acBias int) vp8QuantizedBlock {
 	var coeff vp8QuantizedBlock
-	coeff[0] = quantizeTransformCoeff(transformed[0], dcQ)
+	coeff[0] = quantizeTransformCoeffBiased(transformed[0], dcQ, dcBias)
 	for i := 1; i < 16; i++ {
-		coeff[i] = quantizeTransformCoeff(transformed[i], acQ)
+		coeff[i] = quantizeTransformCoeffBiased(transformed[i], acQ, acBias)
 	}
 	return coeff
 }
@@ -4444,6 +4499,10 @@ func forwardDCT4(residual [16]int) [16]int {
 }
 
 func quantizeTransformCoeff(v int, q int) int16 {
+	return quantizeTransformCoeffBiased(v, q, 128)
+}
+
+func quantizeTransformCoeffBiased(v int, q int, bias int) int16 {
 	if q <= 0 {
 		return 0
 	}
@@ -4452,7 +4511,9 @@ func quantizeTransformCoeff(v int, q int) int16 {
 		sign = -1
 		v = -v
 	}
-	return int16(sign * clipInt((v+q/2)/q, 0, 2047))
+	bias = clipInt(bias, 0, 255)
+	level := (v*256 + q*bias) / (q * 256)
+	return int16(sign * clipInt(level, 0, 2047))
 }
 
 func forwardWHT4(in [16]int) [16]int {

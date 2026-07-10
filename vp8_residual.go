@@ -124,18 +124,35 @@ func (b *vp8ResidualBuffer) candidateSkipMapInto(enabled bool, skipMap []bool) [
 	return skipMap
 }
 
-func (b *vp8ResidualBuffer) shouldUseSkipMap(skipMap []bool, probs *vp8TokenProbs) bool {
-	if skipMap == nil || len(skipMap) != len(b.macroblocks) {
-		return false
+func (b *vp8ResidualBuffer) chooseEntropyPlan(updateTokenProbs bool, candidateSkipMap []bool) (vp8TokenProbs, []bool) {
+	noSkipStats := b.tokenStats(nil)
+	noSkipProbs := chooseVP8TokenProbsConfig(&noSkipStats, updateTokenProbs)
+	bestCost := b.entropyPlanBitCost(&noSkipProbs, nil)
+	bestProbs := noSkipProbs
+	var bestSkipMap []bool
+
+	if candidateSkipMap != nil {
+		skipStats := b.tokenStats(candidateSkipMap)
+		skipProbs := chooseVP8TokenProbsConfig(&skipStats, updateTokenProbs)
+		if cost := b.entropyPlanBitCost(&skipProbs, candidateSkipMap); cost < bestCost {
+			bestProbs = skipProbs
+			bestSkipMap = candidateSkipMap
+		}
+	}
+	return bestProbs, bestSkipMap
+}
+
+func (b *vp8ResidualBuffer) entropyPlanBitCost(probs *vp8TokenProbs, skipMap []bool) int64 {
+	cost := vp8TokenProbUpdateBitCost(probs) + b.tokenBitCost(probs, skipMap)
+	if skipMap == nil {
+		return cost + 256
 	}
 	skipProb := vp8SkipProbability(skipMap)
-	noSkipCost := int64(256) + b.tokenBitCost(probs, nil)
-	withSkipCost := int64(9 * 256)
+	cost += 9 * 256
 	for _, skipped := range skipMap {
-		withSkipCost += vp8BitCost(skipProb, skipped)
+		cost += vp8BitCost(skipProb, skipped)
 	}
-	withSkipCost += b.tokenBitCost(probs, skipMap)
-	return withSkipCost < noSkipCost
+	return cost
 }
 
 func (b *vp8ResidualBuffer) tokenBitCost(probs *vp8TokenProbs, skipMap []bool) int64 {

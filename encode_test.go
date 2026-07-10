@@ -4482,7 +4482,7 @@ func TestVP8LossyConfigForModeQuality(t *testing.T) {
 	if fast.quantDeltas != wantDeltas {
 		t.Fatalf("ModeFast quantizer deltas = %+v, want %+v", fast.quantDeltas, wantDeltas)
 	}
-	if want := vp8QuantForIndexDeltas(fast.qIndex, fast.quantDeltas); fast.quant != want {
+	if want := vp8QuantForIndexDeltasBias(fast.qIndex, fast.quantDeltas, fast.quantBias); fast.quant != want {
 		t.Fatalf("ModeFast quantizer = %+v, want header-derived %+v", fast.quant, want)
 	}
 	if fast.tryY4 {
@@ -4503,10 +4503,13 @@ func TestVP8LossyConfigForModeQuality(t *testing.T) {
 	if fast.maxSegments != 1 {
 		t.Fatalf("ModeFast max segments = %d, want 1", fast.maxSegments)
 	}
+	if fast.quantBias != vp8ConservativeQuantBias() || fast.rdYLambdaScale != 256 || fast.rdUVLambdaScale != 256 {
+		t.Fatalf("ModeFast quant/RD profile = %#v/%d/%d", fast.quantBias, fast.rdYLambdaScale, fast.rdUVLambdaScale)
+	}
 
 	lossyQuality := vp8LossyConfigForModeQuality(ModeLossyQuality, 75)
-	if lossyQuality.tryY4 {
-		t.Fatal("ModeLossyQuality enabled Y4 mode search")
+	if !lossyQuality.tryY4 {
+		t.Fatal("ModeLossyQuality disabled Y4 mode search")
 	}
 	if !lossyQuality.updateTokenProb {
 		t.Fatal("ModeLossyQuality disabled token probability updates")
@@ -4514,8 +4517,8 @@ func TestVP8LossyConfigForModeQuality(t *testing.T) {
 	if !lossyQuality.bufferResiduals {
 		t.Fatal("ModeLossyQuality disabled residual buffering")
 	}
-	if lossyQuality.maxSegments != 2 {
-		t.Fatalf("ModeLossyQuality max segments = %d, want 2", lossyQuality.maxSegments)
+	if lossyQuality.maxSegments != 4 || lossyQuality.segmentStrength != 0 {
+		t.Fatalf("ModeLossyQuality segmentation = %d/%d, want 4/adaptive", lossyQuality.maxSegments, lossyQuality.segmentStrength)
 	}
 	if lossyQuality.rdPasses != 1 {
 		t.Fatalf("ModeLossyQuality RD passes = %d, want 1", lossyQuality.rdPasses)
@@ -4533,8 +4536,8 @@ func TestVP8LossyConfigForModeQuality(t *testing.T) {
 	if !best.materializeSource {
 		t.Fatal("ModeBestCompression disabled the reusable YUV source plane")
 	}
-	if best.maxSegments != 2 {
-		t.Fatalf("ModeBestCompression max segments = %d, want 2", best.maxSegments)
+	if best.maxSegments != 4 || best.segmentStrength != 0 {
+		t.Fatalf("ModeBestCompression segmentation = %d/%d, want 4/adaptive", best.maxSegments, best.segmentStrength)
 	}
 	if best.rdPasses != 2 {
 		t.Fatalf("ModeBestCompression RD passes = %d, want 2", best.rdPasses)
@@ -4551,7 +4554,10 @@ func TestVP8LossyConfigForModeQuality(t *testing.T) {
 	if !best.parallelAlpha {
 		t.Fatal("ModeBestCompression disabled parallel alpha analysis")
 	}
-	if lowMemory := vp8LossyConfigForModeQuality(ModeLowMemory, 75); lowMemory.bufferResiduals || lowMemory.materializeSource || lowMemory.maxSegments != 1 {
+	if best.quantBias != vp8ConservativeQuantBias() || best.rdYLambdaScale != 256 || best.rdUVLambdaScale != 256 {
+		t.Fatalf("ModeBestCompression quant/RD profile = %#v/%d/%d", best.quantBias, best.rdYLambdaScale, best.rdUVLambdaScale)
+	}
+	if lowMemory := vp8LossyConfigForModeQuality(ModeLowMemory, 75); lowMemory.tryY4 || lowMemory.bufferResiduals || lowMemory.materializeSource || lowMemory.maxSegments != 1 {
 		t.Fatal("ModeLowMemory enabled buffered source or residual state")
 	}
 	if low := vp8LossyConfigForModeQuality(ModeLossyQuality, 10); low.rd.yLambda <= lossyQuality.rd.yLambda {
@@ -6041,9 +6047,9 @@ func TestVP8ResidualBufferChoosesSkipFromTokenCost(t *testing.T) {
 		}
 		withZeroTokens.finishMacroblock(false)
 	}
-	probs := vp8DefaultTokenProbs
 	skipMap := withZeroTokens.candidateSkipMap(true)
-	if !withZeroTokens.shouldUseSkipMap(skipMap, &probs) {
+	_, selectedSkipMap := withZeroTokens.chooseEntropyPlan(true, skipMap)
+	if selectedSkipMap == nil {
 		t.Fatal("zero residual token savings did not pay for the skip syntax")
 	}
 
@@ -6052,11 +6058,35 @@ func TestVP8ResidualBufferChoosesSkipFromTokenCost(t *testing.T) {
 		withoutTokens.finishMacroblock(false)
 	}
 	skipMap = withoutTokens.candidateSkipMap(true)
-	if withoutTokens.shouldUseSkipMap(skipMap, &probs) {
+	_, selectedSkipMap = withoutTokens.chooseEntropyPlan(true, skipMap)
+	if selectedSkipMap != nil {
 		t.Fatal("skip syntax was selected without residual token savings")
 	}
 	if got := withoutTokens.candidateSkipMap(false); got != nil {
 		t.Fatal("disabled skip analysis returned a map")
+	}
+}
+
+func TestVP8ResidualBufferChoosesJointSkipAndProbabilityPlan(t *testing.T) {
+	buffer := newVP8ResidualBuffer(8)
+	for macroblock := 0; macroblock < 8; macroblock++ {
+		for block := 0; block < vp8ResidualBlocksPerMacroblock; block++ {
+			coeff := vp8QuantizedBlock{}
+			if macroblock >= 4 {
+				coeff[0] = int16(1 + block%2)
+			}
+			buffer.appendBlock(vp8PlaneY1SansY2, 0, coeff, 0)
+		}
+		buffer.finishMacroblock(macroblock >= 4)
+	}
+	candidate := buffer.candidateSkipMap(true)
+	probs, skipMap := buffer.chooseEntropyPlan(true, candidate)
+	noSkipStats := buffer.tokenStats(nil)
+	noSkipProbs := chooseVP8TokenProbsConfig(&noSkipStats, true)
+	noSkipCost := buffer.entropyPlanBitCost(&noSkipProbs, nil)
+	selectedCost := buffer.entropyPlanBitCost(&probs, skipMap)
+	if selectedCost > noSkipCost {
+		t.Fatalf("selected entropy plan cost = %d, want <= no-skip cost %d", selectedCost, noSkipCost)
 	}
 }
 

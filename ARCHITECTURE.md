@@ -49,7 +49,9 @@ The lossy path converts the shared source into a `vp8Source`. Analysis produces
 a `vp8FramePlan` containing macroblock prediction modes, skip decisions, token
 probabilities, and an optional reusable residual buffer. Partition emission
 then consumes that plan to write the first partition and residual partition
-before assembling the VP8 key frame.
+before assembling the VP8 key frame. Buffered profiles evaluate skip and
+no-skip plans with independently optimized token probabilities and retain the
+lower estimated total bit cost.
 
 Alpha is analyzed separately and, when needed, is written in an extended WebP
 container alongside the VP8 frame. Opaque standard image types skip alpha

@@ -63,7 +63,6 @@ func makeVP8Segmentation(readLuma lumaReader, bounds image.Rectangle, mbw int, m
 	if cfg.maxSegments < 2 || macroblocks < vp8SegmentationMinMacroblocks || cfg.qIndex <= 1 || cfg.qIndex >= 127 {
 		return vp8Segmentation{}
 	}
-
 	activities := make([]uint32, macroblocks)
 	for mby := 0; mby < mbh; mby++ {
 		for mbx := 0; mbx < mbw; mbx++ {
@@ -158,7 +157,11 @@ func vp8MacroblockActivity(readLuma lumaReader, bounds image.Rectangle, mbx int,
 }
 
 func (s *vp8Segmentation) configureSegments(cfg vp8LossyConfig) {
-	strength := clipInt((cfg.qIndex+15)/16, 1, 6)
+	strength := cfg.segmentStrength
+	if strength <= 0 {
+		strength = min((cfg.qIndex+7)/8, 4)
+	}
+	strength = clipInt(strength, 1, 32)
 	offsets := [vp8SegmentCount]int{}
 	switch s.count {
 	case 2:
@@ -169,11 +172,11 @@ func (s *vp8Segmentation) configureSegments(cfg vp8LossyConfig) {
 		offsets = [vp8SegmentCount]int{-2 * strength, -strength, strength, 2 * strength}
 	}
 	for i := 0; i < s.count; i++ {
-		quant := vp8QuantForIndexDeltas(clipInt(cfg.qIndex+offsets[i], 0, 127), cfg.quantDeltas)
+		quant := vp8QuantForIndexDeltasBias(clipInt(cfg.qIndex+offsets[i], 0, 127), cfg.quantDeltas, cfg.quantBias)
 		s.segments[i] = vp8SegmentConfig{
 			quant:       quant,
 			filterLevel: vp8LoopFilterForQuant(quant).level,
-			rd:          newVP8RDConfig(quant),
+			rd:          newVP8RDConfigScaledTexture(quant, cfg.rdYLambdaScale, cfg.rdUVLambdaScale, cfg.textureStrength),
 		}
 	}
 }

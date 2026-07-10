@@ -111,12 +111,13 @@ func (enc *Encoder) Encode(w io.Writer, m image.Image) error
 - `ModeBestCompression` は独立したlossless transform候補を最大4 workersで解析できます。標準画像型は直接読み、custom画像型は32 MiBを上限とするpixel planeを使い、上限を超える場合は逐次解析へ戻ります
 - 標準画像型ではlossy VP8 frame planningと `ALPH` 解析を2 workersで実行できます。`ModeFast`、`ModeLowMemory`、小画像、custom画像型、single-thread runtimeでは逐次経路を使います
 - lossy encodingでは標準画像型のopacity判定を使い、完全にopaqueな入力では `ALPH` 候補解析を省きます。custom画像型は従来のpixel解析経路を使います
-- lossy VP8出力では、`ModeFast` は指定されたquality mappingを維持しつつ、macroblock skip signalingとtoken probability update探索を無効化します。`ModeBestCompression` は追加でluma4x4 mode探索、2回目のrate-distortion pass、trellis quantization、上限付きsharp-chroma探索を有効化します
+- lossy VP8出力では、`ModeFast` は指定されたquality mappingを維持しつつ、luma4x4 mode探索、macroblock skip signaling、token probability update探索を無効化します。`ModeLowMemory` もluma4x4 mode探索を省きます。`ModeBestCompression` は2回目のrate-distortion pass、trellis quantization、上限付きsharp-chroma探索を有効化します
 - skipまたはtoken probability解析を使うlossy profileでは、選択済みの量子化residualを保持し、統計と最終符号化で再利用することでmacroblockのDCTと再構築の反復を削減します
 - このbufferは推定32 MiBを上限とし、`ModeFast`、`ModeLowMemory`、上限を超える画像ではbufferを使わない反復passへ戻ります
 - VP8 mode pass間ではreconstruction、top-row context、skip map、residual workspaceを1回のencode内で再利用します
 - `ModeLowMemory` はsource plane、VP8 residual buffer、VP8L token stream、meta-prefix plan、color-cache planを保持しません
-- lossy encodingは4:2:0 chroma subsampling、adaptive chroma downsampling、選択されたintra16x16とchroma prediction mode、`ModeBestCompression` で使う任意のluma4x4 mode、量子化されたDC/AC係数を使う低複雑度VP8 key frame encoderです
+- lossy encodingは4:2:0 chroma subsampling、adaptive chroma downsampling、選択されたintra16x16、chroma、任意のluma4x4 prediction mode、量子化されたDC/AC係数を使う低複雑度VP8 key frame encoderです
+- Default系のlossy profileはluma4x4 modeを探索し、最大4個のactivity適応quantizer segmentを使用できます。quality依存のquantization biasとrate-distortion weightを使い、中品質では上限付きspectral texture項、高品質では上限付きsharp-chroma探索を適用します
 - 出力サイズ削減が見込める場合はresidual token probability updateを書き込み、qualityに応じたsharpnessとluma4x4 macroblock向けmode deltaを持つnormal VP8 loop filterを有効化します
 - lossy `Quality` は現時点では非線形mappingでVP8 base quantizerを制御し、quality依存のY2/UV quantizationとloop filter設定を使います
 - activity-based segmentationとrate-distortion mode decisionを使います
@@ -174,7 +175,7 @@ go run ./scripts/compare_lossy_libwebp -runs 3 -go-mode default -json report.jso
 ```
 
 lossy比較には `cwebp` と `dwebp` が必要です
-JSON reportにはquality sweep、decode後のRGB/YUVとalpha指標、7x7 weighted Y SSIM、encode時間、出力sizeとY SSIM dBが最も近いcwebp sampleを記録します
+JSON reportにはquality sweep、decode後のRGB/YUVとalpha指標、7x7 weighted Y SSIM、encode時間、VP8 partition size、出力sizeとY SSIM dBが最も近いcwebp sampleを記録します
 `-corpus`と`-split`で非公開のlocal corpusを選択でき、元ファイル名とpathはreportへ記録しません
 go-webpの時間はprocess内の `Encode` 呼び出し、cwebpの時間はprocess起動、PNG decode、出力書き込みも含みます
 

@@ -950,3 +950,24 @@ func vp8TokenProbLiteralCost(prob uint8) int64 {
 	}
 	return cost
 }
+
+func vp8TokenProbUpdateBitCost(probs *vp8TokenProbs) int64 {
+	if probs == nil {
+		probs = &vp8DefaultTokenProbs
+	}
+	var cost int64
+	for plane := range vp8TokenProbUpdateProb {
+		for band := range vp8TokenProbUpdateProb[plane] {
+			for context := range vp8TokenProbUpdateProb[plane][band] {
+				for node, updateProb := range vp8TokenProbUpdateProb[plane][band][context] {
+					changed := (*probs)[plane][band][context][node] != vp8DefaultTokenProbs[plane][band][context][node]
+					cost += vp8BitCost(updateProb, changed)
+					if changed {
+						cost += 8 * 256
+					}
+				}
+			}
+		}
+	}
+	return cost
+}

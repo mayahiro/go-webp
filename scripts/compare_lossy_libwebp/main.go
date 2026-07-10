@@ -91,7 +91,7 @@ func run() error {
 	}
 
 	report := comparisonReport{
-		SchemaVersion: 2,
+		SchemaVersion: 3,
 		Configuration: reportConfiguration{
 			Runs:               *runs,
 			Qualities:          qualities,
