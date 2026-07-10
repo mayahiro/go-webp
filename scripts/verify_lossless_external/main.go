@@ -290,6 +290,7 @@ func fixtures() []fixture {
 	return []fixture{
 		{name: "flat", img: flatFixture()},
 		{name: "gradient", img: gradientFixture()},
+		{name: "gray-gradient-256", img: grayGradient256Fixture()},
 		{name: "rgba-offset", img: rgbaOffsetFixture()},
 		{name: "gray-offset", img: grayOffsetFixture()},
 		{name: "predictor-lz77", img: predictorLZ77Fixture()},
@@ -407,6 +408,26 @@ func gradientFixture() *image.NRGBA {
 		}
 	})
 	return img
+}
+
+func grayGradient256Fixture() *image.Gray {
+	img := image.NewGray(image.Rect(0, 0, 256, 256))
+	for y := 0; y < img.Rect.Dy(); y++ {
+		for x := 0; x < img.Rect.Dx(); x++ {
+			r := uint8(x*3 + y)
+			g := uint8(y*5 + x/2)
+			b := uint8((x+y)*2 + x*y/17)
+			img.SetGray(x, y, color.Gray{Y: fixtureLuma(r, g, b)})
+		}
+	}
+	return img
+}
+
+func fixtureLuma(r uint8, g uint8, b uint8) uint8 {
+	r1 := int32(r)
+	g1 := int32(g)
+	b1 := int32(b)
+	return uint8((19595*r1 + 38470*g1 + 7471*b1 + 1<<15) >> 16)
 }
 
 func rgbaOffsetFixture() *image.RGBA {

@@ -99,6 +99,7 @@ func (enc *Encoder) Encode(w io.Writer, m image.Image) error
 - 固定幅の複数候補hash match finderと1手先のlazy matchingによる単純なVP8L LZ77 backwards referencesも使えます
 - sampleとbit costの推定で有利と判断した場合、literal stream向けの限定的なVP8L color cacheも使えます。transformなしのstreamでは、固定幅LZ77とcolor cacheの併用もできます
 - predictorやcolor transform後の一部residual streamでも、条件付きでLZ77とcolor cacheを併用できます
+- `ModeBestCompression` では、領域ごとのentropy差に対応するため、上限付きのtoken主導meta-prefix histogram grouping候補を1つ追加比較します
 - 制限なしのhash chainは使わないため、高度に最適化されたWebP encoderよりlossless出力が大きくなることがあります
 - `ModeFast` と `ModeLowMemory` は意図的にlossless探索を減らすため、VP8L出力が大きくなる場合があります
 - Balanced profileはlow-color画像でcolor indexingが明確に有利な場合にtransform探索を早期終了し、`ModeBestCompression` は全transform探索を維持します
@@ -106,6 +107,8 @@ func (enc *Encoder) Encode(w io.Writer, m image.Image) error
 - alpha付きlossy画像では、`ModeFast` は `ALPH` 探索をunfiltered alphaとrun符号化に限定し、`ModeLowMemory` はfilter探索を維持しつつ前行空間参照候補を省きます
 - lossy encodingでは標準画像型のopacity判定を使い、完全にopaqueな入力では `ALPH` 候補解析を省きます。custom画像型は従来のpixel解析経路を使います
 - lossy VP8出力では、`ModeFast` は指定されたquality mappingを維持しつつ、macroblock skip signalingとtoken probability update探索を無効化します。`ModeBestCompression` は追加でluma4x4 mode探索を有効化します
+- skipまたはtoken probability解析を使うlossy profileでは、選択済みの量子化residualを保持し、統計と最終符号化で再利用することでmacroblockのDCTと再構築の反復を削減します
+- このbufferは推定32 MiBを上限とし、`ModeFast`、`ModeLowMemory`、上限を超える画像ではbufferを使わない反復passへ戻ります
 - lossy encodingは4:2:0 chroma subsampling、adaptive chroma downsampling、選択されたintra16x16とchroma prediction mode、`ModeBestCompression` で使う任意のluma4x4 mode、量子化されたDC/AC係数を使う低複雑度VP8 key frame encoderです
 - 出力サイズ削減が見込める場合はresidual token probability updateを書き込み、qualityに応じたsharpnessとluma4x4 macroblock向けmode deltaを持つnormal VP8 loop filterを有効化します
 - lossy `Quality` は現時点では非線形mappingでVP8 base quantizerを制御し、quality依存のY2/UV quantizationとloop filter設定を使います

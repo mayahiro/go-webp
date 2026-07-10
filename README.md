@@ -112,8 +112,10 @@ room for future options.
   limited VP8L color cache path for literal streams when a sample and bit-cost
   estimate indicate that it should help, including bounded LZ77 plus color
   cache paths for untransformed streams and selected predictor or color
-  transform residual streams. It does not use unbounded hash chains, so
-  lossless output can be larger than highly optimized WebP encoders.
+  transform residual streams. `ModeBestCompression` also compares one bounded,
+  token-driven meta-prefix histogram grouping candidate for coarse regional
+  entropy differences. It does not use unbounded hash chains, so lossless
+  output can be larger than highly optimized WebP encoders.
 - `ModeFast` and `ModeLowMemory` intentionally reduce lossless search work and
   may produce larger VP8L files. Balanced profiles can stop transform search
   early when color indexing is clearly better on a low-color image, while
@@ -130,6 +132,11 @@ room for future options.
 - For lossy VP8 output, `ModeFast` keeps the requested quality mapping but
   disables macroblock skip signaling and token probability update search.
   `ModeBestCompression` additionally enables luma4x4 mode search.
+- Lossy profiles that use skip or token probability analysis can retain the
+  selected quantized residuals and reuse them for statistics and final coding,
+  instead of repeating the macroblock DCT and reconstruction passes. This
+  buffer is limited to an estimated 32 MiB. `ModeFast`, `ModeLowMemory`, and
+  images above the limit use the repeated-pass path without this buffer.
 - Lossy encoding uses a low-complexity VP8 key frame encoder with 4:2:0 chroma
   subsampling, adaptive chroma downsampling, selected intra16x16 and chroma
   prediction modes, optional luma4x4 modes in `ModeBestCompression`, and

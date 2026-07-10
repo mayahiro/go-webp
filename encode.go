@@ -70,7 +70,7 @@ const (
 	// ModeBestCompression keeps more compression candidates available, including
 	// exhaustive color-indexing checks that default mode may skip with early exits.
 	ModeBestCompression
-	// ModeLowMemory avoids lossless candidates that need token or entropy-image buffers.
+	// ModeLowMemory avoids buffered lossless candidates and lossy residual buffering.
 	ModeLowMemory
 	// ModeNearLossless writes VP8L with alpha preserved and RGB quantized according
 	// to Quality. Quality 100, or an omitted Quality, is equivalent to lossless.
@@ -343,6 +343,7 @@ type vp8lEncodingConfig struct {
 	tryColorCache                   bool
 	tryLZ77ColorCache               bool
 	tryLZ77MetaPrefix               bool
+	tryLZ77TokenMetaPrefix          bool
 	tryTransformedLZ77ColorCache    bool
 	tryBlockPredictor               bool
 	minColorIndexEarlyExitPixels    int
@@ -701,6 +702,7 @@ func vp8lEncodingConfigForMode(mode Mode, m image.Image, readPixel pixelReader, 
 		cfg.colorTransformCandidates = vp8lBestCompressionColorTransformCandidates[:]
 		cfg.tryBlockPredictor = true
 		cfg.prioritizeColorIndexCandidate = true
+		cfg.tryLZ77TokenMetaPrefix = true
 		cfg.maxMetaPrefixLZ77Tokens = vp8lBestCompressionMaxMetaPrefixLZ77Tokens
 		cfg.maxTransformedLZ77CacheTokens = vp8lBestCompressionMaxTransformedLZ77CacheTokens
 	case ModeLowMemory:
@@ -2523,6 +2525,34 @@ func makeVP8LMetaPrefixLZ77Plan(readPixel pixelReader, bounds image.Rectangle, w
 	return best, found
 }
 
+func makeVP8LTokenMetaPrefixLZ77Plan(readPixel pixelReader, bounds image.Rectangle, width int, height int, base vp8lEncodingPlan, tokens []vp8lToken, maxBits uint64, maxTokens int) (vp8lEncodingPlan, bool) {
+	if !base.lz77 || base.colorCache != nil || base.colorIndexing || len(tokens) == 0 || len(tokens) > maxTokens {
+		return vp8lEncodingPlan{}, false
+	}
+	prefixBits, ok := vp8lTokenMetaPrefixCandidateBits(width, height)
+	if !ok {
+		return vp8lEncodingPlan{}, false
+	}
+	candidate, ok := makeVP8LTokenMetaPrefixLZ77PlanForBits(readPixel, bounds, width, height, base, tokens, prefixBits)
+	if !ok || vp8lPayloadBits(width, height, candidate) >= maxBits {
+		return vp8lEncodingPlan{}, false
+	}
+	return candidate, true
+}
+
+func vp8lTokenMetaPrefixCandidateBits(width int, height int) (uint8, bool) {
+	for prefixBits := uint8(vp8lMaxMetaPrefixBits); ; prefixBits-- {
+		prefixWidth, prefixHeight := vp8lMetaPrefixImageDimensions(width, height, prefixBits)
+		prefixBlocks := prefixWidth * prefixHeight
+		if prefixBlocks >= 2 && prefixBlocks <= vp8lMaxMetaPrefixBlocks {
+			return prefixBits, true
+		}
+		if prefixBits == vp8lMinMetaPrefixCandidateBits {
+			return 0, false
+		}
+	}
+}
+
 func makeVP8LMetaPrefixColorCachePlan(readPixel pixelReader, bounds image.Rectangle, width int, height int, base vp8lEncodingPlan, tokens []vp8lToken, maxBits uint64) (vp8lEncodingPlan, bool) {
 	if base.colorCache == nil || base.lz77 || base.colorIndexing || len(tokens) == 0 || len(tokens) > vp8lMaxMetaPrefixColorCacheTokens {
 		return vp8lEncodingPlan{}, false
@@ -2693,6 +2723,23 @@ func makeVP8LMetaPrefixLZ77PlanForBits(readPixel pixelReader, bounds image.Recta
 	candidate.lz77Tokens = tokens
 	candidate.metaPrefix.lz77Groups = lz77Groups
 	candidate.metaPrefix.groupTokens = groupTokens
+	return candidate, true
+}
+
+func makeVP8LTokenMetaPrefixLZ77PlanForBits(readPixel pixelReader, bounds image.Rectangle, width int, height int, base vp8lEncodingPlan, tokens []vp8lToken, prefixBits uint8) (vp8lEncodingPlan, bool) {
+	tokens, ok := vp8lSplitLZ77TokensAtMetaPrefixBoundaries(readPixel, bounds, &vp8lMetaPrefixPlan{
+		prefixBits: prefixBits,
+	}, tokens, width, width*height)
+	if !ok {
+		return vp8lEncodingPlan{}, false
+	}
+	metaPrefix, ok := makeVP8LTokenMetaPrefixPlan(tokens, width, height, prefixBits, base.analysis)
+	if !ok {
+		return vp8lEncodingPlan{}, false
+	}
+	candidate := base
+	candidate.lz77Tokens = tokens
+	candidate.metaPrefix = metaPrefix
 	return candidate, true
 }
 
@@ -3159,6 +3206,13 @@ func makeVP8LLZ77PlanConfigCandidateCount(readPixel pixelReader, bounds image.Re
 	}
 	if cfg.tryLZ77MetaPrefix && lz77Bits < maxBits && tokenCount <= cfg.maxMetaPrefixLZ77Tokens {
 		if metaPrefixPlan, ok := makeVP8LMetaPrefixLZ77Plan(read, mainBounds, mainWidth, mainHeight, base, lz77Tokens, bestBits, cfg.maxMetaPrefixLZ77Tokens); ok {
+			best = metaPrefixPlan
+			bestBits = vp8lPayloadBits(width, height, best)
+			found = true
+		}
+	}
+	if cfg.tryLZ77TokenMetaPrefix && lz77Bits < maxBits && tokenCount <= cfg.maxMetaPrefixLZ77Tokens {
+		if metaPrefixPlan, ok := makeVP8LTokenMetaPrefixLZ77Plan(read, mainBounds, mainWidth, mainHeight, base, lz77Tokens, bestBits, cfg.maxMetaPrefixLZ77Tokens); ok {
 			best = metaPrefixPlan
 			bestBits = vp8lPayloadBits(width, height, best)
 			found = true

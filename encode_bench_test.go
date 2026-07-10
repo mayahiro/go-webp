@@ -496,6 +496,7 @@ func benchmarkEncodeLossyCase(b *testing.B, tc lossyBenchmarkCase) {
 	b.ReportMetric(uvPSNR, "uv_psnr_proxy")
 	b.ReportMetric(float64(workspace.recBytes), "rec_workspace_B")
 	b.ReportMetric(float64(workspace.modeBytes), "mode_workspace_B")
+	b.ReportMetric(float64(workspace.residualBytes), "residual_workspace_B")
 	b.ReportMetric(float64(workspace.partitionBytes), "partition_workspace_B")
 	b.ReportMetric(float64(workspace.totalBytes), "workspace_est_B")
 }
@@ -709,6 +710,7 @@ func (tc lossyBenchmarkCase) hasAlpha() bool {
 type lossyWorkspaceMetrics struct {
 	recBytes       int
 	modeBytes      int
+	residualBytes  int
 	partitionBytes int
 	totalBytes     int
 }
@@ -734,12 +736,17 @@ func estimateLossyWorkspaceForDimensions(width int, height int, quality int) los
 	qIndex := qualityToVP8QIndex(quality)
 	recBytes := yStride*mbh*16 + cStride*mbh*8*2
 	modeBytes := mbw * mbh * int(unsafe.Sizeof(vp8MBMode{}))
+	residualBytes := 0
+	if vp8ResidualBufferFits(mbw, mbh) {
+		residualBytes = mbw * mbh * (vp8ResidualBlocksPerMacroblock*int(unsafe.Sizeof(vp8ResidualBlock{})) + int(unsafe.Sizeof(vp8ResidualMacroblock{})))
+	}
 	partitionBytes := vp8FirstPartitionCapacity(mbw, mbh) + vp8ResidualPartitionCapacity(width, height, qIndex)
 	return lossyWorkspaceMetrics{
 		recBytes:       recBytes,
 		modeBytes:      modeBytes,
+		residualBytes:  residualBytes,
 		partitionBytes: partitionBytes,
-		totalBytes:     recBytes + modeBytes + partitionBytes,
+		totalBytes:     recBytes + modeBytes + residualBytes + partitionBytes,
 	}
 }
 

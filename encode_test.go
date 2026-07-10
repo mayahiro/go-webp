@@ -233,6 +233,12 @@ func TestVP8LEncodingConfigForMode(t *testing.T) {
 	if best.maxTransformedLZ77CacheTokens <= vp8lMaxTransformedLZ77CacheTokens {
 		t.Fatalf("ModeBestCompression max transformed LZ77 color cache tokens = %d, want > %d", best.maxTransformedLZ77CacheTokens, vp8lMaxTransformedLZ77CacheTokens)
 	}
+	if !best.tryLZ77TokenMetaPrefix {
+		t.Fatal("ModeBestCompression disabled token-driven meta-prefix search")
+	}
+	if vp8lDefaultEncodingConfig().tryLZ77TokenMetaPrefix || lowMemory.tryLZ77TokenMetaPrefix || fast.tryLZ77TokenMetaPrefix {
+		t.Fatal("token-driven meta-prefix search enabled outside ModeBestCompression")
+	}
 }
 
 func TestVP8LAutoLosslessModeClassifiesLargeLowColorImagesAsFast(t *testing.T) {
@@ -2841,6 +2847,156 @@ func TestEncodeLosslessUsesMetaPrefixWithLZ77(t *testing.T) {
 	}
 }
 
+func TestVP8LTokenMetaPrefixGroupCountsMatchTokens(t *testing.T) {
+	img := newMetaPrefixLZ77Fixture()
+	readPixel := pixelReaderFor(img)
+	bounds := img.Bounds()
+	analysis := analyzeImage(readPixel, bounds)
+	cfg := vp8lDefaultEncodingConfig()
+	cfg.tryColorCache = false
+	cfg.tryLZ77ColorCache = false
+	cfg.tryLZ77MetaPrefix = false
+	base, ok := makeVP8LLZ77PlanConfig(readPixel, bounds, bounds.Dx(), bounds.Dy(), vp8lEncodingPlan{analysis: analysis, alpha: analysis.alpha}, ^uint64(0), cfg)
+	if !ok || !base.lz77 || len(base.lz77Tokens) == 0 {
+		t.Fatal("fixture did not produce a base LZ77 plan")
+	}
+	plan, ok := makeVP8LTokenMetaPrefixLZ77Plan(readPixel, bounds, bounds.Dx(), bounds.Dy(), base, base.lz77Tokens, ^uint64(0), vp8lBestCompressionMaxMetaPrefixLZ77Tokens)
+	if !ok {
+		t.Fatal("token grouping did not produce a meta-prefix LZ77 plan")
+	}
+	if !plan.lz77 || plan.metaPrefix == nil || len(plan.lz77Tokens) == 0 {
+		t.Fatalf("plan = lz77:%v metaPrefix:%v tokens:%d, want token meta-prefix LZ77", plan.lz77, plan.metaPrefix != nil, len(plan.lz77Tokens))
+	}
+	metaPrefix := plan.metaPrefix
+	mainWidth, mainHeight := vp8lPlanImageDimensions(bounds.Dx(), bounds.Dy(), plan)
+	wantGreen := make([][nLiteralCodes + nLengthCodes]uint32, len(metaPrefix.lz77Groups))
+	wantDistance := make([][nDistanceCodes]uint32, len(metaPrefix.lz77Groups))
+	wantLiteral := make([]vp8lLiteralAnalysisObserver, len(metaPrefix.lz77Groups))
+	for i := range wantLiteral {
+		wantLiteral[i] = newVP8LLiteralAnalysisObserver(plan.analysis)
+	}
+	pos := 0
+	for _, token := range plan.lz77Tokens {
+		groupIndex := vp8lMetaPrefixGroupAt(metaPrefix, pos%mainWidth, pos/mainWidth)
+		if token.copyLength > 0 {
+			lengthPrefix := vp8lPrefixCode(token.copyLength)
+			distancePrefix := vp8lDistancePrefixCode(token.distanceCode)
+			wantGreen[groupIndex][nLiteralCodes+lengthPrefix.code]++
+			wantDistance[groupIndex][distancePrefix.code]++
+			pos += token.copyLength
+			continue
+		}
+		wantGreen[groupIndex][token.pixel.G]++
+		wantLiteral[groupIndex].observePixel(token.pixel)
+		pos++
+	}
+	if pos != mainWidth*mainHeight {
+		t.Fatalf("token position = %d, want %d", pos, mainWidth*mainHeight)
+	}
+	for i, group := range metaPrefix.lz77Groups {
+		if group.greenCounts != wantGreen[i] {
+			t.Fatalf("group=%d green counts do not match tokens", i)
+		}
+		if group.distanceCounts != wantDistance[i] {
+			t.Fatalf("group=%d distance counts do not match tokens", i)
+		}
+		if want := wantLiteral[i].result(); group.literalAnalysis != want {
+			t.Fatalf("group=%d literal analysis does not match tokens", i)
+		}
+	}
+}
+
+func TestVP8LTokenMetaPrefixCandidateBits(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		width  int
+		height int
+		want   uint8
+		ok     bool
+	}{
+		{name: "too-small", width: 16, height: 16},
+		{name: "horizontal", width: 64, height: 1, want: 5, ok: true},
+		{name: "regional", width: 256, height: 64, want: 7, ok: true},
+		{name: "maximum", width: maxVP8LDimension, height: maxVP8LDimension, want: vp8lMaxMetaPrefixBits, ok: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := vp8lTokenMetaPrefixCandidateBits(tc.width, tc.height)
+			if got != tc.want || ok != tc.ok {
+				t.Fatalf("vp8lTokenMetaPrefixCandidateBits(%d, %d) = (%d, %v), want (%d, %v)", tc.width, tc.height, got, ok, tc.want, tc.ok)
+			}
+		})
+	}
+}
+
+func TestVP8LTokenMetaPrefixGroupingMatchesOrImprovesLegacy(t *testing.T) {
+	img := newMetaPrefixLZ77Fixture()
+	readPixel := pixelReaderFor(img)
+	bounds := img.Bounds()
+	analysis := analyzeImage(readPixel, bounds)
+	cfg := vp8lDefaultEncodingConfig()
+	cfg.tryColorCache = false
+	cfg.tryLZ77ColorCache = false
+	cfg.tryLZ77MetaPrefix = false
+	base, ok := makeVP8LLZ77PlanConfig(readPixel, bounds, bounds.Dx(), bounds.Dy(), vp8lEncodingPlan{analysis: analysis, alpha: analysis.alpha}, ^uint64(0), cfg)
+	if !ok || !base.lz77 || len(base.lz77Tokens) == 0 {
+		t.Fatal("fixture did not produce a base LZ77 plan")
+	}
+	newPlan, ok := makeVP8LTokenMetaPrefixLZ77Plan(readPixel, bounds, bounds.Dx(), bounds.Dy(), base, base.lz77Tokens, ^uint64(0), vp8lBestCompressionMaxMetaPrefixLZ77Tokens)
+	if !ok {
+		t.Fatal("token grouping did not produce a meta-prefix LZ77 plan")
+	}
+	legacy, ok := makeVP8LMetaPrefixLZ77Plan(readPixel, bounds, bounds.Dx(), bounds.Dy(), base, base.lz77Tokens, ^uint64(0), vp8lBestCompressionMaxMetaPrefixLZ77Tokens)
+	if !ok {
+		t.Fatal("legacy grouping did not produce a meta-prefix LZ77 plan")
+	}
+	if got, wantMax := vp8lPayloadBits(bounds.Dx(), bounds.Dy(), newPlan), vp8lPayloadBits(bounds.Dx(), bounds.Dy(), legacy); got > wantMax {
+		t.Fatalf("token grouping bits = %d, want <= legacy bits %d", got, wantMax)
+	}
+}
+
+func TestVP8LTokenMetaPrefixUsesTokenLocality(t *testing.T) {
+	img := newTokenLocalityMetaPrefixFixture()
+	readPixel := pixelReaderFor(img)
+	bounds := img.Bounds()
+	analysis := analyzeImage(readPixel, bounds)
+	cfg := vp8lDefaultEncodingConfig()
+	cfg.tryColorCache = false
+	cfg.tryLZ77ColorCache = false
+	cfg.tryLZ77MetaPrefix = false
+	base, ok := makeVP8LLZ77PlanConfig(readPixel, bounds, bounds.Dx(), bounds.Dy(), vp8lEncodingPlan{analysis: analysis}, ^uint64(0), cfg)
+	if !ok || !base.lz77 || len(base.lz77Tokens) == 0 {
+		t.Fatal("fixture did not produce a base LZ77 plan")
+	}
+	plan, ok := makeVP8LTokenMetaPrefixLZ77Plan(readPixel, bounds, bounds.Dx(), bounds.Dy(), base, base.lz77Tokens, vp8lPayloadBits(bounds.Dx(), bounds.Dy(), base), vp8lBestCompressionMaxMetaPrefixLZ77Tokens)
+	if !ok || plan.metaPrefix == nil || len(plan.metaPrefix.lz77Groups) < 2 {
+		t.Fatal("token locality did not produce multiple LZ77 histogram groups")
+	}
+	if got, wantMax := vp8lPayloadBits(bounds.Dx(), bounds.Dy(), plan), vp8lPayloadBits(bounds.Dx(), bounds.Dy(), base); got >= wantMax {
+		t.Fatalf("token meta-prefix bits = %d, want less than base LZ77 bits %d", got, wantMax)
+	}
+	cfg.tryLZ77TokenMetaPrefix = true
+	configured, ok := makeVP8LLZ77PlanConfig(readPixel, bounds, bounds.Dx(), bounds.Dy(), vp8lEncodingPlan{analysis: analysis}, ^uint64(0), cfg)
+	if !ok || configured.metaPrefix == nil || len(configured.metaPrefix.lz77Groups) < 2 {
+		t.Fatal("configured token-driven search did not select multiple LZ77 histogram groups")
+	}
+	if got, wantMax := vp8lPayloadBits(bounds.Dx(), bounds.Dy(), configured), vp8lPayloadBits(bounds.Dx(), bounds.Dy(), base); got >= wantMax {
+		t.Fatalf("configured token meta-prefix bits = %d, want less than base LZ77 bits %d", got, wantMax)
+	}
+
+	data := encodeLosslessPlanForTest(t, img, plan)
+	got, width, height, _, err := decodeEncoderOutput(data)
+	if err != nil {
+		t.Fatalf("decodeEncoderOutput failed: %v", err)
+	}
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			if want := img.NRGBAAt(x, y); got[y*width+x] != want {
+				t.Fatalf("pixel (%d,%d) = %#v, want %#v", x, y, got[y*width+x], want)
+			}
+		}
+	}
+}
+
 func newMetaPrefixLZ77Fixture() *image.NRGBA {
 	img := image.NewNRGBA(image.Rect(0, 0, 64, 1))
 	for x := 0; x < 16; x++ {
@@ -2884,6 +3040,28 @@ func newMetaPrefixLocalEntropyFixture() *image.NRGBA {
 				B: uint8(v),
 				A: a,
 			})
+		}
+	}
+	return img
+}
+
+func newTokenLocalityMetaPrefixFixture() *image.NRGBA {
+	img := image.NewNRGBA(image.Rect(0, 0, 256, 64))
+	colors := [2]color.NRGBA{
+		{R: 24, G: 48, B: 72, A: 255},
+		{R: 216, G: 192, B: 168, A: 255},
+	}
+	for y := 0; y < img.Rect.Dy(); y++ {
+		for x := 0; x < img.Rect.Dx(); x++ {
+			index := 0
+			if x < 128 {
+				index = (x / 16) & 1
+			} else {
+				v := uint32(x-128)*747796405 + uint32(y)*2891336453 + uint32((x-128)*y)*3266489917
+				v ^= v >> 16
+				index = int(v & 1)
+			}
+			img.SetNRGBA(x, y, colors[index])
 		}
 	}
 	return img
@@ -3771,6 +3949,9 @@ func TestVP8LossyConfigForModeQuality(t *testing.T) {
 	if fast.updateTokenProb {
 		t.Fatal("ModeFast enabled token probability update search")
 	}
+	if fast.bufferResiduals {
+		t.Fatal("ModeFast enabled residual buffering without a reusable analysis pass")
+	}
 
 	lossyQuality := vp8LossyConfigForModeQuality(ModeLossyQuality, 75)
 	if lossyQuality.tryY4 {
@@ -3779,9 +3960,15 @@ func TestVP8LossyConfigForModeQuality(t *testing.T) {
 	if !lossyQuality.updateTokenProb {
 		t.Fatal("ModeLossyQuality disabled token probability updates")
 	}
+	if !lossyQuality.bufferResiduals {
+		t.Fatal("ModeLossyQuality disabled residual buffering")
+	}
 	best := vp8LossyConfigForModeQuality(ModeBestCompression, 75)
 	if !best.tryY4 {
 		t.Fatal("ModeBestCompression disabled Y4 mode search")
+	}
+	if lowMemory := vp8LossyConfigForModeQuality(ModeLowMemory, 75); lowMemory.bufferResiduals {
+		t.Fatal("ModeLowMemory enabled residual buffering")
 	}
 	if low := vp8LossyConfigForModeQuality(ModeLossyQuality, 10); low.rd.yLambda <= lossyQuality.rd.yLambda {
 		t.Fatalf("low quality luma lambda = %d, want greater than q75 lambda %d", low.rd.yLambda, lossyQuality.rd.yLambda)
@@ -4019,8 +4206,8 @@ func TestChromaTargetReuseMatchesFreshTarget(t *testing.T) {
 	reuseCr := append([]uint8(nil), recCr...)
 	freshLeft, freshUp = left, up
 	reuseLeft, reuseUp = left, up
-	processVP8ChromaMB(nil, readChroma, bounds, mbx, mby, freshCb, freshCr, stride, quant, mode, &freshLeft, &freshUp, nil, nil)
-	processVP8ChromaTargetMB(&target, nil, mbx, mby, reuseCb, reuseCr, stride, quant, mode, &reuseLeft, &reuseUp, nil, nil)
+	processVP8ChromaMB(readChroma, bounds, mbx, mby, freshCb, freshCr, stride, quant, mode, &freshLeft, &freshUp, nil)
+	processVP8ChromaTargetMB(&target, mbx, mby, reuseCb, reuseCr, stride, quant, mode, &reuseLeft, &reuseUp, nil)
 	if !bytes.Equal(reuseCb, freshCb) {
 		t.Fatal("reused chroma target produced different Cb reconstruction")
 	}
@@ -4644,6 +4831,68 @@ func TestVP8PassesIgnoreInitialReconstructionBuffer(t *testing.T) {
 	dirtyResidual := encodeVP8Residuals(readLuma, readChroma, bounds, width, height, mbw, mbh, quant, cleanModes, dirtyResidualWork, &tokenProbs)
 	if !bytes.Equal(dirtyResidual, cleanResidual) {
 		t.Fatal("residual stream depends on the initial reconstruction buffer")
+	}
+}
+
+func TestVP8ResidualBufferMatchesLegacyPipeline(t *testing.T) {
+	patterned := image.NewNRGBA(image.Rect(3, 5, 42, 38))
+	for y := patterned.Rect.Min.Y; y < patterned.Rect.Max.Y; y++ {
+		for x := patterned.Rect.Min.X; x < patterned.Rect.Max.X; x++ {
+			patterned.SetNRGBA(x, y, color.NRGBA{
+				R: uint8(x*9 + y*5),
+				G: uint8(y*11 + x*7),
+				B: uint8((x-y)*13 + x*y),
+				A: 255,
+			})
+		}
+	}
+	solid := image.NewNRGBA(image.Rect(0, 0, 64, 64))
+	for y := solid.Rect.Min.Y; y < solid.Rect.Max.Y; y++ {
+		for x := solid.Rect.Min.X; x < solid.Rect.Max.X; x++ {
+			solid.SetNRGBA(x, y, color.NRGBA{R: 80, G: 120, B: 160, A: 255})
+		}
+	}
+
+	for _, tc := range []struct {
+		name    string
+		img     image.Image
+		mode    Mode
+		quality int
+	}{
+		{name: "default", img: patterned, mode: ModeDefault, quality: 75},
+		{name: "best-y4", img: patterned, mode: ModeBestCompression, quality: 75},
+		{name: "macroblock-skip", img: solid, mode: ModeDefault, quality: 75},
+		{name: "high-quality", img: patterned, mode: ModeDefault, quality: 100},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bounds := tc.img.Bounds()
+			cfg := vp8LossyConfigForModeQuality(tc.mode, tc.quality)
+			buffered, err := encodeVP8KeyFrameConfig(lumaReaderFor(tc.img), chromaReaderFor(tc.img), bounds, bounds.Dx(), bounds.Dy(), cfg)
+			if err != nil {
+				t.Fatalf("buffered encode failed: %v", err)
+			}
+
+			cfg.bufferResiduals = false
+			legacy, err := encodeVP8KeyFrameConfig(lumaReaderFor(tc.img), chromaReaderFor(tc.img), bounds, bounds.Dx(), bounds.Dy(), cfg)
+			if err != nil {
+				t.Fatalf("legacy encode failed: %v", err)
+			}
+			if !bytes.Equal(buffered, legacy) {
+				t.Fatalf("buffered frame differs from legacy frame: got %d bytes, want %d bytes", len(buffered), len(legacy))
+			}
+		})
+	}
+}
+
+func TestVP8ResidualBufferFitsMemoryBudget(t *testing.T) {
+	if !vp8ResidualBufferFits(64, 64) {
+		t.Fatal("1024x1024 macroblock grid did not fit the residual buffer budget")
+	}
+	if vp8ResidualBufferFits(1024, 1024) {
+		t.Fatal("maximum VP8 macroblock grid unexpectedly fit the residual buffer budget")
+	}
+	if vp8ResidualBufferFits(0, 1) || vp8ResidualBufferFits(1, 0) {
+		t.Fatal("empty macroblock grid fit the residual buffer budget")
 	}
 }
 

@@ -1871,6 +1871,7 @@ type vp8LossyConfig struct {
 	tryY4           bool
 	trySkip         bool
 	updateTokenProb bool
+	bufferResiduals bool
 }
 
 func vp8LossyConfigForModeQuality(mode Mode, quality int) vp8LossyConfig {
@@ -1888,6 +1889,7 @@ func vp8LossyConfigForQIndex(mode Mode, qIndex int) vp8LossyConfig {
 		tryY4:           false,
 		trySkip:         true,
 		updateTokenProb: true,
+		bufferResiduals: true,
 	}
 	if mode == ModeBestCompression {
 		cfg.tryY4 = true
@@ -1896,6 +1898,10 @@ func vp8LossyConfigForQIndex(mode Mode, qIndex int) vp8LossyConfig {
 		cfg.tryY4 = false
 		cfg.trySkip = false
 		cfg.updateTokenProb = false
+		cfg.bufferResiduals = false
+	}
+	if mode == ModeLowMemory {
+		cfg.bufferResiduals = false
 	}
 	return cfg
 }
@@ -1908,25 +1914,51 @@ func encodeVP8KeyFrameConfig(readLuma lumaReader, readChroma chromaReader, bound
 	mbw := (width + 15) >> 4
 	mbh := (height + 15) >> 4
 	work := newVP8EncodeBuffers(mbw, mbh)
-	modes := analyzeVP8ModesConfig(readLuma, readChroma, bounds, mbw, mbh, cfg, work)
+	useResidualBuffer := cfg.bufferResiduals && (cfg.trySkip || cfg.updateTokenProb) && vp8ResidualBufferFits(mbw, mbh)
+	var residualBuffer *vp8ResidualBuffer
+	var modes []vp8MBMode
+	if useResidualBuffer && !cfg.tryY4 {
+		residualBuffer = newVP8ResidualBuffer(mbw * mbh)
+		sink := vp8ResidualSink{buffer: residualBuffer}
+		modes = analyzeVP8ModesConfigWithSink(readLuma, readChroma, bounds, mbw, mbh, cfg, work, &sink)
+	} else {
+		modes = analyzeVP8ModesConfig(readLuma, readChroma, bounds, mbw, mbh, cfg, work)
+	}
 	tokenProbs := vp8DefaultTokenProbs
 	var skipMap []bool
-	if cfg.trySkip {
-		clear(work.recY)
-		skipMap = analyzeVP8MacroblockSkips(readLuma, readChroma, bounds, mbw, mbh, cfg.quant, modes, work)
-	}
-	if cfg.updateTokenProb {
-		clear(work.recY)
-		tokenStats := collectVP8TokenStatsConfig(readLuma, readChroma, bounds, mbw, mbh, cfg.quant, modes, work, skipMap)
-		tokenProbs = chooseVP8TokenProbsConfig(&tokenStats, cfg.updateTokenProb)
+	if useResidualBuffer {
+		if residualBuffer == nil {
+			clear(work.recY)
+			residualBuffer = collectVP8ResidualBuffer(readLuma, readChroma, bounds, mbw, mbh, cfg.quant, modes, work)
+		}
+		skipMap = residualBuffer.skipMap(cfg.trySkip)
+		if cfg.updateTokenProb {
+			tokenStats := residualBuffer.tokenStats(skipMap)
+			tokenProbs = chooseVP8TokenProbsConfig(&tokenStats, cfg.updateTokenProb)
+		}
+	} else {
+		if cfg.trySkip {
+			clear(work.recY)
+			skipMap = analyzeVP8MacroblockSkips(readLuma, readChroma, bounds, mbw, mbh, cfg.quant, modes, work)
+		}
+		if cfg.updateTokenProb {
+			clear(work.recY)
+			tokenStats := collectVP8TokenStatsConfig(readLuma, readChroma, bounds, mbw, mbh, cfg.quant, modes, work, skipMap)
+			tokenProbs = chooseVP8TokenProbsConfig(&tokenStats, cfg.updateTokenProb)
+		}
 	}
 	skipProb := vp8SkipProbability(skipMap)
 	firstPart, err := vp8FirstPartition(mbw, mbh, cfg.qIndex, cfg.filter, modes, tokenProbs, skipMap, skipProb)
 	if err != nil {
 		return nil, err
 	}
-	clear(work.recY)
-	residualPart := encodeVP8ResidualsConfig(readLuma, readChroma, bounds, width, height, mbw, mbh, cfg.quant, modes, work, &tokenProbs, skipMap)
+	var residualPart []byte
+	if residualBuffer != nil {
+		residualPart = residualBuffer.encodeWithSkipMap(&tokenProbs, skipMap, vp8ResidualPartitionCapacity(width, height, cfg.qIndex))
+	} else {
+		clear(work.recY)
+		residualPart = encodeVP8ResidualsConfig(readLuma, readChroma, bounds, width, height, mbw, mbh, cfg.quant, modes, work, &tokenProbs, skipMap)
+	}
 	frameLen := 10 + len(firstPart) + len(residualPart)
 	frame := make([]byte, 0, frameLen)
 
@@ -2525,6 +2557,10 @@ func analyzeVP8Modes(readLuma lumaReader, readChroma chromaReader, bounds image.
 }
 
 func analyzeVP8ModesConfig(readLuma lumaReader, readChroma chromaReader, bounds image.Rectangle, mbw int, mbh int, cfg vp8LossyConfig, work *vp8EncodeBuffers) []vp8MBMode {
+	return analyzeVP8ModesConfigWithSink(readLuma, readChroma, bounds, mbw, mbh, cfg, work, nil)
+}
+
+func analyzeVP8ModesConfigWithSink(readLuma lumaReader, readChroma chromaReader, bounds image.Rectangle, mbw int, mbh int, cfg vp8LossyConfig, work *vp8EncodeBuffers, sink *vp8ResidualSink) []vp8MBMode {
 	yStride := mbw * 16
 	cStride := mbw * 8
 	recY := work.recY
@@ -2575,7 +2611,7 @@ func analyzeVP8ModesConfig(readLuma lumaReader, readChroma chromaReader, bounds 
 			if cfg.tryY4 {
 				y4Score := chooseVP8Y4Modes(lumaBlocks, mbx, mby, recY, yStride, cfg.quant, cfg.rd, &leftPred, &upPred[mbx], &leftY, &upY[mbx], &mode)
 				if y16Score > y4Score {
-					processVP8ChromaTargetMB(&chromaTarget, nil, mbx, mby, recCb, recCr, cStride, cfg.quant, mode, &leftUV, &upUV[mbx], nil, nil)
+					processVP8ChromaTargetMB(&chromaTarget, mbx, mby, recCb, recCr, cStride, cfg.quant, mode, &leftUV, &upUV[mbx], nil)
 					modes[mby*mbw+mbx] = mode
 					continue
 				}
@@ -2592,8 +2628,9 @@ func analyzeVP8ModesConfig(readLuma lumaReader, readChroma chromaReader, bounds 
 				leftPred[i] = y16Mode
 				upPred[mbx][i] = y16Mode
 			}
-			processVP8Luma16MB(nil, readLuma, bounds, mbx, mby, recY, yStride, cfg.quant, mode, &leftY, &upY[mbx], &leftY16, &upY16[mbx], nil, nil)
-			processVP8ChromaTargetMB(&chromaTarget, nil, mbx, mby, recCb, recCr, cStride, cfg.quant, mode, &leftUV, &upUV[mbx], nil, nil)
+			lumaNZ := processVP8Luma16MB(readLuma, bounds, mbx, mby, recY, yStride, cfg.quant, mode, &leftY, &upY[mbx], &leftY16, &upY16[mbx], sink)
+			chromaNZ := processVP8ChromaTargetMB(&chromaTarget, mbx, mby, recCb, recCr, cStride, cfg.quant, mode, &leftUV, &upUV[mbx], sink)
+			sink.finishMacroblock(lumaNZ || chromaNZ)
 			modes[mby*mbw+mbx] = mode
 		}
 	}
@@ -2623,6 +2660,7 @@ func collectVP8TokenStatsConfig(readLuma lumaReader, readChroma chromaReader, bo
 		clear(upUV)
 		clear(upY16)
 	}
+	sink := vp8ResidualSink{stats: &stats}
 
 	for mby := 0; mby < mbh; mby++ {
 		var leftY [4]uint8
@@ -2631,12 +2669,12 @@ func collectVP8TokenStatsConfig(readLuma lumaReader, readChroma chromaReader, bo
 		for mbx := 0; mbx < mbw; mbx++ {
 			mode := modes[mby*mbw+mbx]
 			if skipMap != nil && skipMap[mby*mbw+mbx] {
-				processVP8LumaMB(nil, readLuma, bounds, mbx, mby, work.recY, yStride, quant, mode, &leftY, &upY[mbx], &leftY16, &upY16[mbx], nil, nil)
-				processVP8ChromaMB(nil, readChroma, bounds, mbx, mby, work.recCb, work.recCr, cStride, quant, mode, &leftUV, &upUV[mbx], nil, nil)
+				processVP8LumaMB(readLuma, bounds, mbx, mby, work.recY, yStride, quant, mode, &leftY, &upY[mbx], &leftY16, &upY16[mbx], nil)
+				processVP8ChromaMB(readChroma, bounds, mbx, mby, work.recCb, work.recCr, cStride, quant, mode, &leftUV, &upUV[mbx], nil)
 				continue
 			}
-			processVP8LumaMB(nil, readLuma, bounds, mbx, mby, work.recY, yStride, quant, mode, &leftY, &upY[mbx], &leftY16, &upY16[mbx], nil, &stats)
-			processVP8ChromaMB(nil, readChroma, bounds, mbx, mby, work.recCb, work.recCr, cStride, quant, mode, &leftUV, &upUV[mbx], nil, &stats)
+			processVP8LumaMB(readLuma, bounds, mbx, mby, work.recY, yStride, quant, mode, &leftY, &upY[mbx], &leftY16, &upY16[mbx], &sink)
+			processVP8ChromaMB(readChroma, bounds, mbx, mby, work.recCb, work.recCr, cStride, quant, mode, &leftUV, &upUV[mbx], &sink)
 		}
 	}
 	return stats
@@ -2669,8 +2707,8 @@ func analyzeVP8MacroblockSkips(readLuma lumaReader, readChroma chromaReader, bou
 		var leftY16 uint8
 		for mbx := 0; mbx < mbw; mbx++ {
 			mode := modes[mby*mbw+mbx]
-			lumaNZ := processVP8LumaMB(nil, readLuma, bounds, mbx, mby, work.recY, yStride, quant, mode, &leftY, &upY[mbx], &leftY16, &upY16[mbx], nil, nil)
-			chromaNZ := processVP8ChromaMB(nil, readChroma, bounds, mbx, mby, work.recCb, work.recCr, cStride, quant, mode, &leftUV, &upUV[mbx], nil, nil)
+			lumaNZ := processVP8LumaMB(readLuma, bounds, mbx, mby, work.recY, yStride, quant, mode, &leftY, &upY[mbx], &leftY16, &upY16[mbx], nil)
+			chromaNZ := processVP8ChromaMB(readChroma, bounds, mbx, mby, work.recCb, work.recCr, cStride, quant, mode, &leftUV, &upUV[mbx], nil)
 			if !lumaNZ && !chromaNZ {
 				skipMap[mby*mbw+mbx] = true
 				skipCount++
@@ -2713,6 +2751,7 @@ func encodeVP8ResidualsConfig(readLuma lumaReader, readChroma chromaReader, boun
 	recCr := work.recCr
 
 	enc := newVP8BoolEncoderWithCapacity(vp8ResidualPartitionCapacity(width, height, quant.qIndex))
+	sink := vp8ResidualSink{encoder: enc, probs: tokenProbs}
 	var upY [][4]uint8
 	var upUV [][4]uint8
 	var upY16 []uint8
@@ -2736,12 +2775,12 @@ func encodeVP8ResidualsConfig(readLuma lumaReader, readChroma chromaReader, boun
 		for mbx := 0; mbx < mbw; mbx++ {
 			mode := modes[mby*mbw+mbx]
 			if skipMap != nil && skipMap[mby*mbw+mbx] {
-				processVP8LumaMB(nil, readLuma, bounds, mbx, mby, recY, yStride, quant, mode, &leftY, &upY[mbx], &leftY16, &upY16[mbx], nil, nil)
-				processVP8ChromaMB(nil, readChroma, bounds, mbx, mby, recCb, recCr, cStride, quant, mode, &leftUV, &upUV[mbx], nil, nil)
+				processVP8LumaMB(readLuma, bounds, mbx, mby, recY, yStride, quant, mode, &leftY, &upY[mbx], &leftY16, &upY16[mbx], nil)
+				processVP8ChromaMB(readChroma, bounds, mbx, mby, recCb, recCr, cStride, quant, mode, &leftUV, &upUV[mbx], nil)
 				continue
 			}
-			processVP8LumaMB(enc, readLuma, bounds, mbx, mby, recY, yStride, quant, mode, &leftY, &upY[mbx], &leftY16, &upY16[mbx], tokenProbs, nil)
-			processVP8ChromaMB(enc, readChroma, bounds, mbx, mby, recCb, recCr, cStride, quant, mode, &leftUV, &upUV[mbx], tokenProbs, nil)
+			processVP8LumaMB(readLuma, bounds, mbx, mby, recY, yStride, quant, mode, &leftY, &upY[mbx], &leftY16, &upY16[mbx], &sink)
+			processVP8ChromaMB(readChroma, bounds, mbx, mby, recCb, recCr, cStride, quant, mode, &leftUV, &upUV[mbx], &sink)
 		}
 	}
 	return enc.bytes()
@@ -2749,23 +2788,23 @@ func encodeVP8ResidualsConfig(readLuma lumaReader, readChroma chromaReader, boun
 
 func reconstructVP8LumaMB(readLuma lumaReader, bounds image.Rectangle, mbx int, mby int, recY []uint8, stride int, quant vp8Quant, mode vp8MBMode) {
 	if mode.useY16 {
-		processVP8Luma16MB(nil, readLuma, bounds, mbx, mby, recY, stride, quant, mode, nil, nil, nil, nil, nil, nil)
+		processVP8Luma16MB(readLuma, bounds, mbx, mby, recY, stride, quant, mode, nil, nil, nil, nil, nil)
 		return
 	}
-	processVP8Luma4MB(nil, readLuma, bounds, mbx, mby, recY, stride, quant, nil, nil, mode, nil, nil)
+	processVP8Luma4MB(readLuma, bounds, mbx, mby, recY, stride, quant, nil, nil, mode, nil)
 }
 
-func processVP8LumaMB(enc *vp8BoolEncoder, readLuma lumaReader, bounds image.Rectangle, mbx int, mby int, recY []uint8, stride int, quant vp8Quant, mode vp8MBMode, left *[4]uint8, up *[4]uint8, leftY16 *uint8, upY16 *uint8, tokenProbs *vp8TokenProbs, stats *vp8TokenStats) bool {
+func processVP8LumaMB(readLuma lumaReader, bounds image.Rectangle, mbx int, mby int, recY []uint8, stride int, quant vp8Quant, mode vp8MBMode, left *[4]uint8, up *[4]uint8, leftY16 *uint8, upY16 *uint8, sink *vp8ResidualSink) bool {
 	if mode.useY16 {
-		return processVP8Luma16MB(enc, readLuma, bounds, mbx, mby, recY, stride, quant, mode, left, up, leftY16, upY16, tokenProbs, stats)
+		return processVP8Luma16MB(readLuma, bounds, mbx, mby, recY, stride, quant, mode, left, up, leftY16, upY16, sink)
 	}
-	nz := processVP8Luma4MB(enc, readLuma, bounds, mbx, mby, recY, stride, quant, left, up, mode, tokenProbs, stats)
+	nz := processVP8Luma4MB(readLuma, bounds, mbx, mby, recY, stride, quant, left, up, mode, sink)
 	*leftY16 = 0
 	*upY16 = 0
 	return nz
 }
 
-func processVP8Luma4MB(enc *vp8BoolEncoder, readLuma lumaReader, bounds image.Rectangle, mbx int, mby int, recY []uint8, stride int, quant vp8Quant, left *[4]uint8, up *[4]uint8, mode vp8MBMode, tokenProbs *vp8TokenProbs, stats *vp8TokenStats) bool {
+func processVP8Luma4MB(readLuma lumaReader, bounds image.Rectangle, mbx int, mby int, recY []uint8, stride int, quant vp8Quant, left *[4]uint8, up *[4]uint8, mode vp8MBMode, sink *vp8ResidualSink) bool {
 	var localLeft [4]uint8
 	var localUp [4]uint8
 	if left == nil {
@@ -2783,15 +2822,8 @@ func processVP8Luma4MB(enc *vp8BoolEncoder, readLuma lumaReader, bounds image.Re
 			pred := predictLuma4(recY, stride, x, y, mode.y4Modes[by*4+bx])
 			residual := lumaResidualBlock(readLuma, bounds, x, y, pred)
 			coeff := quantizeVP8Block(residual, quant.y1DC, quant.y1AC)
-			blockNZ := uint8(0)
 			context := nz + up[bx]
-			if stats != nil {
-				blockNZ = vp8RecordBlockTokens(stats, vp8PlaneY1SansY2, context, coeff)
-			} else if enc != nil {
-				blockNZ = encodeVP8BlockWithProbs(enc, tokenProbs, vp8PlaneY1SansY2, context, coeff)
-			} else if hasNonZeroBlockCoeff(coeff) {
-				blockNZ = 1
-			}
+			blockNZ := sink.writeBlock(vp8PlaneY1SansY2, context, coeff, 0)
 			hasNZ = hasNZ || blockNZ != 0
 			recon := reconstructVP8Block(pred, coeff, quant.y1DC, quant.y1AC)
 			put4(recY, stride, x, y, recon)
@@ -2803,7 +2835,7 @@ func processVP8Luma4MB(enc *vp8BoolEncoder, readLuma lumaReader, bounds image.Re
 	return hasNZ
 }
 
-func processVP8Luma16MB(enc *vp8BoolEncoder, readLuma lumaReader, bounds image.Rectangle, mbx int, mby int, recY []uint8, stride int, quant vp8Quant, mode vp8MBMode, left *[4]uint8, up *[4]uint8, leftY16 *uint8, upY16 *uint8, tokenProbs *vp8TokenProbs, stats *vp8TokenStats) bool {
+func processVP8Luma16MB(readLuma lumaReader, bounds image.Rectangle, mbx int, mby int, recY []uint8, stride int, quant vp8Quant, mode vp8MBMode, left *[4]uint8, up *[4]uint8, leftY16 *uint8, upY16 *uint8, sink *vp8ResidualSink) bool {
 	var localLeft [4]uint8
 	var localUp [4]uint8
 	var localLeftY16 uint8
@@ -2837,15 +2869,8 @@ func processVP8Luma16MB(enc *vp8BoolEncoder, readLuma lumaReader, bounds image.R
 	}
 
 	y2Coeff := quantizeTransformedVP8Block(forwardWHT4(y2Input), quant.y2DC, quant.y2AC)
-	y16NZ := uint8(0)
 	y2Context := *leftY16 + *upY16
-	if stats != nil {
-		y16NZ = vp8RecordBlockTokens(stats, vp8PlaneY2, y2Context, y2Coeff)
-	} else if enc != nil {
-		y16NZ = encodeVP8BlockWithProbs(enc, tokenProbs, vp8PlaneY2, y2Context, y2Coeff)
-	} else if hasNonZeroBlockCoeff(y2Coeff) {
-		y16NZ = 1
-	}
+	y16NZ := sink.writeBlock(vp8PlaneY2, y2Context, y2Coeff, 0)
 	hasNZ := y16NZ != 0
 	*leftY16 = y16NZ
 	*upY16 = y16NZ
@@ -2856,15 +2881,8 @@ func processVP8Luma16MB(enc *vp8BoolEncoder, readLuma lumaReader, bounds image.R
 		for bx := 0; bx < 4; bx++ {
 			index := by*4 + bx
 			coeff := quantizeTransformedVP8BlockACOnly(transformed[index], quant.y1AC)
-			blockNZ := uint8(0)
 			context := nz + up[bx]
-			if stats != nil {
-				blockNZ = vp8RecordBlockTokensFrom(stats, vp8PlaneY1WithY2, context, coeff, 1)
-			} else if enc != nil {
-				blockNZ = encodeVP8BlockSkipFirstWithProbs(enc, tokenProbs, vp8PlaneY1WithY2, context, coeff)
-			} else if hasNonZeroBlockCoeffFrom(coeff, 1) {
-				blockNZ = 1
-			}
+			blockNZ := sink.writeBlock(vp8PlaneY1WithY2, context, coeff, 1)
 			hasNZ = hasNZ || blockNZ != 0
 			reconCoeff := dequantizeVP8Block(coeff, 0, quant.y1AC)
 			reconCoeff[0] = y2Recon[index]
@@ -2880,22 +2898,22 @@ func processVP8Luma16MB(enc *vp8BoolEncoder, readLuma lumaReader, bounds image.R
 
 func reconstructVP8ChromaMB(readChroma chromaReader, bounds image.Rectangle, mbx int, mby int, recCb []uint8, recCr []uint8, stride int, quant vp8Quant, mode vp8MBMode) {
 	target := makeChromaTargetMB(readChroma, bounds, mbx, mby)
-	processVP8ChromaPlane(nil, target.cb[:], mbx, mby, recCb, stride, quant, nil, nil, mode.cMode, true, nil, nil)
-	processVP8ChromaPlane(nil, target.cr[:], mbx, mby, recCr, stride, quant, nil, nil, mode.cMode, false, nil, nil)
+	processVP8ChromaPlane(target.cb[:], mbx, mby, recCb, stride, quant, nil, nil, mode.cMode, true, nil)
+	processVP8ChromaPlane(target.cr[:], mbx, mby, recCr, stride, quant, nil, nil, mode.cMode, false, nil)
 }
 
-func processVP8ChromaMB(enc *vp8BoolEncoder, readChroma chromaReader, bounds image.Rectangle, mbx int, mby int, recCb []uint8, recCr []uint8, stride int, quant vp8Quant, mode vp8MBMode, left *[4]uint8, up *[4]uint8, tokenProbs *vp8TokenProbs, stats *vp8TokenStats) bool {
+func processVP8ChromaMB(readChroma chromaReader, bounds image.Rectangle, mbx int, mby int, recCb []uint8, recCr []uint8, stride int, quant vp8Quant, mode vp8MBMode, left *[4]uint8, up *[4]uint8, sink *vp8ResidualSink) bool {
 	target := makeChromaTargetMB(readChroma, bounds, mbx, mby)
-	return processVP8ChromaTargetMB(&target, enc, mbx, mby, recCb, recCr, stride, quant, mode, left, up, tokenProbs, stats)
+	return processVP8ChromaTargetMB(&target, mbx, mby, recCb, recCr, stride, quant, mode, left, up, sink)
 }
 
-func processVP8ChromaTargetMB(target *chromaTargetMB, enc *vp8BoolEncoder, mbx int, mby int, recCb []uint8, recCr []uint8, stride int, quant vp8Quant, mode vp8MBMode, left *[4]uint8, up *[4]uint8, tokenProbs *vp8TokenProbs, stats *vp8TokenStats) bool {
-	cbNZ := processVP8ChromaPlane(enc, target.cb[:], mbx, mby, recCb, stride, quant, left, up, mode.cMode, true, tokenProbs, stats)
-	crNZ := processVP8ChromaPlane(enc, target.cr[:], mbx, mby, recCr, stride, quant, left, up, mode.cMode, false, tokenProbs, stats)
+func processVP8ChromaTargetMB(target *chromaTargetMB, mbx int, mby int, recCb []uint8, recCr []uint8, stride int, quant vp8Quant, mode vp8MBMode, left *[4]uint8, up *[4]uint8, sink *vp8ResidualSink) bool {
+	cbNZ := processVP8ChromaPlane(target.cb[:], mbx, mby, recCb, stride, quant, left, up, mode.cMode, true, sink)
+	crNZ := processVP8ChromaPlane(target.cr[:], mbx, mby, recCr, stride, quant, left, up, mode.cMode, false, sink)
 	return cbNZ || crNZ
 }
 
-func processVP8ChromaPlane(enc *vp8BoolEncoder, target []uint8, mbx int, mby int, rec []uint8, stride int, quant vp8Quant, left *[4]uint8, up *[4]uint8, mode uint8, cb bool, tokenProbs *vp8TokenProbs, stats *vp8TokenStats) bool {
+func processVP8ChromaPlane(target []uint8, mbx int, mby int, rec []uint8, stride int, quant vp8Quant, left *[4]uint8, up *[4]uint8, mode uint8, cb bool, sink *vp8ResidualSink) bool {
 	var localLeft [4]uint8
 	var localUp [4]uint8
 	if left == nil {
@@ -2918,15 +2936,8 @@ func processVP8ChromaPlane(enc *vp8BoolEncoder, target []uint8, mbx int, mby int
 			pred := subChroma8Block(pred8, bx, by)
 			residual := chromaResidualBlockFromTarget(target, bx, by, pred)
 			coeff := quantizeVP8Block(residual, quant.uvDC, quant.uvAC)
-			blockNZ := uint8(0)
 			context := nz + up[base+bx]
-			if stats != nil {
-				blockNZ = vp8RecordBlockTokens(stats, vp8PlaneUV, context, coeff)
-			} else if enc != nil {
-				blockNZ = encodeVP8BlockWithProbs(enc, tokenProbs, vp8PlaneUV, context, coeff)
-			} else if hasNonZeroBlockCoeff(coeff) {
-				blockNZ = 1
-			}
+			blockNZ := sink.writeBlock(vp8PlaneUV, context, coeff, 0)
 			hasNZ = hasNZ || blockNZ != 0
 			recon := reconstructVP8Block(pred, coeff, quant.uvDC, quant.uvAC)
 			put4(rec, stride, x, y, recon)

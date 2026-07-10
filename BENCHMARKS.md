@@ -28,9 +28,9 @@ go run ./scripts/compare_lossless_libwebp -runs 7
 ```
 
 ```sh
-go test . -run '^$' -bench 'BenchmarkEncodeLossyGradient1024$' -benchmem -benchtime=1x -cpuprofile go-webp-lossy-final-gradient1024.cpu -memprofile go-webp-lossy-final-gradient1024.mem
-go tool pprof -top -nodecount=20 go-webp-lossy-final-gradient1024.cpu
-go tool pprof -top -nodecount=20 -alloc_space go-webp-lossy-final-gradient1024.mem
+go test . -run '^$' -bench 'BenchmarkEncodeLossyGradient1024$' -benchmem -benchtime=1x -cpuprofile /tmp/go-webp-lossy-gradient1024.cpu -memprofile /tmp/go-webp-lossy-gradient1024.mem
+go tool pprof -top -nodecount=20 /tmp/go-webp-lossy-gradient1024.cpu
+go tool pprof -top -nodecount=20 -alloc_space /tmp/go-webp-lossy-gradient1024.mem
 ```
 
 ## Lossless Results
@@ -40,10 +40,10 @@ fixtures. Use them to compare local changes, not to claim portable performance.
 
 | Benchmark | Time | Encoded bytes | Encoded/input | B/op | allocs/op |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `BenchmarkEncodeLosslessSmallFixtures/Gradient128` | 29.32-29.46 ms/op | 1,160 | 0.01770 | 613,424-613,580 | 68 |
-| `BenchmarkEncodeLosslessSmallFixtures/UI256` | 4.16-4.20 ms/op | 250 | 0.0009537 | 68,200 | 34 |
-| `BenchmarkEncodeLosslessSmallFixtures/Flat128` | 3.08-3.12 ms/op | 32 | 0.0004883 | 8,120 | 13 |
-| `BenchmarkEncodeLosslessSmallFixtures/Palette256` | 9.34-9.43 ms/op | 3,078 | 0.04692 | 739,320-739,323 | 48 |
+| `BenchmarkEncodeLosslessSmallFixtures/Gradient128` | 28.15-28.29 ms/op | 1,160 | 0.01770 | 613,424-613,567 | 68 |
+| `BenchmarkEncodeLosslessSmallFixtures/UI256` | 4.11-4.14 ms/op | 250 | 0.0009537 | 68,200 | 34 |
+| `BenchmarkEncodeLosslessSmallFixtures/Flat128` | 3.10-3.13 ms/op | 32 | 0.0004883 | 8,120 | 13 |
+| `BenchmarkEncodeLosslessSmallFixtures/Palette256` | 9.32-9.36 ms/op | 3,078 | 0.04692 | 739,320-739,323 | 48 |
 
 ## Lossless libwebp Comparison
 
@@ -86,27 +86,27 @@ not a measured peak RSS. For `NearLossless` rows, the benchmark also reports
 
 | Fixture | Mode | Time | Encoded bytes | Encoded/input | B/op | allocs/op |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| `Gradient128` | `Fast` | 0.87 ms/op | 49,294 | 0.7522 | 12,552 | 23 |
-| `Gradient128` | `Balanced` | 29.31 ms/op | 1,160 | 0.01770 | 613,432 | 68 |
-| `Gradient128` | `BestCompression` | 39.05 ms/op | 1,160 | 0.01770 | 613,432 | 69 |
-| `Gradient128` | `LowMemory` | 4.34 ms/op | 10,510 | 0.1604 | 16,792 | 28 |
-| `Gradient128` | `Auto` | 29.94 ms/op | 1,160 | 0.01770 | 618,912 | 75 |
-| `Gradient128` | `NearLossless75` | 67.53 ms/op | 3,412 | 0.05206 | 1,354,296 | 78 |
-| `Gradient128` | `LossyQ75` | 2.93 ms/op | 2,658 | 0.04056 | 41,712 | 12 |
-| `UI256` | `Fast` | 2.95 ms/op | 7,518 | 0.02868 | 45,192 | 17 |
-| `UI256` | `Balanced` | 4.34 ms/op | 250 | 0.0009537 | 68,200 | 34 |
-| `UI256` | `BestCompression` | 59.88 ms/op | 250 | 0.0009537 | 68,232 | 36 |
-| `UI256` | `LowMemory` | 2.92 ms/op | 7,518 | 0.02868 | 45,192 | 17 |
-| `UI256` | `Auto` | 4.19 ms/op | 250 | 0.0009537 | 69,008 | 37 |
-| `UI256` | `NearLossless75` | 30.95 ms/op | 248 | 0.0009460 | 68,224 | 35 |
-| `UI256` | `LossyQ75` | 9.81 ms/op | 1,170 | 0.004463 | 139,616 | 16 |
-| `Palette256` | `Fast` | 2.59 ms/op | 32,930 | 0.5020 | 11,336 | 18 |
-| `Palette256` | `Balanced` | 9.36 ms/op | 3,078 | 0.04692 | 739,320 | 48 |
-| `Palette256` | `BestCompression` | 70.49 ms/op | 3,078 | 0.04692 | 739,352 | 50 |
-| `Palette256` | `LowMemory` | 2.72 ms/op | 32,930 | 0.5020 | 11,336 | 18 |
-| `Palette256` | `Auto` | 9.29 ms/op | 3,078 | 0.04692 | 739,320 | 48 |
-| `Palette256` | `NearLossless75` | 27.16 ms/op | 3,088 | 0.04707 | 773,488 | 53 |
-| `Palette256` | `LossyQ75` | 12.43 ms/op | 11,850 | 0.1806 | 151,360 | 19 |
+| `Gradient128` | `Fast` | 0.78 ms/op | 49,294 | 0.7522 | 12,552 | 23 |
+| `Gradient128` | `Balanced` | 29.16 ms/op | 1,160 | 0.01770 | 613,432 | 68 |
+| `Gradient128` | `BestCompression` | 39.29 ms/op | 1,160 | 0.01770 | 741,896 | 79 |
+| `Gradient128` | `LowMemory` | 4.27 ms/op | 10,510 | 0.1604 | 16,792 | 28 |
+| `Gradient128` | `Auto` | 28.00 ms/op | 1,160 | 0.01770 | 618,912 | 75 |
+| `Gradient128` | `NearLossless75` | 64.41 ms/op | 3,412 | 0.05206 | 1,354,296 | 78 |
+| `Gradient128` | `LossyQ75` | 1.92 ms/op | 2,658 | 0.04056 | 107,760 | 14 |
+| `UI256` | `Fast` | 2.83 ms/op | 7,518 | 0.02868 | 45,192 | 17 |
+| `UI256` | `Balanced` | 4.05 ms/op | 250 | 0.0009537 | 68,200 | 34 |
+| `UI256` | `BestCompression` | 59.80 ms/op | 250 | 0.0009537 | 68,232 | 36 |
+| `UI256` | `LowMemory` | 2.84 ms/op | 7,518 | 0.02868 | 45,192 | 17 |
+| `UI256` | `Auto` | 4.16 ms/op | 250 | 0.0009537 | 69,008 | 37 |
+| `UI256` | `NearLossless75` | 30.50 ms/op | 248 | 0.0009460 | 68,224 | 35 |
+| `UI256` | `LossyQ75` | 5.85 ms/op | 1,170 | 0.004463 | 379,232 | 18 |
+| `Palette256` | `Fast` | 2.67 ms/op | 32,930 | 0.5020 | 11,336 | 18 |
+| `Palette256` | `Balanced` | 9.25 ms/op | 3,078 | 0.04692 | 739,320 | 48 |
+| `Palette256` | `BestCompression` | 70.41 ms/op | 3,078 | 0.04692 | 739,352 | 50 |
+| `Palette256` | `LowMemory` | 2.55 ms/op | 32,930 | 0.5020 | 11,336 | 18 |
+| `Palette256` | `Auto` | 9.22 ms/op | 3,078 | 0.04692 | 739,320 | 48 |
+| `Palette256` | `NearLossless75` | 27.04 ms/op | 3,088 | 0.04707 | 773,488 | 53 |
+| `Palette256` | `LossyQ75` | 7.67 ms/op | 11,850 | 0.1806 | 390,976 | 21 |
 
 ## Large Mode Profile Results
 
@@ -148,31 +148,37 @@ and memprofile data as the available local evidence.
 
 | Benchmark | Time | Encoded bytes | Encoded/input | B/op | allocs/op |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `BenchmarkEncodeLossyAlpha128` | 4.40-4.45 ms/op | 3,230 | 0.04929 | 50,624-50,643 | 22 |
-| `BenchmarkEncodeLossyAlphaBands512` | 67.85-67.91 ms/op | 55,752 | 0.05317 | 597,952-597,967 | 24 |
-| `BenchmarkEncodeLossyAlphaNeighborhood512` | 68.19-69.67 ms/op | 56,290 | 0.05368 | 599,616-599,623 | 26 |
-| `BenchmarkEncodeLossyYCbCr512` | 70.80-72.01 ms/op | 93,220 | 0.2371 | 740,624-740,631 | 17 |
-| `BenchmarkEncodeLossyPaletted512` | 69.03-69.38 ms/op | 124,004 | 0.4712 | 922,464-922,471 | 21 |
-| `BenchmarkEncodeLossyGradient1024` | 237.58-237.97 ms/op | 228,814 | 0.05455 | 2,314,704-2,314,748 | 16 |
+| `BenchmarkEncodeLossyAlpha128` | 3.31-3.34 ms/op | 3,230 | 0.04929 | 116,672-116,687 | 24 |
+| `BenchmarkEncodeLossyAlphaBands512` | 47.96-48.29 ms/op | 55,752 | 0.05317 | 1,531,840 | 26 |
+| `BenchmarkEncodeLossyAlphaNeighborhood512` | 48.58-49.33 ms/op | 56,290 | 0.05368 | 1,533,504-1,533,539 | 28 |
+| `BenchmarkEncodeLossyYCbCr512` | 45.06-45.13 ms/op | 93,220 | 0.2371 | 1,674,516-1,674,529 | 19 |
+| `BenchmarkEncodeLossyPaletted512` | 49.00-49.26 ms/op | 124,004 | 0.4712 | 1,856,352-1,856,356 | 23 |
+| `BenchmarkEncodeLossyGradient1024` | 146.21-151.39 ms/op | 228,814 | 0.05455 | 6,033,872 | 18 |
 
-`BenchmarkEncodeLossyGradient1024` had one slower run in this sample. The
-encoded size, workspace estimates, and allocation counts remained stable.
+The bounded residual buffer keeps encoded output unchanged while reducing the
+repeated macroblock work. Compared with the preceding 2026-07-10 local sample,
+`BenchmarkEncodeLossyGradient1024` decreased from 237.58-237.97 ms/op to
+146.21-151.39 ms/op. Its estimated workspace increased from 2,060,809 bytes to
+5,779,977 bytes.
 
 The lossy benchmark reports internal proxy metrics:
 
 - `encoded_B`: encoded WebP size for one encode
 - `encoded_per_input`: encoded size divided by the input byte count used by the benchmark
 - `y_psnr_proxy` and `uv_psnr_proxy`: encoder-side pre-loop-filter reconstruction metrics used for relative development checks
+- `residual_workspace_B`: estimated bounded quantized-residual buffer size
 - `workspace_est_B`: estimated major lossy workspace size, not full heap peak
 
 ## Final Lossy pprof Snapshot
 
 For `BenchmarkEncodeLossyGradient1024` with `-benchtime=1x`:
 
-- CPU top: `put4` 210ms flat, `chromaFilterSumsFromCache` 80ms flat, `subLuma16Block` 50ms flat, and `forwardDCT4` 30ms flat
-- Allocation top: `newVP8EncodeBuffers` 5,402.48 KiB, benchmark fixture `image.NewNRGBA` 4,097.37 KiB, `newVP8BoolEncoderWithCapacity` 1,247.78 KiB, and `bytes.growSlice` 632.14 KiB, excluding profiling runtime overhead
+- CPU top: `vp8ResidualBuffer.appendBlock` 160ms flat, `put4` 90ms flat, and the chroma target preparation, luma extraction, and token-cost functions at 20ms flat each. The profile includes benchmark setup and reconstruction proxy work in addition to the timed encode
+- Allocation top: `newVP8ResidualBuffer` 7,206.37 KiB, `newVP8EncodeBuffers` 4,849.44 KiB, benchmark fixture `image.NewNRGBA` 4,097.37 KiB, and `newVP8BoolEncoderWithCapacity` 703.12 KiB. The profile includes untimed benchmark setup allocations
 
-The default lossy encoder keeps full-frame reconstruction buffers. Row or tile
-processing would require prediction boundary changes, especially for luma4x4
-top-right references, so it is deferred to a future explicit low-memory mode
-instead of being applied to the default mode.
+The default lossy encoder keeps full-frame reconstruction buffers and, when it
+fits the 32 MiB limit, a quantized-residual buffer. `ModeLowMemory` and images
+above that limit use the repeated-pass path without the residual buffer. Row or
+tile reconstruction would require prediction boundary changes, especially for
+luma4x4 top-right references, so it remains a separate future low-memory
+change.
