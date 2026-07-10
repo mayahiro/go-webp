@@ -17,8 +17,13 @@ of the repository.
 ```sh
 go test ./...
 go vet ./...
-go tool goimports -l .
+go -C tools tool goimports -l ..
 ```
+
+Development tool dependencies are pinned in the separate nested module under
+`tools`. Run its tools from the repository root with `go -C tools tool`; this
+keeps them out of the library module's dependency graph. The module provides
+`goimports` for formatting and `pprof` for local profile analysis.
 
 ## External Decoder Verification
 

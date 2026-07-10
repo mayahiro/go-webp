@@ -15,8 +15,12 @@ private corpusとprivate benchmark reportはrepositoryに含めません
 ```sh
 go test ./...
 go vet ./...
-go tool goimports -l .
+go -C tools tool goimports -l ..
 ```
+
+開発toolの依存は `tools` 配下の独立したnested moduleで固定します
+repository rootから `go -C tools tool` で実行することで、ライブラリmoduleの依存graphから分離します
+このmoduleにはformat用の `goimports` とlocal profile解析用の `pprof` が含まれます
 
 ## 外部Decoder確認
 
