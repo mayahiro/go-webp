@@ -2860,7 +2860,7 @@ func processVP8Luma16MB(readLuma lumaReader, bounds image.Rectangle, mbx int, mb
 			x := mbx*16 + bx*4
 			y := mby*16 + by*4
 			index := by*4 + bx
-			pred := subLuma16Block(&pred16, bx, by)
+			pred := pred16[index]
 			residual := lumaResidualBlock(readLuma, bounds, x, y, pred)
 			block := forwardDCT4(residual)
 			transformed[index] = block
@@ -2886,7 +2886,7 @@ func processVP8Luma16MB(readLuma lumaReader, bounds image.Rectangle, mbx int, mb
 			hasNZ = hasNZ || blockNZ != 0
 			reconCoeff := dequantizeVP8Block(coeff, 0, quant.y1AC)
 			reconCoeff[0] = y2Recon[index]
-			recon := inverseDCT4(subLuma16Block(&pred16, bx, by), reconCoeff)
+			recon := inverseDCT4(pred16[index], reconCoeff)
 			put4(recY, stride, mbx*16+bx*4, mby*16+by*4, recon)
 			nz = blockNZ
 			up[bx] = blockNZ
@@ -2933,7 +2933,7 @@ func processVP8ChromaPlane(target []uint8, mbx int, mby int, rec []uint8, stride
 		for bx := 0; bx < 2; bx++ {
 			x := mbx*8 + bx*4
 			y := mby*8 + by*4
-			pred := subChroma8Block(pred8, bx, by)
+			pred := pred8[by*2+bx]
 			residual := chromaResidualBlockFromTarget(target, bx, by, pred)
 			coeff := quantizeVP8Block(residual, quant.uvDC, quant.uvAC)
 			context := nz + up[base+bx]
@@ -3102,7 +3102,7 @@ func scoreLuma16RD(target *lumaTargetBlocks, mbx int, mby int, recY []uint8, str
 	for by := 0; by < 4; by++ {
 		for bx := 0; bx < 4; bx++ {
 			index := by*4 + bx
-			pred := subLuma16Block(&pred16, bx, by)
+			pred := pred16[index]
 			residual := lumaResidualBlockFromTarget(&(*target)[index], pred)
 			block := forwardDCT4(residual)
 			transformed[index] = block
@@ -3125,7 +3125,7 @@ func scoreLuma16RD(target *lumaTargetBlocks, mbx int, mby int, recY []uint8, str
 			bitCost += blockBitCost
 			reconCoeff := dequantizeVP8Block(coeff, 0, quant.y1AC)
 			reconCoeff[0] = y2Recon[index]
-			recon := inverseDCT4(subLuma16Block(&pred16, bx, by), reconCoeff)
+			recon := inverseDCT4(pred16[index], reconCoeff)
 			distortion += scoreLuma4FromTarget(&(*target)[index], recon)
 			if blockNZ {
 				nz = 1
@@ -3180,7 +3180,7 @@ func scoreChromaPlaneRD(target []uint8, mbx int, mby int, rec []uint8, stride in
 	for by := 0; by < 2; by++ {
 		nz := left[base+by]
 		for bx := 0; bx < 2; bx++ {
-			pred := subChroma8Block(pred8, bx, by)
+			pred := pred8[by*2+bx]
 			residual := chromaResidualBlockFromTarget(target, bx, by, pred)
 			coeff := quantizeVP8Block(residual, quant.uvDC, quant.uvAC)
 			blockBitCost, blockNZ := vp8BlockBitCostAndNonZeroPtr(vp8PlaneUV, nz+up[base+bx], &coeff)
@@ -3283,68 +3283,106 @@ func vp8CandidatePredModes(mbx int, mby int) ([4]uint8, int) {
 	return modes, n
 }
 
-func predictLuma16(rec []uint8, stride int, mbx int, mby int, mode uint8) [256]uint8 {
+type luma16PredBlocks [16][16]uint8
+
+func predictLuma16(rec []uint8, stride int, mbx int, mby int, mode uint8) luma16PredBlocks {
 	x0 := mbx * 16
 	y0 := mby * 16
-	var pred [256]uint8
+	var pred luma16PredBlocks
 	switch mode {
 	case vp8PredVE:
-		for y := 0; y < 16; y++ {
-			for x := 0; x < 16; x++ {
-				pred[y*16+x] = rec[(y0-1)*stride+x0+x]
+		top := rec[(y0-1)*stride+x0:]
+		for by := 0; by < 4; by++ {
+			for bx := 0; bx < 4; bx++ {
+				block := &pred[by*4+bx]
+				for y := 0; y < 4; y++ {
+					copy(block[y*4:y*4+4], top[bx*4:bx*4+4])
+				}
 			}
 		}
 	case vp8PredHE:
-		for y := 0; y < 16; y++ {
-			v := rec[(y0+y)*stride+x0-1]
-			for x := 0; x < 16; x++ {
-				pred[y*16+x] = v
+		for by := 0; by < 4; by++ {
+			for bx := 0; bx < 4; bx++ {
+				block := &pred[by*4+bx]
+				for y := 0; y < 4; y++ {
+					v := rec[(y0+by*4+y)*stride+x0-1]
+					for x := 0; x < 4; x++ {
+						block[y*4+x] = v
+					}
+				}
 			}
 		}
 	case vp8PredTM:
 		topLeft := int(rec[(y0-1)*stride+x0-1])
-		for y := 0; y < 16; y++ {
-			left := int(rec[(y0+y)*stride+x0-1])
-			for x := 0; x < 16; x++ {
-				top := int(rec[(y0-1)*stride+x0+x])
-				pred[y*16+x] = clipUint8(left + top - topLeft)
+		for by := 0; by < 4; by++ {
+			for bx := 0; bx < 4; bx++ {
+				block := &pred[by*4+bx]
+				for y := 0; y < 4; y++ {
+					left := int(rec[(y0+by*4+y)*stride+x0-1])
+					for x := 0; x < 4; x++ {
+						top := int(rec[(y0-1)*stride+x0+bx*4+x])
+						block[y*4+x] = clipUint8(left + top - topLeft)
+					}
+				}
 			}
 		}
 	default:
-		pred = filledLuma16(dcPred16(rec, stride, mbx, mby))
+		block := filledBlock4(dcPred16(rec, stride, mbx, mby))
+		for i := range pred {
+			pred[i] = block
+		}
 	}
 	return pred
 }
 
-func predictChroma8(rec []uint8, stride int, mbx int, mby int, mode uint8) [64]uint8 {
+type chroma8PredBlocks [4][16]uint8
+
+func predictChroma8(rec []uint8, stride int, mbx int, mby int, mode uint8) chroma8PredBlocks {
 	x0 := mbx * 8
 	y0 := mby * 8
-	var pred [64]uint8
+	var pred chroma8PredBlocks
 	switch mode {
 	case vp8PredVE:
-		for y := 0; y < 8; y++ {
-			for x := 0; x < 8; x++ {
-				pred[y*8+x] = rec[(y0-1)*stride+x0+x]
+		top := rec[(y0-1)*stride+x0:]
+		for by := 0; by < 2; by++ {
+			for bx := 0; bx < 2; bx++ {
+				block := &pred[by*2+bx]
+				for y := 0; y < 4; y++ {
+					copy(block[y*4:y*4+4], top[bx*4:bx*4+4])
+				}
 			}
 		}
 	case vp8PredHE:
-		for y := 0; y < 8; y++ {
-			v := rec[(y0+y)*stride+x0-1]
-			for x := 0; x < 8; x++ {
-				pred[y*8+x] = v
+		for by := 0; by < 2; by++ {
+			for bx := 0; bx < 2; bx++ {
+				block := &pred[by*2+bx]
+				for y := 0; y < 4; y++ {
+					v := rec[(y0+by*4+y)*stride+x0-1]
+					for x := 0; x < 4; x++ {
+						block[y*4+x] = v
+					}
+				}
 			}
 		}
 	case vp8PredTM:
 		topLeft := int(rec[(y0-1)*stride+x0-1])
-		for y := 0; y < 8; y++ {
-			left := int(rec[(y0+y)*stride+x0-1])
-			for x := 0; x < 8; x++ {
-				top := int(rec[(y0-1)*stride+x0+x])
-				pred[y*8+x] = clipUint8(left + top - topLeft)
+		for by := 0; by < 2; by++ {
+			for bx := 0; bx < 2; bx++ {
+				block := &pred[by*2+bx]
+				for y := 0; y < 4; y++ {
+					left := int(rec[(y0+by*4+y)*stride+x0-1])
+					for x := 0; x < 4; x++ {
+						top := int(rec[(y0-1)*stride+x0+bx*4+x])
+						block[y*4+x] = clipUint8(left + top - topLeft)
+					}
+				}
 			}
 		}
 	default:
-		pred = filledChroma8(dcPred8(rec, stride, mbx, mby))
+		block := filledBlock4(dcPred8(rec, stride, mbx, mby))
+		for i := range pred {
+			pred[i] = block
+		}
 	}
 	return pred
 }
@@ -3407,42 +3445,6 @@ func dcPred8(rec []uint8, stride int, mbx int, mby int) uint8 {
 		}
 		return uint8(sum / 16)
 	}
-}
-
-func filledLuma16(v uint8) [256]uint8 {
-	var block [256]uint8
-	for i := range block {
-		block[i] = v
-	}
-	return block
-}
-
-func filledChroma8(v uint8) [64]uint8 {
-	var block [64]uint8
-	for i := range block {
-		block[i] = v
-	}
-	return block
-}
-
-func subLuma16Block(pred *[256]uint8, bx int, by int) [16]uint8 {
-	var block [16]uint8
-	for y := 0; y < 4; y++ {
-		for x := 0; x < 4; x++ {
-			block[y*4+x] = pred[(by*4+y)*16+bx*4+x]
-		}
-	}
-	return block
-}
-
-func subChroma8Block(pred [64]uint8, bx int, by int) [16]uint8 {
-	var block [16]uint8
-	for y := 0; y < 4; y++ {
-		for x := 0; x < 4; x++ {
-			block[y*4+x] = pred[(by*4+y)*8+bx*4+x]
-		}
-	}
-	return block
 }
 
 func squareInt(v int) int64 {

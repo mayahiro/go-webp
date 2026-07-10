@@ -4417,6 +4417,76 @@ func TestVP8BlockQuantizationClampsToInt16Range(t *testing.T) {
 	}
 }
 
+func TestVP8MacroblockPredictionsUseBlockMajorLayout(t *testing.T) {
+	const stride = 40
+	rec := make([]uint8, stride*40)
+	for y := 0; y < 40; y++ {
+		for x := 0; x < stride; x++ {
+			rec[y*stride+x] = uint8(x*13 + y*7)
+		}
+	}
+	modes := []struct {
+		name string
+		mode uint8
+	}{
+		{name: "dc", mode: vp8PredDC},
+		{name: "vertical", mode: vp8PredVE},
+		{name: "horizontal", mode: vp8PredHE},
+		{name: "true-motion", mode: vp8PredTM},
+	}
+	for _, tc := range modes {
+		t.Run("luma-"+tc.name, func(t *testing.T) {
+			const mbx = 1
+			const mby = 1
+			const x0 = mbx * 16
+			const y0 = mby * 16
+			pred := predictLuma16(rec, stride, mbx, mby, tc.mode)
+			for y := 0; y < 16; y++ {
+				for x := 0; x < 16; x++ {
+					want := dcPred16(rec, stride, mbx, mby)
+					switch tc.mode {
+					case vp8PredVE:
+						want = rec[(y0-1)*stride+x0+x]
+					case vp8PredHE:
+						want = rec[(y0+y)*stride+x0-1]
+					case vp8PredTM:
+						want = clipUint8(int(rec[(y0+y)*stride+x0-1]) + int(rec[(y0-1)*stride+x0+x]) - int(rec[(y0-1)*stride+x0-1]))
+					}
+					got := pred[(y/4)*4+x/4][(y%4)*4+x%4]
+					if got != want {
+						t.Fatalf("prediction at (%d, %d) = %d, want %d", x, y, got, want)
+					}
+				}
+			}
+		})
+
+		t.Run("chroma-"+tc.name, func(t *testing.T) {
+			const mbx = 1
+			const mby = 1
+			const x0 = mbx * 8
+			const y0 = mby * 8
+			pred := predictChroma8(rec, stride, mbx, mby, tc.mode)
+			for y := 0; y < 8; y++ {
+				for x := 0; x < 8; x++ {
+					want := dcPred8(rec, stride, mbx, mby)
+					switch tc.mode {
+					case vp8PredVE:
+						want = rec[(y0-1)*stride+x0+x]
+					case vp8PredHE:
+						want = rec[(y0+y)*stride+x0-1]
+					case vp8PredTM:
+						want = clipUint8(int(rec[(y0+y)*stride+x0-1]) + int(rec[(y0-1)*stride+x0+x]) - int(rec[(y0-1)*stride+x0-1]))
+					}
+					got := pred[(y/4)*2+x/4][(y%4)*4+x%4]
+					if got != want {
+						t.Fatalf("prediction at (%d, %d) = %d, want %d", x, y, got, want)
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestVP8Y16ModeSelectionChoosesVertical(t *testing.T) {
 	img := image.NewNRGBA(image.Rect(0, 0, 16, 32))
 	recY := make([]uint8, 16*32)

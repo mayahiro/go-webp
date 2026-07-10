@@ -148,12 +148,12 @@ and memprofile data as the available local evidence.
 
 | Benchmark | Time | Encoded bytes | Encoded/input | B/op | allocs/op |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `BenchmarkEncodeLossyAlpha128` | 3.25-3.29 ms/op | 3,230 | 0.04929 | 116,672-116,673 | 24 |
-| `BenchmarkEncodeLossyAlphaBands512` | 47.07-47.60 ms/op | 55,752 | 0.05317 | 1,531,844-1,531,853 | 26 |
-| `BenchmarkEncodeLossyAlphaNeighborhood512` | 48.07-48.35 ms/op | 56,290 | 0.05368 | 1,533,504-1,533,508 | 28 |
-| `BenchmarkEncodeLossyYCbCr512` | 44.08-44.26 ms/op | 93,220 | 0.2371 | 1,674,512 | 19 |
-| `BenchmarkEncodeLossyPaletted512` | 48.08-48.31 ms/op | 124,004 | 0.4712 | 1,856,352-1,856,371 | 23 |
-| `BenchmarkEncodeLossyGradient1024` | 145.15-146.10 ms/op | 228,814 | 0.05455 | 6,033,872 | 18 |
+| `BenchmarkEncodeLossyAlpha128` | 3.19-3.30 ms/op | 3,230 | 0.04929 | 116,672-116,687 | 24 |
+| `BenchmarkEncodeLossyAlphaBands512` | 46.13-47.07 ms/op | 55,752 | 0.05317 | 1,531,844-1,531,857 | 26 |
+| `BenchmarkEncodeLossyAlphaNeighborhood512` | 47.30-48.04 ms/op | 56,290 | 0.05368 | 1,533,508-1,533,512 | 28 |
+| `BenchmarkEncodeLossyYCbCr512` | 42.83-43.02 ms/op | 93,220 | 0.2371 | 1,674,512-1,674,524 | 19 |
+| `BenchmarkEncodeLossyPaletted512` | 46.82-46.89 ms/op | 124,004 | 0.4712 | 1,856,352-1,856,356 | 23 |
+| `BenchmarkEncodeLossyGradient1024` | 134.47-141.60 ms/op | 228,814 | 0.05455 | 6,033,872-6,033,886 | 18 |
 
 The bounded residual buffer keeps encoded output unchanged while reducing the
 repeated macroblock work. Compared with the preceding 2026-07-10 local sample,
@@ -165,6 +165,16 @@ Quantized VP8 coefficients use a fixed `int16` block type after clamping to
 `[-2047, 2047]`. An alternating fixed-iteration comparison against the prior
 `int` block type measured 145.03-145.79 ms/op versus 151.23-151.77 ms/op on the
 same fixture, with unchanged output and heap allocation.
+
+Y16 and chroma prediction buffers use a 4x4 block-major layout, matching their
+transform consumers and avoiding repeated extraction from raster-order
+macroblock buffers. Four alternating 20-iteration comparisons measured
+139.70-141.66 ms/op versus 141.80-147.43 ms/op for the preceding implementation
+on `BenchmarkEncodeLossyGradient1024`. Two alternating comparisons also reduced
+`Gradient128` from 1.85-1.89 ms/op to 1.78-1.79 ms/op, `YCbCr512` from
+44.94-45.17 ms/op to 42.53 ms/op, and `Paletted512` from 48.68-49.01 ms/op to
+46.47-47.55 ms/op. Encoded size, proxy quality metrics, and heap allocations
+were unchanged.
 
 The lossy benchmark reports internal proxy metrics:
 
@@ -178,8 +188,8 @@ The lossy benchmark reports internal proxy metrics:
 
 For `BenchmarkEncodeLossyGradient1024` with `-benchtime=10x`:
 
-- CPU top: `vp8ResidualBuffer.appendBlock` 200ms flat, `vp8BlockBitCostFromDefaultAndNonZeroPtr` 170ms flat, `vp8BoolEncoder.writeBit` 140ms flat, `inverseDCT4` 90ms flat, and `vp8LastNonZeroCoeffPtr` 80ms flat
-- Allocation top: `newVP8ResidualBuffer` 39.22 MiB, `newVP8EncodeBuffers` 19.48 MiB, benchmark fixture `image.NewNRGBA` 4.00 MiB, and `newVP8BoolEncoderWithCapacity` 3.43 MiB. The profile includes setup plus ten timed encodes
+- CPU top: `vp8ResidualBuffer.appendBlock` 250ms flat, `vp8BoolEncoder.writeBit` 130ms flat, `put4` 130ms flat, `vp8BlockBitCostFromDefaultAndNonZeroPtr` 90ms flat and 170ms cumulative, and `vp8LastNonZeroCoeffPtr` 70ms flat
+- Allocation top: `newVP8ResidualBuffer` 39.22 MiB, `newVP8EncodeBuffers` 17.90 MiB, `newVP8BoolEncoderWithCapacity` 5.87 MiB, and benchmark fixture `image.NewNRGBA` 4.00 MiB. The profile includes setup plus ten timed encodes
 
 The default lossy encoder keeps full-frame reconstruction buffers and, when it
 fits the 32 MiB limit, a quantized-residual buffer. `ModeLowMemory` and images
