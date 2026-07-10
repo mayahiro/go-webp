@@ -17,7 +17,7 @@ type vp8ResidualSink struct {
 	buffer  *vp8ResidualBuffer
 }
 
-func (s *vp8ResidualSink) writeBlock(plane int, context uint8, coeff [16]int, start int) uint8 {
+func (s *vp8ResidualSink) writeBlock(plane int, context uint8, coeff vp8QuantizedBlock, start int) uint8 {
 	if s == nil {
 		if vp8HasNonZeroCoeff(coeff, start) {
 			return 1
@@ -46,18 +46,10 @@ func (s *vp8ResidualSink) finishMacroblock(nonZero bool) {
 }
 
 type vp8ResidualBlock struct {
-	coeff   [16]int16
+	coeff   vp8QuantizedBlock
 	plane   uint8
 	context uint8
 	start   uint8
-}
-
-func (b vp8ResidualBlock) unpackCoeff() [16]int {
-	var coeff [16]int
-	for i, value := range b.coeff {
-		coeff[i] = int(value)
-	}
-	return coeff
 }
 
 type vp8ResidualMacroblock struct {
@@ -85,17 +77,13 @@ func vp8ResidualBufferFits(mbw int, mbh int) bool {
 	return mbw <= maxMacroblocks && mbh <= maxMacroblocks/mbw
 }
 
-func (b *vp8ResidualBuffer) appendBlock(plane int, context uint8, coeff [16]int, start int) uint8 {
-	block := vp8ResidualBlock{
+func (b *vp8ResidualBuffer) appendBlock(plane int, context uint8, coeff vp8QuantizedBlock, start int) uint8 {
+	b.blocks = append(b.blocks, vp8ResidualBlock{
+		coeff:   coeff,
 		plane:   uint8(plane),
 		context: min(context, 2),
 		start:   uint8(start),
-	}
-	// Quantization clamps VP8 coefficient levels to [-2047, 2047].
-	for i, value := range coeff {
-		block.coeff[i] = int16(value)
-	}
-	b.blocks = append(b.blocks, block)
+	})
 	if vp8HasNonZeroCoeff(coeff, start) {
 		return 1
 	}
@@ -134,8 +122,7 @@ func (b *vp8ResidualBuffer) tokenStats(skipMap []bool) vp8TokenStats {
 		blockEnd := int(macroblock.blockEnd)
 		if skipMap == nil || !skipMap[i] {
 			for _, block := range b.blocks[blockStart:blockEnd] {
-				coeff := block.unpackCoeff()
-				vp8RecordBlockTokensFrom(&stats, int(block.plane), block.context, coeff, int(block.start))
+				vp8RecordBlockTokensFrom(&stats, int(block.plane), block.context, block.coeff, int(block.start))
 			}
 		}
 		blockStart = blockEnd
@@ -150,8 +137,7 @@ func (b *vp8ResidualBuffer) encodeWithSkipMap(probs *vp8TokenProbs, skipMap []bo
 		blockEnd := int(macroblock.blockEnd)
 		if skipMap == nil || !skipMap[i] {
 			for _, block := range b.blocks[blockStart:blockEnd] {
-				coeff := block.unpackCoeff()
-				encodeVP8BlockFromWithProbs(enc, probs, int(block.plane), block.context, coeff, int(block.start))
+				encodeVP8BlockFromWithProbs(enc, probs, int(block.plane), block.context, block.coeff, int(block.start))
 			}
 		}
 		blockStart = blockEnd

@@ -4406,6 +4406,17 @@ func TestVP8BlockQuantizationACOnlyMatchesZeroDC(t *testing.T) {
 	}
 }
 
+func TestVP8BlockQuantizationClampsToInt16Range(t *testing.T) {
+	transformed := [16]int{1 << 30, -(1 << 30)}
+	got := quantizeTransformedVP8Block(transformed, 1, 1)
+	if got[0] != 2047 {
+		t.Fatalf("positive coefficient = %d, want 2047", got[0])
+	}
+	if got[1] != -2047 {
+		t.Fatalf("negative coefficient = %d, want -2047", got[1])
+	}
+}
+
 func TestVP8Y16ModeSelectionChoosesVertical(t *testing.T) {
 	img := image.NewNRGBA(image.Rect(0, 0, 16, 32))
 	recY := make([]uint8, 16*32)
@@ -4427,7 +4438,7 @@ func TestVP8Y16ModeSelectionChoosesVertical(t *testing.T) {
 	if mode != vp8PredVE {
 		t.Fatalf("Y16 mode = %d, want vertical", mode)
 	}
-	var zero [16]int
+	var zero vp8QuantizedBlock
 	wantBits := vp8BitCost(145, true) + vp8Y16ModeCost(vp8PredVE) + vp8BlockBitCost(vp8PlaneY2, 0, zero)
 	for i := 0; i < 16; i++ {
 		wantBits += vp8BlockBitCostFrom(vp8PlaneY1WithY2, 0, zero, 1)
@@ -4476,7 +4487,7 @@ func TestVP8Y4ModeSelectionChoosesVertical(t *testing.T) {
 	if nz != 0 {
 		t.Fatalf("Y4 vertical nz = %d, want 0", nz)
 	}
-	var zero [16]int
+	var zero vp8QuantizedBlock
 	wantBits := vp8Y4ModeCost(vp8PredVE, vp8PredVE, vp8PredVE) + vp8BlockBitCost(vp8PlaneY1SansY2, 0, zero)
 	if want := rd.lumaScore(0, wantBits); score != want {
 		t.Fatalf("Y4 vertical score = %d, want %d", score, want)
@@ -4556,15 +4567,15 @@ func TestVP8FirstPartitionWritesSelectedY4Modes(t *testing.T) {
 }
 
 func TestVP8BlockBitCostAccountsForNonZeroCoefficients(t *testing.T) {
-	var zero [16]int
-	var dc [16]int
+	var zero vp8QuantizedBlock
+	var dc vp8QuantizedBlock
 	dc[0] = 1
 	zeroCost := vp8BlockBitCost(vp8PlaneY1SansY2, 0, zero)
 	if got := vp8BlockBitCost(vp8PlaneY1SansY2, 0, dc); got <= zeroCost {
 		t.Fatalf("non-zero DC bit cost = %d, want greater than zero block cost %d", got, zeroCost)
 	}
 
-	var ac [16]int
+	var ac vp8QuantizedBlock
 	ac[1] = 1
 	zeroSkipCost := vp8BlockBitCostFrom(vp8PlaneY1WithY2, 0, zero, 1)
 	if got := vp8BlockBitCostFrom(vp8PlaneY1WithY2, 0, ac, 1); got <= zeroSkipCost {
@@ -4573,7 +4584,7 @@ func TestVP8BlockBitCostAccountsForNonZeroCoefficients(t *testing.T) {
 }
 
 func TestVP8BlockBitCostDefaultMatchesExplicitDefaultProbs(t *testing.T) {
-	coeff := [16]int{
+	coeff := vp8QuantizedBlock{
 		0:  2,
 		3:  -1,
 		9:  5,
@@ -4610,7 +4621,7 @@ func TestVP8BlockBitCostDefaultMatchesExplicitDefaultProbs(t *testing.T) {
 		}
 	}
 
-	var zero [16]int
+	var zero vp8QuantizedBlock
 	zeroStartCost := vp8BlockBitCost(vp8PlaneY1SansY2, 2, zero)
 	zeroStartCostWithNZ, zeroStartNZ := vp8BlockBitCostAndNonZero(vp8PlaneY1SansY2, 2, zero)
 	if zeroStartCostWithNZ != zeroStartCost {
@@ -4631,7 +4642,7 @@ func TestVP8BlockBitCostDefaultMatchesExplicitDefaultProbs(t *testing.T) {
 }
 
 func TestEncodeVP8ZeroBlockWritesOnlyEOB(t *testing.T) {
-	var zero [16]int
+	var zero vp8QuantizedBlock
 	customProbs := vp8DefaultTokenProbs
 	customProbs[vp8PlaneY1WithY2][1][2][0] = 17
 	for _, tc := range []struct {
@@ -4691,7 +4702,7 @@ func TestEncodeVP8ZeroBlockWritesOnlyEOB(t *testing.T) {
 }
 
 func TestVP8RecordZeroBlockTokensOnlyRecordsEOB(t *testing.T) {
-	var zero [16]int
+	var zero vp8QuantizedBlock
 	for _, tc := range []struct {
 		name    string
 		plane   int
@@ -4721,7 +4732,7 @@ func TestVP8RecordZeroBlockTokensOnlyRecordsEOB(t *testing.T) {
 }
 
 func TestVP8BlockFromIgnoresCoefficientsBeforeStart(t *testing.T) {
-	var zero [16]int
+	var zero vp8QuantizedBlock
 	coeff := zero
 	coeff[0] = 7
 
@@ -4758,7 +4769,7 @@ func TestVP8BlockFromIgnoresCoefficientsBeforeStart(t *testing.T) {
 }
 
 func TestVP8LastNonZeroCoeffUsesZigzagOrder(t *testing.T) {
-	var coeff [16]int
+	var coeff vp8QuantizedBlock
 	if got := vp8LastNonZeroCoeff(coeff, 0); got != -1 {
 		t.Fatalf("zero block last non-zero = %d, want -1", got)
 	}
@@ -4987,7 +4998,7 @@ func fillVP8EncodeBuffers(work *vp8EncodeBuffers, value uint8) {
 }
 
 func TestVP8RecordBlockTokensCollectsBranches(t *testing.T) {
-	var coeff [16]int
+	var coeff vp8QuantizedBlock
 	coeff[0] = 1
 	var stats vp8TokenStats
 	if nz := vp8RecordBlockTokens(&stats, vp8PlaneY1SansY2, 0, coeff); nz != 1 {

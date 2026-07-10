@@ -27,6 +27,10 @@ type vp8TokenBranchCounts struct {
 
 type vp8TokenStats [4][8][3][11]vp8TokenBranchCounts
 
+// vp8QuantizedBlock stores coefficient levels after quantization.
+// VP8 quantization clamps every value to [-2047, 2047], which fits in int16.
+type vp8QuantizedBlock [16]int16
+
 var vp8TokenProbUpdateProb = [4][8][3][11]uint8{
 	{
 		{
@@ -375,7 +379,7 @@ var vp8DefaultTokenProbs = makeVP8DefaultTokenProbs()
 const vp8CoeffValueCostCacheLimit = 256
 
 var vp8DefaultCoeffValueSignBitCosts [4][8][3][vp8CoeffValueCostCacheLimit]int32
-var vp8ZeroCoeff [16]int
+var vp8ZeroCoeff vp8QuantizedBlock
 
 func init() {
 	initVP8DefaultCoeffValueSignBitCosts()
@@ -407,51 +411,51 @@ func makeVP8DefaultTokenProbs() vp8TokenProbs {
 	return probs
 }
 
-func encodeVP8Block(enc *vp8BoolEncoder, plane int, context uint8, coeff [16]int) uint8 {
+func encodeVP8Block(enc *vp8BoolEncoder, plane int, context uint8, coeff vp8QuantizedBlock) uint8 {
 	return encodeVP8BlockFromWithProbs(enc, nil, plane, context, coeff, 0)
 }
 
-func encodeVP8BlockWithProbs(enc *vp8BoolEncoder, probs *vp8TokenProbs, plane int, context uint8, coeff [16]int) uint8 {
+func encodeVP8BlockWithProbs(enc *vp8BoolEncoder, probs *vp8TokenProbs, plane int, context uint8, coeff vp8QuantizedBlock) uint8 {
 	return encodeVP8BlockFromWithProbs(enc, probs, plane, context, coeff, 0)
 }
 
-func encodeVP8BlockSkipFirst(enc *vp8BoolEncoder, plane int, context uint8, coeff [16]int) uint8 {
+func encodeVP8BlockSkipFirst(enc *vp8BoolEncoder, plane int, context uint8, coeff vp8QuantizedBlock) uint8 {
 	return encodeVP8BlockFromWithProbs(enc, nil, plane, context, coeff, 1)
 }
 
-func encodeVP8BlockSkipFirstWithProbs(enc *vp8BoolEncoder, probs *vp8TokenProbs, plane int, context uint8, coeff [16]int) uint8 {
+func encodeVP8BlockSkipFirstWithProbs(enc *vp8BoolEncoder, probs *vp8TokenProbs, plane int, context uint8, coeff vp8QuantizedBlock) uint8 {
 	return encodeVP8BlockFromWithProbs(enc, probs, plane, context, coeff, 1)
 }
 
-func vp8BlockBitCost(plane int, context uint8, coeff [16]int) int64 {
+func vp8BlockBitCost(plane int, context uint8, coeff vp8QuantizedBlock) int64 {
 	return vp8BlockBitCostFromDefault(plane, context, coeff, 0)
 }
 
-func vp8BlockBitCostAndNonZero(plane int, context uint8, coeff [16]int) (int64, bool) {
+func vp8BlockBitCostAndNonZero(plane int, context uint8, coeff vp8QuantizedBlock) (int64, bool) {
 	return vp8BlockBitCostFromDefaultAndNonZeroPtr(plane, context, &coeff, 0)
 }
 
-func vp8BlockBitCostAndNonZeroPtr(plane int, context uint8, coeff *[16]int) (int64, bool) {
+func vp8BlockBitCostAndNonZeroPtr(plane int, context uint8, coeff *vp8QuantizedBlock) (int64, bool) {
 	return vp8BlockBitCostFromDefaultAndNonZeroPtr(plane, context, coeff, 0)
 }
 
-func vp8BlockBitCostFrom(plane int, context uint8, coeff [16]int, start int) int64 {
+func vp8BlockBitCostFrom(plane int, context uint8, coeff vp8QuantizedBlock, start int) int64 {
 	return vp8BlockBitCostFromDefault(plane, context, coeff, start)
 }
 
-func vp8BlockBitCostFromAndNonZero(plane int, context uint8, coeff [16]int, start int) (int64, bool) {
+func vp8BlockBitCostFromAndNonZero(plane int, context uint8, coeff vp8QuantizedBlock, start int) (int64, bool) {
 	return vp8BlockBitCostFromDefaultAndNonZeroPtr(plane, context, &coeff, start)
 }
 
-func vp8BlockBitCostFromAndNonZeroPtr(plane int, context uint8, coeff *[16]int, start int) (int64, bool) {
+func vp8BlockBitCostFromAndNonZeroPtr(plane int, context uint8, coeff *vp8QuantizedBlock, start int) (int64, bool) {
 	return vp8BlockBitCostFromDefaultAndNonZeroPtr(plane, context, coeff, start)
 }
 
-func vp8BlockBitCostWithProbs(probs *vp8TokenProbs, plane int, context uint8, coeff [16]int) int64 {
+func vp8BlockBitCostWithProbs(probs *vp8TokenProbs, plane int, context uint8, coeff vp8QuantizedBlock) int64 {
 	return vp8BlockBitCostFromWithProbs(probs, plane, context, coeff, 0)
 }
 
-func vp8BlockBitCostFromWithProbs(probs *vp8TokenProbs, plane int, context uint8, coeff [16]int, start int) int64 {
+func vp8BlockBitCostFromWithProbs(probs *vp8TokenProbs, plane int, context uint8, coeff vp8QuantizedBlock, start int) int64 {
 	if context > 2 {
 		context = 2
 	}
@@ -474,7 +478,7 @@ func vp8BlockBitCostFromWithProbs(probs *vp8TokenProbs, plane int, context uint8
 		}
 
 		cost += vp8BitCost(prob[1], true)
-		absCoeff := v
+		absCoeff := int(v)
 		if absCoeff < 0 {
 			absCoeff = -absCoeff
 		}
@@ -494,16 +498,16 @@ func vp8BlockBitCostFromWithProbs(probs *vp8TokenProbs, plane int, context uint8
 	return cost
 }
 
-func vp8BlockBitCostFromDefault(plane int, context uint8, coeff [16]int, start int) int64 {
+func vp8BlockBitCostFromDefault(plane int, context uint8, coeff vp8QuantizedBlock, start int) int64 {
 	cost, _ := vp8BlockBitCostFromDefaultAndNonZeroPtr(plane, context, &coeff, start)
 	return cost
 }
 
-func vp8BlockBitCostFromDefaultAndNonZero(plane int, context uint8, coeff [16]int, start int) (int64, bool) {
+func vp8BlockBitCostFromDefaultAndNonZero(plane int, context uint8, coeff vp8QuantizedBlock, start int) (int64, bool) {
 	return vp8BlockBitCostFromDefaultAndNonZeroPtr(plane, context, &coeff, start)
 }
 
-func vp8BlockBitCostFromDefaultAndNonZeroPtr(plane int, context uint8, coeff *[16]int, start int) (int64, bool) {
+func vp8BlockBitCostFromDefaultAndNonZeroPtr(plane int, context uint8, coeff *vp8QuantizedBlock, start int) (int64, bool) {
 	if context > 2 {
 		context = 2
 	}
@@ -532,7 +536,7 @@ func vp8BlockBitCostFromDefaultAndNonZeroPtr(plane int, context uint8, coeff *[1
 		}
 
 		cost += vp8BitCostTable[prob[1]][1]
-		absCoeff := v
+		absCoeff := int(v)
 		if absCoeff < 0 {
 			absCoeff = -absCoeff
 		}
@@ -557,11 +561,11 @@ func vp8BlockBitCostFromDefaultAndNonZeroPtr(plane int, context uint8, coeff *[1
 	return cost, true
 }
 
-func encodeVP8BlockFrom(enc *vp8BoolEncoder, plane int, context uint8, coeff [16]int, start int) uint8 {
+func encodeVP8BlockFrom(enc *vp8BoolEncoder, plane int, context uint8, coeff vp8QuantizedBlock, start int) uint8 {
 	return encodeVP8BlockFromWithProbs(enc, nil, plane, context, coeff, start)
 }
 
-func encodeVP8BlockFromWithProbs(enc *vp8BoolEncoder, probs *vp8TokenProbs, plane int, context uint8, coeff [16]int, start int) uint8 {
+func encodeVP8BlockFromWithProbs(enc *vp8BoolEncoder, probs *vp8TokenProbs, plane int, context uint8, coeff vp8QuantizedBlock, start int) uint8 {
 	if context > 2 {
 		context = 2
 	}
@@ -589,7 +593,7 @@ func encodeVP8BlockFromWithProbs(enc *vp8BoolEncoder, probs *vp8TokenProbs, plan
 		}
 
 		enc.writeBit(prob[1], true)
-		absCoeff := v
+		absCoeff := int(v)
 		if absCoeff < 0 {
 			absCoeff = -absCoeff
 		}
@@ -609,15 +613,15 @@ func encodeVP8BlockFromWithProbs(enc *vp8BoolEncoder, probs *vp8TokenProbs, plan
 	return 1
 }
 
-func vp8HasNonZeroCoeff(coeff [16]int, after int) bool {
+func vp8HasNonZeroCoeff(coeff vp8QuantizedBlock, after int) bool {
 	return vp8LastNonZeroCoeffPtr(&coeff, after) >= after
 }
 
-func vp8LastNonZeroCoeff(coeff [16]int, start int) int {
+func vp8LastNonZeroCoeff(coeff vp8QuantizedBlock, start int) int {
 	return vp8LastNonZeroCoeffPtr(&coeff, start)
 }
 
-func vp8LastNonZeroCoeffPtr(coeff *[16]int, start int) int {
+func vp8LastNonZeroCoeffPtr(coeff *vp8QuantizedBlock, start int) int {
 	for i := 15; i >= start; i-- {
 		if coeff[vp8Zigzag[i]] != 0 {
 			return i
@@ -626,11 +630,11 @@ func vp8LastNonZeroCoeffPtr(coeff *[16]int, start int) int {
 	return -1
 }
 
-func vp8RecordBlockTokens(stats *vp8TokenStats, plane int, context uint8, coeff [16]int) uint8 {
+func vp8RecordBlockTokens(stats *vp8TokenStats, plane int, context uint8, coeff vp8QuantizedBlock) uint8 {
 	return vp8RecordBlockTokensFrom(stats, plane, context, coeff, 0)
 }
 
-func vp8RecordBlockTokensFrom(stats *vp8TokenStats, plane int, context uint8, coeff [16]int, start int) uint8 {
+func vp8RecordBlockTokensFrom(stats *vp8TokenStats, plane int, context uint8, coeff vp8QuantizedBlock, start int) uint8 {
 	if context > 2 {
 		context = 2
 	}
@@ -659,7 +663,7 @@ func vp8RecordBlockTokensFrom(stats *vp8TokenStats, plane int, context uint8, co
 		}
 
 		stats.record(plane, band, context, 1, true)
-		absCoeff := v
+		absCoeff := int(v)
 		if absCoeff < 0 {
 			absCoeff = -absCoeff
 		}

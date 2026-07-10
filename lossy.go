@@ -4208,13 +4208,13 @@ func put4(dst []uint8, stride int, x int, y int, block [16]uint8) {
 	}
 }
 
-func quantizeVP8Block(residual [16]int, dcQ int, acQ int) [16]int {
+func quantizeVP8Block(residual [16]int, dcQ int, acQ int) vp8QuantizedBlock {
 	transformed := forwardDCT4(residual)
 	return quantizeTransformedVP8Block(transformed, dcQ, acQ)
 }
 
-func quantizeTransformedVP8Block(transformed [16]int, dcQ int, acQ int) [16]int {
-	var coeff [16]int
+func quantizeTransformedVP8Block(transformed [16]int, dcQ int, acQ int) vp8QuantizedBlock {
+	var coeff vp8QuantizedBlock
 	coeff[0] = quantizeTransformCoeff(transformed[0], dcQ)
 	for i := 1; i < 16; i++ {
 		coeff[i] = quantizeTransformCoeff(transformed[i], acQ)
@@ -4222,8 +4222,8 @@ func quantizeTransformedVP8Block(transformed [16]int, dcQ int, acQ int) [16]int 
 	return coeff
 }
 
-func quantizeTransformedVP8BlockACOnly(transformed [16]int, acQ int) [16]int {
-	var coeff [16]int
+func quantizeTransformedVP8BlockACOnly(transformed [16]int, acQ int) vp8QuantizedBlock {
+	var coeff vp8QuantizedBlock
 	for i := 1; i < 16; i++ {
 		coeff[i] = quantizeTransformCoeff(transformed[i], acQ)
 	}
@@ -4261,7 +4261,7 @@ func forwardDCT4(residual [16]int) [16]int {
 	return out
 }
 
-func quantizeTransformCoeff(v int, q int) int {
+func quantizeTransformCoeff(v int, q int) int16 {
 	if q <= 0 {
 		return 0
 	}
@@ -4270,7 +4270,7 @@ func quantizeTransformCoeff(v int, q int) int {
 		sign = -1
 		v = -v
 	}
-	return sign * clipInt((v+q/2)/q, 0, 2047)
+	return int16(sign * clipInt((v+q/2)/q, 0, 2047))
 }
 
 func forwardWHT4(in [16]int) [16]int {
@@ -4328,15 +4328,15 @@ func inverseWHT4(coeff [16]int) [16]int {
 	return out
 }
 
-func reconstructVP8Block(pred [16]uint8, coeff [16]int, dcQ int, acQ int) [16]uint8 {
+func reconstructVP8Block(pred [16]uint8, coeff vp8QuantizedBlock, dcQ int, acQ int) [16]uint8 {
 	return inverseDCT4(pred, dequantizeVP8Block(coeff, dcQ, acQ))
 }
 
-func dequantizeVP8Block(coeff [16]int, dcQ int, acQ int) [16]int {
+func dequantizeVP8Block(coeff vp8QuantizedBlock, dcQ int, acQ int) [16]int {
 	var dequant [16]int
-	dequant[0] = coeff[0] * dcQ
+	dequant[0] = int(coeff[0]) * dcQ
 	for i := 1; i < 16; i++ {
-		dequant[i] = coeff[i] * acQ
+		dequant[i] = int(coeff[i]) * acQ
 	}
 	return dequant
 }
@@ -4381,11 +4381,11 @@ func boolInt(v bool) int {
 	return 0
 }
 
-func hasNonZeroBlockCoeff(coeff [16]int) bool {
+func hasNonZeroBlockCoeff(coeff vp8QuantizedBlock) bool {
 	return hasNonZeroBlockCoeffFrom(coeff, 0)
 }
 
-func hasNonZeroBlockCoeffFrom(coeff [16]int, start int) bool {
+func hasNonZeroBlockCoeffFrom(coeff vp8QuantizedBlock, start int) bool {
 	for i := start; i < len(coeff); i++ {
 		if coeff[i] != 0 {
 			return true
