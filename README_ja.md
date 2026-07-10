@@ -174,7 +174,8 @@ go run ./scripts/compare_lossy_libwebp -runs 3 -go-mode default -json report.jso
 ```
 
 lossy比較には `cwebp` と `dwebp` が必要です
-JSON reportにはquality sweep、decode後のRGB/YUVとalpha指標、encode時間、出力sizeとRGB PSNRが最も近いcwebp sampleを記録します
+JSON reportにはquality sweep、decode後のRGB/YUVとalpha指標、7x7 weighted Y SSIM、encode時間、出力sizeとY SSIM dBが最も近いcwebp sampleを記録します
+`-corpus`と`-split`で非公開のlocal corpusを選択でき、元ファイル名とpathはreportへ記録しません
 go-webpの時間はprocess内の `Encode` 呼び出し、cwebpの時間はprocess起動、PNG decode、出力書き込みも含みます
 
 ## ライセンス

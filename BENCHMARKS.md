@@ -20,6 +20,19 @@ signal rather than an encoder-core ranking.
 
 ## Commands
 
+Generate the public, deterministic PNG fixture corpus and its manifest:
+
+```sh
+go run ./scripts/generate_benchmark_fixtures -out .local/fixtures/public
+```
+
+The generated files stay outside Git. The manifest records each fixture's
+category, dimensions, alpha presence, normalized RGBA pixel SHA-256, and PNG
+SHA-256. All pixels come from repository code under the project license; no
+third-party image assets are used. The comparison commands below use the same
+six fixture definitions directly. `photo512` is a synthetic high-frequency
+texture, not a substitute for a natural-photo corpus.
+
 ```sh
 go run ./scripts/compare_lossless_libwebp -runs 3 -mode default -method 4
 go run ./scripts/compare_lossless_libwebp -runs 3 -mode best -method 6
@@ -37,6 +50,12 @@ go run ./scripts/compare_lossy_libwebp \
 go run ./scripts/compare_lossy_libwebp \
   -runs 3 -qualities 75 -method 4 -go-mode best -json best-report.json
 ```
+
+The current lossy JSON schema is version 2. It records weighted 7x7 Y SSIM and
+matches sampled quality points by Y SSIM dB. It can also read an anonymous
+local corpus through `-corpus` and `-split`. The historical quality-sweep table
+below was recorded with schema version 1 and retains its original RGB PSNR
+matching so that the published measurements are not reinterpreted.
 
 ```sh
 go test . -run '^$' \

@@ -134,6 +134,8 @@ func measureDistortion(source image.Image, decoded image.Image) (distortionMetri
 	var rgbSquared, ySquared, uvSquared float64
 	rgbExact, alphaExact := true, true
 	pixels := sourceBounds.Dx() * sourceBounds.Dy()
+	sourceYPlane := make([]byte, pixels)
+	decodedYPlane := make([]byte, pixels)
 	for y := 0; y < sourceBounds.Dy(); y++ {
 		for x := 0; x < sourceBounds.Dx(); x++ {
 			sourcePixel := color.NRGBAModel.Convert(source.At(sourceBounds.Min.X+x, sourceBounds.Min.Y+y)).(color.NRGBA)
@@ -149,6 +151,9 @@ func measureDistortion(source image.Image, decoded image.Image) (distortionMetri
 			}
 			sourceY, sourceCb, sourceCr := color.RGBToYCbCr(sourcePixel.R, sourcePixel.G, sourcePixel.B)
 			decodedY, decodedCb, decodedCr := color.RGBToYCbCr(decodedPixel.R, decodedPixel.G, decodedPixel.B)
+			pixelIndex := y*sourceBounds.Dx() + x
+			sourceYPlane[pixelIndex] = sourceY
+			decodedYPlane[pixelIndex] = decodedY
 			yDiff := int(decodedY) - int(sourceY)
 			cbDiff := int(decodedCb) - int(sourceCb)
 			crDiff := int(decodedCr) - int(sourceCr)
@@ -161,6 +166,10 @@ func measureDistortion(source image.Image, decoded image.Image) (distortionMetri
 			alphaAbs += uint64(absInt(alphaDiff))
 		}
 	}
+	ySSIM, err := measurePlaneSSIM(sourceYPlane, decodedYPlane, sourceBounds.Dx(), sourceBounds.Dy())
+	if err != nil {
+		return distortionMetrics{}, err
+	}
 	rgbSamples := 3 * pixels
 	uvSamples := 2 * pixels
 	rgbMSE := rgbSquared / float64(rgbSamples)
@@ -170,6 +179,8 @@ func measureDistortion(source image.Image, decoded image.Image) (distortionMetri
 		RGBPSNRDB:  psnrDB(rgbMSE),
 		YPSNRDB:    psnrDB(ySquared / float64(pixels)),
 		UVPSNRDB:   psnrDB(uvSquared / float64(uvSamples)),
+		YSSIM:      ySSIM,
+		YSSIMDB:    ssimDB(ySSIM),
 		AlphaMAE:   float64(alphaAbs) / float64(pixels),
 		RGBExact:   rgbExact,
 		AlphaExact: alphaExact,

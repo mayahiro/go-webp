@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"image"
 	"io"
 	"os"
 	"os/exec"
@@ -15,8 +16,23 @@ import (
 	"strings"
 
 	webp "github.com/mayahiro/go-webp"
+	"github.com/mayahiro/go-webp/internal/benchmarkcorpus"
 	"github.com/mayahiro/go-webp/internal/benchmarkfixture"
 )
+
+type comparisonFixture struct {
+	name   string
+	format string
+	split  string
+	image  image.Image
+}
+
+type corpusConfiguration struct {
+	name           string
+	sha256         string
+	split          string
+	holdoutPercent int
+}
 
 func main() {
 	if err := run(); err != nil {
@@ -35,6 +51,10 @@ func run() error {
 	outDir := flag.String("out", "", "directory for generated PNG and WebP files")
 	keep := flag.Bool("keep", false, "keep generated files when out is empty")
 	jsonPath := flag.String("json", "-", "JSON report path, or - for stdout")
+	corpusDir := flag.String("corpus", "", "private image corpus directory; empty uses generated fixtures")
+	corpusName := flag.String("corpus-name", "production", "anonymous private corpus name")
+	corpusSplit := flag.String("split", "holdout", "private corpus split: train, holdout, or all")
+	holdoutPercent := flag.Int("holdout", 20, "deterministic private corpus holdout percentage")
 	flag.Parse()
 	if *runs <= 0 {
 		return errors.New("runs must be positive")
@@ -65,9 +85,13 @@ func run() error {
 		return err
 	}
 	defer cleanup()
+	fixtures, corpus, err := loadComparisonFixtures(*corpusDir, *corpusName, *corpusSplit, *holdoutPercent)
+	if err != nil {
+		return err
+	}
 
 	report := comparisonReport{
-		SchemaVersion: 1,
+		SchemaVersion: 2,
 		Configuration: reportConfiguration{
 			Runs:               *runs,
 			Qualities:          qualities,
@@ -81,31 +105,38 @@ func run() error {
 			GoMode:             goModeName,
 			GoTimingScope:      "in-process webp.Encode call",
 			CWebPTimingScope:   "process startup, PNG decode, encode, and output write",
-			QualityMatchMetric: "rgb_psnr_db",
+			QualityMatchMetric: "y_ssim_db",
 			MatchStrategy:      "nearest sampled cwebp point for each go-webp point",
 			ExactPSNRValue:     "null",
+			ExactSSIMValue:     "null",
+			Corpus:             corpus.name,
+			CorpusSHA256:       corpus.sha256,
+			CorpusSplit:        corpus.split,
+			HoldoutPercent:     corpus.holdoutPercent,
 		},
 	}
 	cfg := cwebpConfig{method: *method, sharpYUV: *sharpYUV, mt: *mt}
-	for _, fixture := range benchmarkfixture.Standard() {
-		fmt.Fprintf(os.Stderr, "fixture=%s\n", fixture.Name)
-		pngPath := filepath.Join(dir, fixture.Name+".png")
-		if err := writePNG(pngPath, fixture.Image); err != nil {
-			return fmt.Errorf("%s: write PNG: %w", fixture.Name, err)
+	for _, fixture := range fixtures {
+		fmt.Fprintf(os.Stderr, "fixture=%s\n", fixture.name)
+		pngPath := filepath.Join(dir, fixture.name+".png")
+		if err := writePNG(pngPath, fixture.image); err != nil {
+			return fmt.Errorf("%s: write PNG: %w", fixture.name, err)
 		}
 		fixtureResult := fixtureReport{
-			Name:   fixture.Name,
-			Width:  fixture.Image.Bounds().Dx(),
-			Height: fixture.Image.Bounds().Dy(),
-			GoWebP: make([]sample, 0, len(qualities)),
-			CWebP:  make([]sample, 0, len(qualities)),
+			Name:         fixture.name,
+			SourceFormat: fixture.format,
+			Split:        fixture.split,
+			Width:        fixture.image.Bounds().Dx(),
+			Height:       fixture.image.Bounds().Dy(),
+			GoWebP:       make([]sample, 0, len(qualities)),
+			CWebP:        make([]sample, 0, len(qualities)),
 		}
 		for _, quality := range qualities {
-			goSample, err := runGoWebP(dir, fixture.Name, fixture.Image, quality, *runs, goMode)
+			goSample, err := runGoWebP(dir, fixture.name, fixture.image, quality, *runs, goMode)
 			if err != nil {
 				return err
 			}
-			cwebpSample, err := runCWebP(dir, fixture.Name, fixture.Image, pngPath, quality, *runs, cfg)
+			cwebpSample, err := runCWebP(dir, fixture.name, fixture.image, pngPath, quality, *runs, cfg)
 			if err != nil {
 				return err
 			}
@@ -116,6 +147,44 @@ func run() error {
 		report.Fixtures = append(report.Fixtures, fixtureResult)
 	}
 	return writeReport(*jsonPath, report)
+}
+
+func loadComparisonFixtures(corpusDir string, corpusName string, split string, holdoutPercent int) ([]comparisonFixture, corpusConfiguration, error) {
+	if strings.TrimSpace(corpusDir) == "" {
+		standard := benchmarkfixture.Standard()
+		fixtures := make([]comparisonFixture, 0, len(standard))
+		for _, fixture := range standard {
+			fixtures = append(fixtures, comparisonFixture{
+				name:  fixture.Name,
+				split: "all",
+				image: fixture.Image,
+			})
+		}
+		return fixtures, corpusConfiguration{name: "generated-standard", split: "all"}, nil
+	}
+
+	report, samples, err := benchmarkcorpus.LoadSplit(corpusDir, corpusName, holdoutPercent, split)
+	if err != nil {
+		return nil, corpusConfiguration{}, err
+	}
+	if len(samples) == 0 {
+		return nil, corpusConfiguration{}, fmt.Errorf("corpus split %q contains no images", split)
+	}
+	fixtures := make([]comparisonFixture, 0, len(samples))
+	for _, sample := range samples {
+		fixtures = append(fixtures, comparisonFixture{
+			name:   sample.Metadata.ID,
+			format: sample.Metadata.Format,
+			split:  sample.Metadata.Split,
+			image:  sample.Pixels,
+		})
+	}
+	return fixtures, corpusConfiguration{
+		name:           report.Corpus,
+		sha256:         report.CorpusSHA256,
+		split:          split,
+		holdoutPercent: report.HoldoutPercent,
+	}, nil
 }
 
 func parseGoMode(value string) (webp.Mode, string, error) {
@@ -198,11 +267,17 @@ func writeReport(path string, report comparisonReport) error {
 	var file *os.File
 	if path != "-" {
 		var err error
-		file, err = os.Create(path)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			return err
+		}
+		file, err = os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 		if err != nil {
 			return err
 		}
 		defer file.Close()
+		if err := file.Chmod(0o600); err != nil {
+			return err
+		}
 		writer = file
 	}
 	encoder := json.NewEncoder(writer)

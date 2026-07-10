@@ -233,10 +233,12 @@ go run ./scripts/compare_lossy_libwebp -runs 3 -go-mode default -json report.jso
 ```
 
 The lossy comparison requires `cwebp` and `dwebp`. Its JSON report contains
-quality sweeps, decoded RGB/YUV and alpha metrics, encode timing, and the
-nearest sampled cwebp points by encoded size and RGB PSNR. The go-webp timing
-covers the in-process `Encode` call, while the cwebp timing also includes
-process startup, PNG decoding, and output writing.
+quality sweeps, decoded RGB/YUV and alpha metrics, weighted 7x7 Y SSIM,
+encode timing, and the nearest sampled cwebp points by encoded size and Y SSIM
+dB. A private local corpus can be selected with `-corpus` and `-split`; source
+names and paths are omitted from the report. The go-webp timing covers the
+in-process `Encode` call, while the cwebp timing also includes process startup,
+PNG decoding, and output writing.
 
 ## License
 

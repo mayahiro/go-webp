@@ -8,19 +8,20 @@ import (
 
 // Fixture is a named deterministic comparison image
 type Fixture struct {
-	Name  string
-	Image image.Image
+	Name     string
+	Category string
+	Image    image.Image
 }
 
 // Standard returns the shared lossless and lossy comparison corpus
 func Standard() []Fixture {
 	return []Fixture{
-		{Name: "gradient128", Image: gradient(128, 128)},
-		{Name: "ui256", Image: ui(256, 256)},
-		{Name: "flat128", Image: flat(128, 128)},
-		{Name: "palette256", Image: palette(256, 256)},
-		{Name: "alpha128", Image: alpha(128, 128)},
-		{Name: "photo512", Image: photoLike(512, 512)},
+		{Name: "gradient128", Category: "gradient", Image: gradient(128, 128)},
+		{Name: "ui256", Category: "ui", Image: ui(256, 256)},
+		{Name: "flat128", Category: "flat", Image: flat(128, 128)},
+		{Name: "palette256", Category: "palette", Image: palette(256, 256)},
+		{Name: "alpha128", Category: "alpha", Image: alpha(128, 128)},
+		{Name: "photo512", Category: "synthetic-texture", Image: photoLike(512, 512)},
 	}
 }
 

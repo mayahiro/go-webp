@@ -24,10 +24,17 @@ type reportConfiguration struct {
 	QualityMatchMetric string `json:"quality_match_metric"`
 	MatchStrategy      string `json:"match_strategy"`
 	ExactPSNRValue     string `json:"exact_psnr_value"`
+	ExactSSIMValue     string `json:"exact_ssim_value"`
+	Corpus             string `json:"corpus"`
+	CorpusSHA256       string `json:"corpus_sha256,omitempty"`
+	CorpusSplit        string `json:"corpus_split"`
+	HoldoutPercent     int    `json:"holdout_percent,omitempty"`
 }
 
 type fixtureReport struct {
 	Name           string       `json:"name"`
+	SourceFormat   string       `json:"source_format,omitempty"`
+	Split          string       `json:"split,omitempty"`
 	Width          int          `json:"width"`
 	Height         int          `json:"height"`
 	GoWebP         []sample     `json:"go_webp"`
@@ -49,6 +56,8 @@ type distortionMetrics struct {
 	RGBPSNRDB  *float64 `json:"rgb_psnr_db"`
 	YPSNRDB    *float64 `json:"y_psnr_db"`
 	UVPSNRDB   *float64 `json:"uv_psnr_db"`
+	YSSIM      float64  `json:"y_ssim"`
+	YSSIMDB    *float64 `json:"y_ssim_db"`
 	AlphaMAE   float64  `json:"alpha_mae"`
 	RGBExact   bool     `json:"rgb_exact"`
 	AlphaExact bool     `json:"alpha_exact"`
@@ -62,6 +71,7 @@ type pointMatch struct {
 	SizeDeltaBytes int      `json:"size_delta_bytes"`
 	SizeDeltaPct   float64  `json:"size_delta_percent"`
 	RGBPSNRDeltaDB *float64 `json:"rgb_psnr_delta_db"`
+	YSSIMDeltaDB   *float64 `json:"y_ssim_delta_db"`
 }
 
 func buildMatches(goSamples []sample, cwebpSamples []sample) ([]pointMatch, []pointMatch) {
@@ -110,14 +120,14 @@ func nearestQualitySample(target sample, candidates []sample) (sample, bool) {
 
 func qualityDistance(a sample, b sample) float64 {
 	switch {
-	case a.Distortion.RGBPSNRDB == nil && b.Distortion.RGBPSNRDB == nil:
+	case a.Distortion.YSSIMDB == nil && b.Distortion.YSSIMDB == nil:
 		return 0
-	case a.Distortion.RGBPSNRDB == nil:
-		return 1e6 - *b.Distortion.RGBPSNRDB
-	case b.Distortion.RGBPSNRDB == nil:
-		return 1e6 - *a.Distortion.RGBPSNRDB
+	case a.Distortion.YSSIMDB == nil:
+		return 1e6 - *b.Distortion.YSSIMDB
+	case b.Distortion.YSSIMDB == nil:
+		return 1e6 - *a.Distortion.YSSIMDB
 	default:
-		return math.Abs(*a.Distortion.RGBPSNRDB - *b.Distortion.RGBPSNRDB)
+		return math.Abs(*a.Distortion.YSSIMDB - *b.Distortion.YSSIMDB)
 	}
 }
 
@@ -134,19 +144,20 @@ func makePointMatch(goSample sample, cwebpSample sample) pointMatch {
 		CWebPBytes:     cwebpSample.EncodedBytes,
 		SizeDeltaBytes: deltaBytes,
 		SizeDeltaPct:   deltaPct,
-		RGBPSNRDeltaDB: psnrDelta(goSample.Distortion.RGBPSNRDB, cwebpSample.Distortion.RGBPSNRDB),
+		RGBPSNRDeltaDB: metricDelta(goSample.Distortion.RGBPSNRDB, cwebpSample.Distortion.RGBPSNRDB),
+		YSSIMDeltaDB:   metricDelta(goSample.Distortion.YSSIMDB, cwebpSample.Distortion.YSSIMDB),
 	}
 }
 
-func psnrDelta(goPSNR *float64, cwebpPSNR *float64) *float64 {
-	if goPSNR == nil && cwebpPSNR == nil {
+func metricDelta(goValue *float64, cwebpValue *float64) *float64 {
+	if goValue == nil && cwebpValue == nil {
 		zero := 0.0
 		return &zero
 	}
-	if goPSNR == nil || cwebpPSNR == nil {
+	if goValue == nil || cwebpValue == nil {
 		return nil
 	}
-	delta := *cwebpPSNR - *goPSNR
+	delta := *cwebpValue - *goValue
 	return &delta
 }
 
