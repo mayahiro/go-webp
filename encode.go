@@ -365,6 +365,9 @@ type vp8lEncodingConfig struct {
 	maxTransformedLZ77CacheTokens   int
 	parallelTransforms              bool
 	materializeSource               bool
+	lz77CostOnly                    bool
+	useLZ77MatchGraph               bool
+	tryOptimalLZ77ColorCache        bool
 	finalLZ77Candidates             int
 	finalLiteralCandidates          int
 	tryFinalColorCacheMetaPrefix    bool
@@ -772,6 +775,7 @@ func vp8lDefaultEncodingConfig() vp8lEncodingConfig {
 		maxMetaPrefixLZ77Tokens:         vp8lMaxMetaPrefixLZ77Tokens,
 		maxTransformedLZ77CacheTokens:   vp8lMaxTransformedLZ77CacheTokens,
 		materializeSource:               true,
+		useLZ77MatchGraph:               true,
 		finalLZ77Candidates:             3,
 		finalLiteralCandidates:          2,
 	}
@@ -812,8 +816,10 @@ func vp8lEncodingConfigForMode(mode Mode, m image.Image, readPixel pixelReader, 
 		cfg.finalLZ77Candidates = 5
 		cfg.finalLiteralCandidates = 3
 		cfg.tryFinalColorCacheMetaPrefix = true
+		cfg.tryOptimalLZ77ColorCache = true
 	case ModeLowMemory:
 		cfg.materializeSource = false
+		cfg.useLZ77MatchGraph = false
 		cfg.tryBlockColorTransform = false
 		cfg.tryLZ77 = false
 		cfg.tryMetaPrefix = false
@@ -1262,11 +1268,15 @@ func vp8lConsiderCandidateLZ77(readPixel pixelReader, bounds image.Rectangle, wi
 }
 
 func vp8lConsiderCandidateLZ77Config(readPixel pixelReader, bounds image.Rectangle, width int, height int, candidate vp8lEncodingPlan, best vp8lEncodingPlan, bestBits uint64, cfg vp8lEncodingConfig) (vp8lEncodingPlan, uint64) {
+	return vp8lConsiderCandidateLZ77ConfigWorkspace(readPixel, bounds, width, height, candidate, best, bestBits, cfg, nil)
+}
+
+func vp8lConsiderCandidateLZ77ConfigWorkspace(readPixel pixelReader, bounds image.Rectangle, width int, height int, candidate vp8lEncodingPlan, best vp8lEncodingPlan, bestBits uint64, cfg vp8lEncodingConfig, workspace *vp8lLZ77Workspace) (vp8lEncodingPlan, uint64) {
 	candidateBits := vp8lPayloadBits(width, height, candidate)
 	if !vp8lShouldTryCandidateLZ77(candidate, candidateBits, bestBits) {
 		return best, bestBits
 	}
-	lz77Plan, ok := makeVP8LLZ77PlanConfig(readPixel, bounds, width, height, candidate, bestBits, cfg)
+	lz77Plan, ok := makeVP8LLZ77PlanConfigWorkspace(readPixel, bounds, width, height, candidate, bestBits, cfg, workspace)
 	if !ok {
 		return best, bestBits
 	}
@@ -2560,33 +2570,34 @@ func makeVP8LColorCachePlanConfig(readPixel pixelReader, bounds image.Rectangle,
 	bestBits := maxBits
 	ok := false
 	var tokenScratch []vp8lToken
+	statistics := vp8lBuildColorCacheStatistics(read, mainBounds, mainWidth)
 	for bits := uint8(vp8lMinColorCacheBits); bits <= vp8lMaxColorCacheBits; bits++ {
-		_, literalAnalysis, greenCounts, cacheHits, tokenCount := vp8lBuildColorCache(read, mainBounds, mainWidth, bits, false, 0)
-		if cacheHits == 0 {
+		stats := statistics[bits]
+		if stats.cacheHits == 0 {
 			continue
 		}
-		greenLengths, lengthsOK := huffmanColorCacheCodeLengths(greenCounts)
+		greenLengths, lengthsOK := huffmanColorCacheCodeLengths(stats.greenCounts)
 		if !lengthsOK {
 			continue
 		}
 		candidate := base
 		candidate.colorCache = &vp8lColorCachePlan{
 			bits:     bits,
-			analysis: literalAnalysis,
-			counts:   greenCounts,
+			analysis: stats.literalAnalysis,
+			counts:   stats.greenCounts,
 			lengths:  greenLengths,
 			codes:    canonicalColorCacheCodes(greenLengths),
 		}
 		candidateBits := vp8lPayloadBits(width, height, candidate)
 		if candidateBits >= bestBits {
-			if tokenCount > vp8lMaxMetaPrefixColorCacheTokens {
+			if stats.tokenCount > vp8lMaxMetaPrefixColorCacheTokens {
 				continue
 			}
 		}
-		needsTokens := candidateBits < bestBits || cfg.tryMetaPrefix && tokenCount <= vp8lMaxMetaPrefixColorCacheTokens
+		needsTokens := candidateBits < bestBits || cfg.tryMetaPrefix && stats.tokenCount <= vp8lMaxMetaPrefixColorCacheTokens
 		var tokens []vp8lToken
 		if needsTokens {
-			tokens, _, _, _, _ = vp8lBuildColorCacheInto(read, mainBounds, mainWidth, bits, true, tokenCount, tokenScratch)
+			tokens, _, _, _, _ = vp8lBuildColorCacheInto(read, mainBounds, mainWidth, bits, true, stats.tokenCount, tokenScratch)
 			tokenScratch = tokens[:0]
 		}
 		if candidateBits < bestBits {
@@ -2594,7 +2605,7 @@ func makeVP8LColorCachePlanConfig(readPixel pixelReader, bounds image.Rectangle,
 			bestBits = candidateBits
 			ok = true
 		}
-		if cfg.tryMetaPrefix && tokenCount <= vp8lMaxMetaPrefixColorCacheTokens {
+		if cfg.tryMetaPrefix && stats.tokenCount <= vp8lMaxMetaPrefixColorCacheTokens {
 			metaBase := candidate
 			if metaPrefixPlan, metaOK := makeVP8LMetaPrefixColorCachePlan(read, mainBounds, mainWidth, mainHeight, metaBase, tokens, bestBits); metaOK {
 				best = metaPrefixPlan
@@ -3297,17 +3308,24 @@ func makeVP8LLZ77Plan(readPixel pixelReader, bounds image.Rectangle, width int, 
 }
 
 func makeVP8LLZ77PlanConfig(readPixel pixelReader, bounds image.Rectangle, width int, height int, base vp8lEncodingPlan, maxBits uint64, cfg vp8lEncodingConfig) (vp8lEncodingPlan, bool) {
+	return makeVP8LLZ77PlanConfigWorkspace(readPixel, bounds, width, height, base, maxBits, cfg, nil)
+}
+
+func makeVP8LLZ77PlanConfigWorkspace(readPixel pixelReader, bounds image.Rectangle, width int, height int, base vp8lEncodingPlan, maxBits uint64, cfg vp8lEncodingConfig, workspace *vp8lLZ77Workspace) (vp8lEncodingPlan, bool) {
+	if workspace == nil {
+		workspace = &vp8lLZ77Workspace{}
+	}
 	best := vp8lEncodingPlan{}
 	bestBits := maxBits
 	found := false
-	mainWidth, mainHeight := vp8lPlanImageDimensions(width, height, base)
-	total := mainWidth * mainHeight
-	for _, candidateCount := range vp8lLZ77CandidateCounts(total) {
-		candidate, candidateBits, ok := makeVP8LLZ77PlanConfigCandidateCount(readPixel, bounds, width, height, base, bestBits, cfg, candidateCount)
+	source := vp8lPrepareLZ77Source(readPixel, bounds, width, height, base, cfg.materializeSource, workspace)
+	source.prepareMatchGraph(base, cfg, workspace)
+	for _, candidateCount := range vp8lLZ77CandidateCounts(source.total) {
+		candidate, candidateBits, ok := makeVP8LLZ77PlanConfigCandidateCountPrepared(source, width, height, base, bestBits, cfg, candidateCount, workspace)
 		if !ok || candidateBits >= bestBits {
 			continue
 		}
-		best = candidate
+		best = vp8lOwnLZ77PlanTokens(candidate)
 		bestBits = candidateBits
 		found = true
 	}
@@ -3315,20 +3333,37 @@ func makeVP8LLZ77PlanConfig(readPixel pixelReader, bounds image.Rectangle, width
 }
 
 func makeVP8LLZ77PlanConfigCandidateCount(readPixel pixelReader, bounds image.Rectangle, width int, height int, base vp8lEncodingPlan, maxBits uint64, cfg vp8lEncodingConfig, candidateCount int) (vp8lEncodingPlan, uint64, bool) {
+	return makeVP8LLZ77PlanConfigCandidateCountWorkspace(readPixel, bounds, width, height, base, maxBits, cfg, candidateCount, nil)
+}
+
+func makeVP8LLZ77PlanConfigCandidateCountWorkspace(readPixel pixelReader, bounds image.Rectangle, width int, height int, base vp8lEncodingPlan, maxBits uint64, cfg vp8lEncodingConfig, candidateCount int, workspace *vp8lLZ77Workspace) (vp8lEncodingPlan, uint64, bool) {
+	if workspace == nil {
+		workspace = &vp8lLZ77Workspace{}
+	}
+	source := vp8lPrepareLZ77Source(readPixel, bounds, width, height, base, cfg.materializeSource, workspace)
+	source.prepareMatchGraph(base, cfg, workspace)
+	return makeVP8LLZ77PlanConfigCandidateCountPrepared(source, width, height, base, maxBits, cfg, candidateCount, workspace)
+}
+
+func makeVP8LLZ77PlanConfigCandidateCountPrepared(source vp8lLZ77Source, width int, height int, base vp8lEncodingPlan, maxBits uint64, cfg vp8lEncodingConfig, candidateCount int, workspace *vp8lLZ77Workspace) (vp8lEncodingPlan, uint64, bool) {
 	if base.analysis.allChannelsConstant() {
 		return vp8lEncodingPlan{}, 0, false
 	}
-	mainWidth, mainHeight := vp8lPlanImageDimensions(width, height, base)
-	total := mainWidth * mainHeight
-	mainBounds := image.Rect(0, 0, mainWidth, mainHeight)
-	if !base.colorIndexing {
-		mainBounds = bounds
-	}
-	read := vp8lPlanPixelReader(readPixel, bounds, width, height, base)
+	mainWidth, mainHeight := source.width, source.height
+	total := source.total
+	mainBounds := source.bounds
+	read := source.readPixel
 	if !vp8lShouldTryLZ77(read, mainBounds, mainWidth) {
 		return vp8lEncodingPlan{}, 0, false
 	}
-	lz77Tokens, literalAnalysis, greenCounts, distanceCounts, copyCount, tokenCount := vp8lBuildLZ77WithAnalysisCandidateCount(read, mainBounds, mainWidth, true, 0, base.analysis, candidateCount)
+	tokenCapacity := 0
+	if !cfg.lz77CostOnly {
+		tokenCapacity = workspace.greedyTokenCapacity
+		if tokenCapacity == 0 {
+			tokenCapacity = total / 4
+		}
+	}
+	lz77Tokens, literalAnalysis, greenCounts, distanceCounts, copyCount, tokenCount := vp8lBuildLZ77WithAnalysisCandidateCountWorkspace(read, mainBounds, mainWidth, !cfg.lz77CostOnly, tokenCapacity, base.analysis, candidateCount, workspace, source.matchGraph)
 	if copyCount == 0 {
 		return vp8lEncodingPlan{}, 0, false
 	}
@@ -3345,7 +3380,7 @@ func makeVP8LLZ77PlanConfigCandidateCount(readPixel pixelReader, bounds image.Re
 	seedLZ77Bits := vp8lPayloadBits(width, height, base)
 	optimizeSeed := base.colorIndexing || cfg.optimalLZ77MinSeedBitsNumerator == 0 || seedLZ77Bits*2 > uint64(total*cfg.optimalLZ77MinSeedBitsNumerator)
 	if cfg.optimalLZ77Passes > 0 && optimizeSeed && total <= cfg.maxOptimalLZ77Pixels && candidateCount == vp8lOptimalLZ77CandidateCount(total) {
-		if optimized, improved := vp8lOptimizeLZ77Plan(read, mainBounds, mainWidth, width, height, literalBase, base, candidateCount, cfg.optimalLZ77Passes); improved {
+		if optimized, improved := vp8lOptimizeLZ77PlanWorkspace(read, mainBounds, mainWidth, width, height, literalBase, base, candidateCount, cfg.optimalLZ77Passes, workspace, source.packed, source.matchGraph); improved {
 			base = optimized
 			lz77Tokens = optimized.lz77Tokens
 			tokenCount = len(lz77Tokens)
@@ -3370,6 +3405,11 @@ func makeVP8LLZ77PlanConfigCandidateCount(readPixel pixelReader, bounds image.Re
 			colorCacheMaxBits -= minSavings
 		}
 		if colorCachePlan, ok := makeVP8LLZ77ColorCachePlan(read, mainBounds, mainWidth, width, height, base, lz77Tokens, colorCacheMaxBits); ok {
+			if cfg.tryOptimalLZ77ColorCache && total <= cfg.maxOptimalLZ77Pixels && candidateCount == vp8lOptimalLZ77CandidateCount(total) {
+				if optimized, improved := vp8lOptimizeLZ77ColorCachePlan(source, width, height, literalBase, colorCachePlan, candidateCount, cfg.optimalLZ77Passes, workspace, cfg.optimalLZ77Passes); improved {
+					colorCachePlan = optimized
+				}
+			}
 			best = colorCachePlan
 			bestBits = vp8lPayloadBits(width, height, best)
 			found = true
@@ -3584,10 +3624,14 @@ func vp8lBuildLZ77WithAnalysis(readPixel pixelReader, bounds image.Rectangle, wi
 }
 
 func vp8lBuildLZ77WithAnalysisCandidateCount(readPixel pixelReader, bounds image.Rectangle, width int, collectTokens bool, tokenCapacity int, baseAnalysis imageAnalysis, candidateCount int) ([]vp8lToken, imageAnalysis, [nLiteralCodes + nLengthCodes]uint32, [nDistanceCodes]uint32, int, int) {
-	var tokens []vp8lToken
-	if collectTokens && tokenCapacity > 0 {
-		tokens = make([]vp8lToken, 0, tokenCapacity)
+	return vp8lBuildLZ77WithAnalysisCandidateCountWorkspace(readPixel, bounds, width, collectTokens, tokenCapacity, baseAnalysis, candidateCount, nil, vp8lMatchGraph{})
+}
+
+func vp8lBuildLZ77WithAnalysisCandidateCountWorkspace(readPixel pixelReader, bounds image.Rectangle, width int, collectTokens bool, tokenCapacity int, baseAnalysis imageAnalysis, candidateCount int, workspace *vp8lLZ77Workspace, matchGraph vp8lMatchGraph) ([]vp8lToken, imageAnalysis, [nLiteralCodes + nLengthCodes]uint32, [nDistanceCodes]uint32, int, int) {
+	if workspace == nil {
+		workspace = &vp8lLZ77Workspace{}
 	}
+	tokens := workspace.resetGreedyTokens(collectTokens, tokenCapacity)
 	literalObserver := newVP8LLiteralAnalysisObserver(baseAnalysis)
 	var greenCounts [nLiteralCodes + nLengthCodes]uint32
 	var distanceCounts [nDistanceCodes]uint32
@@ -3596,9 +3640,12 @@ func vp8lBuildLZ77WithAnalysisCandidateCount(readPixel pixelReader, bounds image
 	tokenCount := 0
 	total := bounds.Dx() * bounds.Dy()
 	candidateCount = clipInt(candidateCount, vp8lMinHashCandidates, vp8lMaxHashCandidates)
-	var primaryHashTable [vp8lHashSize][vp8lMinHashCandidates]int32
-	var extraHashTable [vp8lHashSize][vp8lMinHashCandidates]int32
-	vp8lInitHashTables(&primaryHashTable, &extraHashTable, candidateCount)
+	useMatchGraph := matchGraph.available() && matchGraph.supports(candidateCount)
+	if !useMatchGraph {
+		workspace.resetHashTables(candidateCount)
+	}
+	primaryHashTable := &workspace.hashTables.primary
+	extraHashTable := &workspace.hashTables.extra
 
 	emitLiteral := func(pixel color.NRGBA) {
 		if collectTokens {
@@ -3624,28 +3671,48 @@ func vp8lBuildLZ77WithAnalysisCandidateCount(readPixel pixelReader, bounds image
 
 	for pos := 0; pos < total; {
 		if pos+vp8lMinBackwardRefLength <= total {
-			hash := vp8lHashAt(readPixel, bounds, width, pos)
-			candidates := vp8lHashCandidatesFor(primaryHashTable[hash], extraHashTable[hash], candidateCount)
-			match := vp8lBestHashMatch(candidates, candidateCount, readPixel, bounds, width, pos, total)
+			hash := 0
+			match := vp8lMatch{}
+			if useMatchGraph {
+				match = matchGraph.best(pos, candidateCount)
+			} else {
+				hash = vp8lHashAt(readPixel, bounds, width, pos)
+				candidates := vp8lHashCandidatesFor(primaryHashTable[hash], extraHashTable[hash], candidateCount)
+				match = vp8lBestHashMatch(candidates, candidateCount, readPixel, bounds, width, pos, total)
+			}
 			if match.length >= vp8lMinBackwardRefLength {
-				nextMatch := vp8lNextLazyMatch(&primaryHashTable, &extraHashTable, candidateCount, hash, readPixel, bounds, width, pos, total)
+				nextMatch := vp8lMatch{}
+				if useMatchGraph {
+					nextMatch = matchGraph.best(pos+1, candidateCount)
+				} else {
+					nextMatch = vp8lNextLazyMatch(primaryHashTable, extraHashTable, candidateCount, hash, readPixel, bounds, width, pos, total)
+				}
 				if vp8lShouldUseLazyMatch(match, nextMatch) {
 					emitLiteral(vp8lPixelAt(readPixel, bounds, width, pos))
-					vp8lInsertHash(&primaryHashTable, &extraHashTable, candidateCount, readPixel, bounds, width, pos, total)
+					if !useMatchGraph {
+						vp8lInsertHash(primaryHashTable, extraHashTable, candidateCount, readPixel, bounds, width, pos, total)
+					}
 					pos++
 					continue
 				}
 				emitCopy(match.length, match.distanceCode)
-				for i := 0; i < match.length; i++ {
-					vp8lInsertHash(&primaryHashTable, &extraHashTable, candidateCount, readPixel, bounds, width, pos+i, total)
+				if !useMatchGraph {
+					for i := 0; i < match.length; i++ {
+						vp8lInsertHash(primaryHashTable, extraHashTable, candidateCount, readPixel, bounds, width, pos+i, total)
+					}
 				}
 				pos += match.length
 				continue
 			}
-			vp8lInsertHash(&primaryHashTable, &extraHashTable, candidateCount, readPixel, bounds, width, pos, total)
+			if !useMatchGraph {
+				vp8lInsertHash(primaryHashTable, extraHashTable, candidateCount, readPixel, bounds, width, pos, total)
+			}
 		}
 		emitLiteral(vp8lPixelAt(readPixel, bounds, width, pos))
 		pos++
+	}
+	if collectTokens {
+		workspace.keepGreedyTokens(tokens)
 	}
 	if firstLiteral {
 		return tokens, emptyVP8LLiteralAnalysis(), greenCounts, distanceCounts, copyCount, tokenCount
@@ -3660,20 +3727,21 @@ func makeVP8LLZ77ColorCachePlan(readPixel pixelReader, bounds image.Rectangle, m
 	best := vp8lEncodingPlan{}
 	bestBits := maxBits
 	ok := false
+	statistics := vp8lBuildLZ77ColorCacheStatistics(readPixel, bounds, mainWidth, lz77Tokens, base.analysis)
 	for bits := uint8(vp8lMinColorCacheBits); bits <= vp8lMaxColorCacheBits; bits++ {
-		_, literalAnalysis, greenCounts, cacheHits := vp8lBuildLZ77ColorCache(readPixel, bounds, mainWidth, lz77Tokens, bits, false, base.analysis)
-		if cacheHits == 0 {
+		stats := statistics[bits]
+		if stats.cacheHits == 0 {
 			continue
 		}
-		greenLengths, lengthsOK := huffmanColorCacheCodeLengths(greenCounts)
+		greenLengths, lengthsOK := huffmanColorCacheCodeLengths(stats.greenCounts)
 		if !lengthsOK {
 			continue
 		}
 		candidate := base
 		candidate.colorCache = &vp8lColorCachePlan{
 			bits:     bits,
-			analysis: literalAnalysis,
-			counts:   greenCounts,
+			analysis: stats.literalAnalysis,
+			counts:   stats.greenCounts,
 			lengths:  greenLengths,
 			codes:    canonicalColorCacheCodes(greenLengths),
 		}

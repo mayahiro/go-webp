@@ -71,7 +71,22 @@ func vp8lAnalyzeLZ77Tokens(tokens []vp8lToken, baseAnalysis imageAnalysis) (vp8l
 	return stats, true
 }
 
+func vp8lLZ77TokenCount(counts [nLiteralCodes + nLengthCodes]uint32) int {
+	total := 0
+	for _, count := range counts {
+		total += int(count)
+	}
+	return total
+}
+
 func vp8lOptimizeLZ77Plan(readPixel pixelReader, bounds image.Rectangle, mainWidth int, width int, height int, literalBase vp8lEncodingPlan, seed vp8lEncodingPlan, candidateCount int, passes int) (vp8lEncodingPlan, bool) {
+	return vp8lOptimizeLZ77PlanWorkspace(readPixel, bounds, mainWidth, width, height, literalBase, seed, candidateCount, passes, nil, nil, vp8lMatchGraph{})
+}
+
+func vp8lOptimizeLZ77PlanWorkspace(readPixel pixelReader, bounds image.Rectangle, mainWidth int, width int, height int, literalBase vp8lEncodingPlan, seed vp8lEncodingPlan, candidateCount int, passes int, workspace *vp8lLZ77Workspace, packed []uint32, matchGraph vp8lMatchGraph) (vp8lEncodingPlan, bool) {
+	if workspace == nil {
+		workspace = &vp8lLZ77Workspace{}
+	}
 	best := seed
 	bestBits := vp8lPayloadBits(width, height, seed)
 	model := seed
@@ -79,7 +94,7 @@ func vp8lOptimizeLZ77Plan(readPixel pixelReader, bounds image.Rectangle, mainWid
 	maxMatchLength := vp8lOptimalMatchLengthLimit(literalBase)
 	paretoMatches := literalBase.colorIndexing && len(literalBase.colorTable) <= 8
 	for pass := 0; pass < passes; pass++ {
-		tokens, ok := vp8lBuildOptimalLZ77(readPixel, bounds, mainWidth, candidateCount, maxMatchLength, paretoMatches, vp8lLZ77CostModelForPlan(model))
+		tokens, ok := vp8lBuildOptimalLZ77Workspace(readPixel, bounds, mainWidth, candidateCount, maxMatchLength, paretoMatches, vp8lLZ77CostModelForPlan(model), workspace, pass, len(model.lz77Tokens), packed, matchGraph)
 		if !ok || vp8lLZ77TokensEqual(tokens, model.lz77Tokens) {
 			break
 		}
@@ -110,13 +125,16 @@ func vp8lOptimalMatchLengthLimit(plan vp8lEncodingPlan) int {
 }
 
 type vp8lLZ77CostModel struct {
-	literalAnalysis imageAnalysis
-	greenCounts     [nLiteralCodes + nLengthCodes]uint32
-	greenLengths    [nLiteralCodes + nLengthCodes]uint8
-	distanceCounts  [nDistanceCodes]uint32
-	distanceN       int
-	distanceLengths [nDistanceCodes]uint8
-	distanceNormal  bool
+	literalAnalysis   imageAnalysis
+	greenCounts       [nLiteralCodes + nLengthCodes]uint32
+	greenLengths      [nLiteralCodes + nLengthCodes]uint8
+	distanceCounts    [nDistanceCodes]uint32
+	distanceN         int
+	distanceLengths   [nDistanceCodes]uint8
+	distanceNormal    bool
+	colorCacheCounts  []uint32
+	colorCacheLengths []uint8
+	colorCacheIndices []int32
 }
 
 func vp8lLZ77CostModelForPlan(plan vp8lEncodingPlan) vp8lLZ77CostModel {
@@ -132,11 +150,21 @@ func vp8lLZ77CostModelForPlan(plan vp8lEncodingPlan) vp8lLZ77CostModel {
 }
 
 func (m vp8lLZ77CostModel) literalCost(pixel color.NRGBA) uint64 {
-	cost := vp8lLZ77SymbolCost(m.greenCounts[pixel.G], m.greenLengths[pixel.G], 8)
+	cost, _ := m.literalCostAt(-1, pixel)
+	return cost
+}
+
+func (m vp8lLZ77CostModel) literalCostAt(pos int, pixel color.NRGBA) (uint64, int) {
+	if pos >= 0 && pos < len(m.colorCacheIndices) {
+		if cacheIndex := int(m.colorCacheIndices[pos]); cacheIndex >= 0 {
+			return m.greenSymbolCost(nLiteralCodes + nLengthCodes + cacheIndex), cacheIndex
+		}
+	}
+	cost := m.greenSymbolCost(int(pixel.G))
 	cost += vp8lChannelSymbolCost(m.literalAnalysis.channels[1], pixel.R)
 	cost += vp8lChannelSymbolCost(m.literalAnalysis.channels[2], pixel.B)
 	cost += vp8lChannelSymbolCost(m.literalAnalysis.channels[3], pixel.A)
-	return cost
+	return cost, -1
 }
 
 func (m vp8lLZ77CostModel) copyCost(length int, distanceCode int) uint64 {
@@ -146,9 +174,19 @@ func (m vp8lLZ77CostModel) copyCost(length int, distanceCode int) uint64 {
 func (m vp8lLZ77CostModel) lengthCost(length int) uint64 {
 	lengthPrefix := vp8lPrefixCode(length)
 	lengthSymbol := nLiteralCodes + lengthPrefix.code
-	cost := vp8lLZ77SymbolCost(m.greenCounts[lengthSymbol], m.greenLengths[lengthSymbol], 8)
+	cost := m.greenSymbolCost(lengthSymbol)
 	cost += uint64(lengthPrefix.extraBits)
 	return cost
+}
+
+func (m vp8lLZ77CostModel) greenSymbolCost(symbol int) uint64 {
+	if symbol >= 0 && symbol < len(m.colorCacheCounts) && symbol < len(m.colorCacheLengths) {
+		return vp8lLZ77SymbolCost(m.colorCacheCounts[symbol], m.colorCacheLengths[symbol], 8)
+	}
+	if symbol >= 0 && symbol < len(m.greenCounts) {
+		return vp8lLZ77SymbolCost(m.greenCounts[symbol], m.greenLengths[symbol], 8)
+	}
+	return 8
 }
 
 func (m vp8lLZ77CostModel) distanceCost(distanceCode int) uint64 {
@@ -204,32 +242,51 @@ func vp8lChannelSymbolCost(channel channelPlan, symbol uint8) uint64 {
 }
 
 func vp8lBuildOptimalLZ77(readPixel pixelReader, bounds image.Rectangle, width int, candidateCount int, maxMatchLength int, paretoMatches bool, model vp8lLZ77CostModel) ([]vp8lToken, bool) {
+	return vp8lBuildOptimalLZ77Workspace(readPixel, bounds, width, candidateCount, maxMatchLength, paretoMatches, model, nil, 0, 0, nil, vp8lMatchGraph{})
+}
+
+func vp8lBuildOptimalLZ77Workspace(readPixel pixelReader, bounds image.Rectangle, width int, candidateCount int, maxMatchLength int, paretoMatches bool, model vp8lLZ77CostModel, workspace *vp8lLZ77Workspace, pass int, tokenCapacity int, packed []uint32, matchGraph vp8lMatchGraph) ([]vp8lToken, bool) {
 	total := bounds.Dx() * bounds.Dy()
 	if total < vp8lMinBackwardRefLength*2 {
 		return nil, false
 	}
-	pixels := make([]uint32, total)
-	for pos := range pixels {
-		pixels[pos] = vp8lPackPixel(vp8lPixelAt(readPixel, bounds, width, pos))
+	if workspace == nil {
+		workspace = &vp8lLZ77Workspace{}
 	}
+	pixels := packed
+	if len(pixels) != total {
+		workspace.packedPixels = resizeVP8LUint32s(workspace.packedPixels, total)
+		pixels = workspace.packedPixels
+		for pos := range pixels {
+			pixels[pos] = vp8lPackPixel(vp8lPixelAt(readPixel, bounds, width, pos))
+		}
+	}
+	costs, previous, lengths, distanceCodes, selectedCache := workspace.resizeOptimal(total)
 	candidateCount = clipInt(candidateCount, vp8lMinHashCandidates, vp8lMaxHashCandidates)
-	costs := make([]uint64, total+1)
-	previous := make([]int32, total+1)
-	lengths := make([]uint16, total+1)
-	distanceCodes := make([]int32, total+1)
+	useMatchGraph := !paretoMatches && matchGraph.available() && matchGraph.supports(candidateCount)
+	costs[0] = 0
+	previous[0] = 0
+	lengths[0] = 0
+	distanceCodes[0] = 0
+	selectedCache[0] = -1
 	for i := 1; i <= total; i++ {
 		costs[i] = math.MaxUint64
 		previous[i] = -1
+		lengths[i] = 0
+		distanceCodes[i] = 0
+		selectedCache[i] = -1
 	}
-	var primaryHashTable [vp8lHashSize][vp8lMinHashCandidates]int32
-	var extraHashTable [vp8lHashSize][vp8lMinHashCandidates]int32
-	vp8lInitHashTables(&primaryHashTable, &extraHashTable, candidateCount)
+	if !useMatchGraph {
+		workspace.resetHashTables(candidateCount)
+	}
+	primaryHashTable := &workspace.hashTables.primary
+	extraHashTable := &workspace.hashTables.extra
 	var lengthCosts [vp8lMaxBackwardRefLength + 1]uint16
 	for length := vp8lMinBackwardRefLength; length <= vp8lMaxBackwardRefLength; length++ {
 		lengthCosts[length] = uint16(model.lengthCost(length))
 	}
 
-	relax := func(pos int, length int, distanceCode int, edgeCost uint64) {
+	relax := func(pos int, length int, distanceCode int, cacheIndex int, edgeCost uint64) {
 		end := pos + length
 		if end > total || costs[pos] == math.MaxUint64 {
 			return
@@ -240,33 +297,46 @@ func vp8lBuildOptimalLZ77(readPixel pixelReader, bounds image.Rectangle, width i
 			previous[end] = int32(pos)
 			lengths[end] = uint16(length)
 			distanceCodes[end] = int32(distanceCode)
+			selectedCache[end] = int32(cacheIndex)
 		}
 	}
 
 	for pos := 0; pos < total; pos++ {
 		pixel := vp8lUnpackPixel(pixels[pos])
-		relax(pos, 1, 0, model.literalCost(pixel))
+		literalCost, cacheIndex := model.literalCostAt(pos, pixel)
+		relax(pos, 1, 0, cacheIndex, literalCost)
 		if pos+vp8lMinBackwardRefLength <= total {
-			hash := vp8lOptimalHashAt(pixels, pos)
-			candidates := vp8lHashCandidatesFor(primaryHashTable[hash], extraHashTable[hash], candidateCount)
-			matches, matchCount := vp8lOptimalMatchCandidates(candidates, candidateCount, pixels, width, pos, maxMatchLength, paretoMatches, model)
+			var matches [vp8lMaxHashCandidates]vp8lMatch
+			matchCount := 0
+			if useMatchGraph {
+				matches, matchCount = matchGraph.optimalMatches(pos, candidateCount, maxMatchLength)
+			} else {
+				hash := vp8lOptimalHashAt(pixels, pos)
+				candidates := vp8lHashCandidatesFor(primaryHashTable[hash], extraHashTable[hash], candidateCount)
+				matches, matchCount = vp8lOptimalMatchCandidates(candidates, candidateCount, pixels, width, pos, maxMatchLength, paretoMatches, model)
+			}
 			for _, match := range matches[:matchCount] {
 				var matchLengths [64]uint16
 				lengthCount := vp8lOptimalMatchLengths(match.length, &matchLengths)
 				distanceCost := model.distanceCost(match.distanceCode)
 				for _, matchLength := range matchLengths[:lengthCount] {
 					length := int(matchLength)
-					relax(pos, length, match.distanceCode, uint64(lengthCosts[length])+distanceCost)
+					relax(pos, length, match.distanceCode, -1, uint64(lengthCosts[length])+distanceCost)
 				}
 			}
-			vp8lInsertOptimalHash(&primaryHashTable, &extraHashTable, candidateCount, pixels, pos)
+			if !useMatchGraph {
+				vp8lInsertOptimalHash(primaryHashTable, extraHashTable, candidateCount, pixels, pos)
+			}
 		}
 	}
 	if previous[total] < 0 {
 		return nil, false
 	}
 
-	tokens := make([]vp8lToken, 0, total/4)
+	if tokenCapacity == 0 {
+		tokenCapacity = total / 4
+	}
+	tokens := workspace.resetOptimalTokens(pass, tokenCapacity)
 	for pos := total; pos > 0; {
 		start := int(previous[pos])
 		length := int(lengths[pos])
@@ -274,7 +344,11 @@ func vp8lBuildOptimalLZ77(readPixel pixelReader, bounds image.Rectangle, width i
 			return nil, false
 		}
 		if length == 1 {
-			tokens = append(tokens, vp8lToken{pixel: vp8lUnpackPixel(pixels[start])})
+			if cacheIndex := int(selectedCache[pos]); cacheIndex >= 0 {
+				tokens = append(tokens, vp8lToken{cacheIndex: cacheIndex, colorCache: true})
+			} else {
+				tokens = append(tokens, vp8lToken{pixel: vp8lUnpackPixel(pixels[start])})
+			}
 		} else {
 			tokens = append(tokens, vp8lToken{copyLength: length, distanceCode: int(distanceCodes[pos])})
 		}
@@ -283,6 +357,7 @@ func vp8lBuildOptimalLZ77(readPixel pixelReader, bounds image.Rectangle, width i
 	for left, right := 0, len(tokens)-1; left < right; left, right = left+1, right-1 {
 		tokens[left], tokens[right] = tokens[right], tokens[left]
 	}
+	workspace.keepOptimalTokens(pass, tokens)
 	return tokens, true
 }
 
@@ -358,6 +433,10 @@ func vp8lOptimalMatchCandidates(candidates vp8lHashCandidateList, candidateCount
 			count++
 		}
 	}
+	return vp8lFilterOptimalMatches(matches, count, paretoMatches, model)
+}
+
+func vp8lFilterOptimalMatches(matches [vp8lMaxHashCandidates]vp8lMatch, count int, paretoMatches bool, model vp8lLZ77CostModel) ([vp8lMaxHashCandidates]vp8lMatch, int) {
 	if !paretoMatches {
 		best := vp8lMatch{}
 		for i := 0; i < count; i++ {

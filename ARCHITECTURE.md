@@ -36,6 +36,20 @@ and entropy-clustered meta-prefix searches then run only on the finalists.
 This keeps the final decision based on emitted bit cost without applying every
 expensive post-processing path to every transform candidate.
 
+For each shortlisted LZ77 finalist, balanced profiles may materialize the
+transformed stream as one packed pixel plane capped at 32 MiB. Greedy parsing,
+optimal parsing, and color-cache analysis then share that plane instead of
+recomputing predictor and cross-color residuals. Images with at least 65,536
+pixels may also use a compact match graph capped at 32 MiB; smaller or larger
+inputs keep the direct bounded matcher.
+
+LZ77 token buffers, hash tables, and optimal-parser arrays belong to one
+encode-scoped workspace and are reused across finalists. Screening plans keep
+only symbol statistics. The eleven color-cache sizes are analyzed in one
+source traversal, while selected plans retain their own immutable tokens.
+`BestCompression` can run an additional cache-aware optimal parse whose cost
+model compares literals, cache hits, and backward references together.
+
 The selected `vp8lEncodingPlan` is immutable during emission. The VP8L writer
 serializes transforms and image data from that plan; it does not repeat the
 candidate search. `Fast`, `Balanced`, `BestCompression`, and `LowMemory`
@@ -75,6 +89,11 @@ Search limits, materialization limits, and residual-buffer limits are explicit
 parts of internal mode configuration. `LowMemory` avoids full-frame source and
 residual materialization, while `BestCompression` permits more retained state
 for broader search.
+
+VP8L finalist planes and match graphs are bounded independently at 32 MiB.
+They are sequential scratch state rather than global pools, so concurrent
+calls do not retain or share encoder memory. Plans copy only the token stream
+that survives candidate reduction.
 
 VP8 reconstruction uses a two-macroblock-row ring: 32 luma rows and 16 rows for
 each chroma plane. Top-row contexts, the skip map, and the optional residual

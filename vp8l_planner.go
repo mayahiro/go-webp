@@ -6,25 +6,27 @@ import (
 )
 
 type vp8lRankedCandidate struct {
-	index int
-	bits  uint64
+	index      int
+	bits       uint64
+	tokenCount int
 }
 
 func vp8lFinalizeEncodingPlanV2(readPixel pixelReader, bounds image.Rectangle, width int, height int, literalPlan vp8lEncodingPlan, candidates *[vp8lMaxEncodingPlanCandidates]vp8lEncodingPlan, candidateCount int, literalBestIndex int, best vp8lEncodingPlan, bestBits uint64, cfg vp8lEncodingConfig) vp8lEncodingPlan {
 	if candidateCount == 0 {
 		return literalPlan
 	}
-
 	literalRanking := vp8lRankLiteralCandidates(candidates, candidateCount, width, height)
 	if cfg.tryLZ77 {
+		workspace := &vp8lLZ77Workspace{}
 		screeningIndices := vp8lSelectDiverseCandidateIndices(literalRanking, candidates, cfg.finalLZ77Candidates)
 		screeningIndices = vp8lAppendRankedCandidates(screeningIndices, literalRanking, candidates, func(plan vp8lEncodingPlan) bool { return plan.baselineCandidate })
-		lz77Ranking := vp8lRankGreedyLZ77Candidates(readPixel, bounds, width, height, candidates, screeningIndices, bestBits, cfg)
+		lz77Ranking := vp8lRankGreedyLZ77Candidates(readPixel, bounds, width, height, candidates, screeningIndices, bestBits, cfg, workspace)
 		indices := vp8lTopCandidateIndices(lz77Ranking, cfg.finalLZ77Candidates)
 		indices = vp8lAppendFirstRankedCandidate(indices, lz77Ranking, candidates, func(plan vp8lEncodingPlan) bool { return plan.colorIndexing })
 		indices = vp8lAppendRankedCandidates(indices, lz77Ranking, candidates, func(plan vp8lEncodingPlan) bool { return plan.baselineCandidate })
 		for _, index := range indices {
-			best, bestBits = vp8lConsiderCandidateLZ77Config(readPixel, bounds, width, height, candidates[index], best, bestBits, cfg)
+			workspace.setGreedyTokenCapacity(vp8lRankedCandidateTokenCount(lz77Ranking, index))
+			best, bestBits = vp8lConsiderCandidateLZ77ConfigWorkspace(readPixel, bounds, width, height, candidates[index], best, bestBits, cfg, workspace)
 		}
 	}
 
@@ -84,13 +86,14 @@ func vp8lRankLiteralCandidates(candidates *[vp8lMaxEncodingPlanCandidates]vp8lEn
 	return ranking
 }
 
-func vp8lRankGreedyLZ77Candidates(readPixel pixelReader, bounds image.Rectangle, width int, height int, candidates *[vp8lMaxEncodingPlanCandidates]vp8lEncodingPlan, indices []int, bestBits uint64, cfg vp8lEncodingConfig) []vp8lRankedCandidate {
+func vp8lRankGreedyLZ77Candidates(readPixel pixelReader, bounds image.Rectangle, width int, height int, candidates *[vp8lMaxEncodingPlanCandidates]vp8lEncodingPlan, indices []int, bestBits uint64, cfg vp8lEncodingConfig, workspace *vp8lLZ77Workspace) []vp8lRankedCandidate {
 	screening := cfg
 	screening.optimalLZ77Passes = 0
 	screening.tryColorCache = false
 	screening.tryLZ77ColorCache = false
 	screening.tryLZ77MetaPrefix = false
 	screening.tryLZ77TokenMetaPrefix = false
+	screening.lz77CostOnly = true
 	ranking := make([]vp8lRankedCandidate, 0, len(indices))
 	for _, index := range indices {
 		candidate := candidates[index]
@@ -98,14 +101,27 @@ func vp8lRankGreedyLZ77Candidates(readPixel pixelReader, bounds image.Rectangle,
 		if !vp8lShouldTryCandidateLZ77(candidate, candidateBits, bestBits) {
 			continue
 		}
-		lz77Plan, ok := makeVP8LLZ77PlanConfig(readPixel, bounds, width, height, candidate, ^uint64(0), screening)
+		lz77Plan, ok := makeVP8LLZ77PlanConfigWorkspace(readPixel, bounds, width, height, candidate, ^uint64(0), screening, workspace)
 		if !ok {
 			continue
 		}
-		ranking = append(ranking, vp8lRankedCandidate{index: index, bits: vp8lPayloadBits(width, height, lz77Plan)})
+		ranking = append(ranking, vp8lRankedCandidate{
+			index:      index,
+			bits:       vp8lPayloadBits(width, height, lz77Plan),
+			tokenCount: vp8lLZ77TokenCount(lz77Plan.lz77GreenCounts),
+		})
 	}
 	vp8lSortRankedCandidates(ranking)
 	return ranking
+}
+
+func vp8lRankedCandidateTokenCount(ranking []vp8lRankedCandidate, index int) int {
+	for _, ranked := range ranking {
+		if ranked.index == index {
+			return ranked.tokenCount
+		}
+	}
+	return 0
 }
 
 func vp8lSortRankedCandidates(ranking []vp8lRankedCandidate) {

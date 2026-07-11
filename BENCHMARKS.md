@@ -33,16 +33,16 @@ output size for one encode.
 
 | Fixture | Quality | Time | encoded_B | B/op | allocs/op |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Gradient 128x128 | 1 | 5.051 ms | 866 | 86,186 | 20 |
-| Gradient 128x128 | 50 | 4.521 ms | 2,768 | 90,730 | 20 |
-| Gradient 128x128 | 75 | 5.243 ms | 3,506 | 93,802 | 20 |
-| Gradient 128x128 | 90 | 11.761 ms | 5,284 | 152,746 | 24 |
-| Gradient 128x128 | 100 | 12.172 ms | 8,306 | 164,522 | 21 |
-| UI 256x256 | 75 | 17.959 ms | 2,906 | 306,096 | 21 |
-| Flat 128x128 | 75 | 4.076 ms | 84 | 89,274 | 19 |
-| Palette 256x256 | 75 | 26.684 ms | 39,042 | 394,496 | 23 |
-| Alpha 128x128 | 75 | 6.259 ms | 5,582 | 126,218 | 33 |
-| Photo-like 512x512 | 75 | 117.857 ms | 142,078 | 1,467,968 | 22 |
+| Gradient 128x128 | 1 | 4.125 ms | 866 | 86,186 | 20 |
+| Gradient 128x128 | 50 | 4.499 ms | 2,768 | 90,730 | 20 |
+| Gradient 128x128 | 75 | 4.997 ms | 3,506 | 93,802 | 20 |
+| Gradient 128x128 | 90 | 11.374 ms | 5,284 | 152,746 | 24 |
+| Gradient 128x128 | 100 | 12.018 ms | 8,306 | 164,522 | 21 |
+| UI 256x256 | 75 | 17.581 ms | 2,906 | 306,096 | 21 |
+| Flat 128x128 | 75 | 3.967 ms | 84 | 89,274 | 19 |
+| Palette 256x256 | 75 | 26.041 ms | 39,042 | 394,496 | 23 |
+| Alpha 128x128 | 75 | 6.085 ms | 5,582 | 125,738 | 32 |
+| Photo-like 512x512 | 75 | 115.379 ms | 142,078 | 1,467,968 | 22 |
 
 The photo-like fixture is deterministic synthetic content and is not a
 substitute for a natural-photo corpus.
@@ -51,26 +51,31 @@ substitute for a natural-photo corpus.
 
 | Fixture | Time | encoded_B | B/op | allocs/op |
 | --- | ---: | ---: | ---: | ---: |
-| Gradient 128x128 | 50.188 ms | 58 | 446,280 | 395 |
-| UI 256x256 | 99.270 ms | 1,304 | 1,582,413 | 202 |
-| Flat 128x128 | 12.244 ms | 32 | 9,173 | 33 |
-| Palette 256x256 | 71.263 ms | 756 | 1,544,568 | 190 |
-| Alpha 128x128 | 65.567 ms | 368 | 672,373 | 625 |
-| Photo-like 512x512 | 1,698.321 ms | 23,770 | 202,396,880 | 1,042 |
+| Gradient 128x128 | 33.042 ms | 58 | 639,960 | 391 |
+| UI 256x256 | 80.038 ms | 1,304 | 1,475,074 | 169 |
+| Flat 128x128 | 11.988 ms | 32 | 9,389 | 33 |
+| Palette 256x256 | 50.284 ms | 756 | 1,342,994 | 157 |
+| Alpha 128x128 | 37.094 ms | 368 | 784,128 | 598 |
+| Photo-like 512x512 | 811.380 ms | 23,770 | 17,247,688 | 839 |
 
 ## Interpretation
 
 - Q75 lossy encodes for the generated fixtures through 256x256 remain below
-  30 ms on this machine; the photo-like 512x512 fixture takes about 118 ms
+  30 ms on this machine; the photo-like 512x512 fixture takes about 115 ms
 - High-quality lossy encoding costs more because it enables a broader source
   and mode search
 - Lossy reconstruction uses a two-macroblock-row ring, reducing the estimated
   1024x1024 reconstruction workspace from about 1.5 MiB to 48 KiB without
   changing the encoded stream
-- Lossless performance varies substantially with image structure. The broader
-  transform, optimal-LZ77, color-cache, and histogram search favors encoded
-  size over latency; use `ModeFast` or `ModeLowMemory` when latency or retained
-  state is more important
+- Lossless performance varies substantially with image structure. The
+  photo-like 512x512 fixture takes about 811 ms and allocates about 17.2 MiB
+  per encode in this benchmark
+- Lossless finalist search reuses encode-scoped token, hash, and dynamic-
+  programming workspaces. It also evaluates color-cache sizes in one source
+  traversal and may materialize a bounded transformed pixel plane
+- The broader transform, optimal-LZ77, color-cache, and histogram search
+  favors encoded size over latency; use `ModeFast` or `ModeLowMemory` when
+  latency or retained state is more important
 - Current lossy latency does not justify architecture-specific assembly in the
   project scope, where encoded size and decoded quality take priority
 - Before adding SIMD or assembly, profile-guided work should identify a stable

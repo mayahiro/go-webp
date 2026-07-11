@@ -91,11 +91,16 @@ lossless encoderはVP8L predictor、color、color indexing、subtract-green、pa
 - 小さいlow-color入力向けの上限付きpacked color-index stream
 - 複数候補LZ77 match finderと1手先のlazy matching
 - indexed streamと有望な一般画像stream向けのcost-based optimal parsing
-- 1から11 bitsから動的に選択するcolor cache
+- 65,536 pixels以上のbuffered finalist stream向け上限付きcompact match graph
+- 1回のsource走査で解析し、1から11 bitsから動的に選択するcolor cache
 - literalと変換済みresidual stream向けのspatial prediction、LZ77、color cache codingの選択的な組み合わせ
 - tile適応のpredictor modeとcross-color係数
 - 最大32 coding groupsのentropy-clustered meta-prefix histogram
 - cheapなshortlist後にoptimal LZ77、color cache、histogram候補の完全な出力costを比較する2段階planner
+- finalist候補間で再利用するencode単位のtoken、hash、dynamic-programming workspace
+
+`ModeBestCompression` はcolor-cache hit costをmodelへ含めたoptimal LZ77 parsingを追加実行できます
+元の候補も維持し、完全な出力costが小さくなる場合だけこのpassを採用します
 
 制限なしのhash chainは使用しません
 これによりworkとmemoryを制限できますが、より広いsearchを行うencoderより出力が大きくなる入力もあります
@@ -136,10 +141,11 @@ compressed lossy alphaはglobal filter、frequency-coded residual、連続runと
 encodingでは入力を複数回走査する場合があります
 主なresource上限は次のとおりです
 
-- lossless `ModeBestCompression` はcustom画像実装を安全に並列読み取りするため、最大32 MiBの変換済みpixel planeを使う場合がある
+- bufferを使うlossless profileは最大32 MiBのsource planeと変換済みfinalist pixel planeを使う場合がある
+- lossless compact match graphは最大32 MiBで、対象size外では上限付きdirect matcherへfallbackする
 - bufferを使うlossy profileは推定32 MiBまで量子化済みresidualを保持し、統計と最終codingで再利用できる
 - lossyの再構成pixelはfull-frame planeではなく2 macroblock rowsのringを使う
-- `ModeBestCompression` は独立したlossless候補を最大4 workersで解析できる
+- `ModeBestCompression` は独立したlossless候補を最大4 workersで解析でき、並行readの安全性が既知でないcustom画像実装には最大32 MiBの変換済みplaneを使う
 - 標準画像型ではlossy frame planningとalpha解析を2 workersで実行できる
 - `ModeLowMemory` はfull-frame source plane、VP8 residual buffer、VP8L token stream、meta-prefix plan、color-cache planを保持しない
 

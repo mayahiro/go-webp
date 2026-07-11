@@ -141,6 +141,53 @@ func BenchmarkEncodeLosslessColorTransformLZ77ColorCache(b *testing.B) {
 	benchmarkEncodeLosslessImage(b, newColorTransformLZ77ColorCacheFixture())
 }
 
+func BenchmarkEncodeLosslessMatchGraphAblation(b *testing.B) {
+	img := newLosslessBenchmarkFixtureImage(losslessBenchmarkCase{
+		name:   "PhotoLike512",
+		kind:   benchmarkImagePhotoLike,
+		width:  512,
+		height: 512,
+	})
+	for _, mode := range []struct {
+		name string
+		mode Mode
+	}{
+		{name: "Default", mode: ModeDefault},
+		{name: "Best", mode: ModeBestCompression},
+	} {
+		for _, graph := range []struct {
+			name    string
+			enabled bool
+		}{
+			{name: "Direct"},
+			{name: "Graph", enabled: true},
+		} {
+			b.Run(mode.name+"/"+graph.name, func(b *testing.B) {
+				cfg := vp8lEncodingConfigForMode(mode.mode, img, pixelReaderFor(img), img.Bounds(), img.Bounds().Dx(), img.Bounds().Dy())
+				cfg.useLZ77MatchGraph = graph.enabled
+				benchmarkEncodeLosslessConfig(b, img, cfg)
+			})
+		}
+	}
+}
+
+func benchmarkEncodeLosslessConfig(b *testing.B, img image.Image, cfg vp8lEncodingConfig) {
+	source := newEncoderSource(img)
+	var output bytes.Buffer
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		output.Reset()
+		readPixel := source.pixels()
+		prepared, preparedConfig, _ := vp8lPrepareEncodingSource(source.image, readPixel, source.bounds, source.width, source.height, cfg)
+		plan := chooseVP8LEncodingPlanForPreparedImage(source.image, prepared, source.bounds, source.width, source.height, preparedConfig)
+		if err := writeLosslessVP8L(&output, source, prepared, plan); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.ReportMetric(float64(output.Len()), "encoded_B")
+}
+
 func benchmarkEncodeLossyImage(b *testing.B, img image.Image, quality int, inputBytes int) {
 	opts := &Options{Compression: CompressionLossy, Quality: quality}
 	encoded := encodeBenchmarkWebP(b, img, opts)

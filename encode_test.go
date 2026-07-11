@@ -2090,6 +2090,221 @@ func TestVP8LOptimalParserImprovesGeneralImageFixture(t *testing.T) {
 	assertLosslessBenchmarkWebP(t, data, img)
 }
 
+func TestVP8LLZ77CostOnlyMatchesRetainedTokenPlan(t *testing.T) {
+	img := image.NewNRGBA(image.Rect(0, 0, 128, 128))
+	for y := 0; y < img.Rect.Dy(); y++ {
+		for x := 0; x < img.Rect.Dx(); x++ {
+			id := (y%16)*16 + x%16
+			img.SetNRGBA(x, y, color.NRGBA{R: uint8(id), G: uint8(id * 37), B: uint8(id * 73), A: 255})
+		}
+	}
+	bounds := img.Bounds()
+	readPixel := pixelReaderFor(img)
+	analysis := analyzeImage(readPixel, bounds)
+	base := vp8lEncodingPlan{analysis: analysis, alpha: analysis.alpha}
+	cfg := vp8lDefaultEncodingConfig()
+	cfg.optimalLZ77Passes = 0
+	cfg.tryColorCache = false
+	cfg.tryLZ77MetaPrefix = false
+	cfg.tryLZ77TokenMetaPrefix = false
+	candidateCount := vp8lHashCandidateCount(bounds.Dx() * bounds.Dy())
+
+	retained, _, ok := makeVP8LLZ77PlanConfigCandidateCount(readPixel, bounds, bounds.Dx(), bounds.Dy(), base, ^uint64(0), cfg, candidateCount)
+	if !ok || len(retained.lz77Tokens) == 0 {
+		t.Fatal("retained-token LZ77 plan was not available")
+	}
+	cfg.lz77CostOnly = true
+	costOnly, _, ok := makeVP8LLZ77PlanConfigCandidateCount(readPixel, bounds, bounds.Dx(), bounds.Dy(), base, ^uint64(0), cfg, candidateCount)
+	if !ok {
+		t.Fatal("cost-only LZ77 plan was not available")
+	}
+	if costOnly.lz77Tokens != nil {
+		t.Fatalf("cost-only plan retained %d LZ77 tokens", len(costOnly.lz77Tokens))
+	}
+	if got, want := vp8lPayloadBits(bounds.Dx(), bounds.Dy(), costOnly), vp8lPayloadBits(bounds.Dx(), bounds.Dy(), retained); got != want {
+		t.Fatalf("cost-only payload bits = %d, want %d", got, want)
+	}
+	if got, want := encodeLosslessPlanForTest(t, img, costOnly), encodeLosslessPlanForTest(t, img, retained); !bytes.Equal(got, want) {
+		t.Fatalf("cost-only output = %d bytes, want retained-token output %d bytes", len(got), len(want))
+	}
+}
+
+func TestVP8LMatchGraphMatchesDirectHashSearch(t *testing.T) {
+	const width = 64
+	const height = 32
+	pixels := make([]uint32, width*height)
+	for pos := range pixels {
+		x := pos % width
+		y := pos / width
+		id := (y%8)*16 + x%16
+		pixels[pos] = vp8lPackPixel(color.NRGBA{R: uint8(id), G: uint8(id * 37), B: uint8(id * 73), A: 255})
+	}
+	candidateCounts := vp8lLZ77CandidateCounts(len(pixels))
+	workspace := &vp8lLZ77Workspace{}
+	graph, ok := workspace.buildMatchGraph(pixels, width, candidateCounts)
+	if !ok {
+		t.Fatal("match graph was not available")
+	}
+	readPixel := vp8lPackedPixelReader(pixels, image.Rect(0, 0, width, height), width)
+	var primary [vp8lHashSize][vp8lMinHashCandidates]int32
+	var extra [vp8lHashSize][vp8lMinHashCandidates]int32
+	maxCandidates := candidateCounts[len(candidateCounts)-1]
+	vp8lInitHashTables(&primary, &extra, maxCandidates)
+	for pos := 0; pos+vp8lMinBackwardRefLength <= len(pixels); pos++ {
+		hash := vp8lOptimalHashAt(pixels, pos)
+		candidates := vp8lHashCandidatesFor(primary[hash], extra[hash], maxCandidates)
+		for _, candidateCount := range candidateCounts {
+			want := vp8lBestHashMatch(candidates, candidateCount, readPixel, image.Rect(0, 0, width, height), width, pos, len(pixels))
+			if got := graph.best(pos, candidateCount); got != want {
+				t.Fatalf("position %d candidates %d graph match = %#v, want %#v", pos, candidateCount, got, want)
+			}
+		}
+		vp8lInsertOptimalHash(&primary, &extra, maxCandidates, pixels, pos)
+	}
+}
+
+func TestVP8LMatchGraphPlanMatchesDirectPlan(t *testing.T) {
+	img := newBenchmarkFixtureImage(lossyBenchmarkCase{kind: benchmarkImagePhotoLike, width: 256, height: 256})
+	bounds := img.Bounds()
+	readPixel := pixelReaderFor(img)
+	directConfig := vp8lDefaultEncodingConfig()
+	directConfig.parallelTransforms = false
+	directConfig.useLZ77MatchGraph = false
+	graphConfig := directConfig
+	graphConfig.useLZ77MatchGraph = true
+
+	direct := chooseVP8LEncodingPlanForImageWithConfig(img, readPixel, bounds, bounds.Dx(), bounds.Dy(), directConfig)
+	graph := chooseVP8LEncodingPlanForImageWithConfig(img, readPixel, bounds, bounds.Dx(), bounds.Dy(), graphConfig)
+	if got, want := vp8lPayloadBits(bounds.Dx(), bounds.Dy(), graph), vp8lPayloadBits(bounds.Dx(), bounds.Dy(), direct); got > want {
+		t.Fatalf("match-graph payload bits = %d, want <= direct bits %d", got, want)
+	}
+	assertLosslessBenchmarkWebP(t, encodeLosslessPlanForTest(t, img, graph), img)
+}
+
+func TestVP8LColorCacheCombinedSearchMatchesIndependentPasses(t *testing.T) {
+	img := newBenchmarkFixtureImage(lossyBenchmarkCase{kind: benchmarkImagePhotoLike, width: 64, height: 64})
+	bounds := img.Bounds()
+	readPixel := pixelReaderFor(img)
+	combined := vp8lBuildColorCacheStatistics(readPixel, bounds, bounds.Dx())
+	for bits := uint8(vp8lMinColorCacheBits); bits <= vp8lMaxColorCacheBits; bits++ {
+		_, analysis, counts, hits, tokens := vp8lBuildColorCache(readPixel, bounds, bounds.Dx(), bits, false, 0)
+		got := combined[bits]
+		if !got.literalAnalysis.codingEqual(analysis) || !slices.Equal(got.greenCounts, counts) || got.cacheHits != hits || got.tokenCount != tokens {
+			t.Fatalf("literal color-cache statistics differ for %d bits", bits)
+		}
+	}
+
+	repeated := image.NewNRGBA(image.Rect(0, 0, 64, 32))
+	for y := 0; y < repeated.Rect.Dy(); y++ {
+		for x := 0; x < repeated.Rect.Dx(); x++ {
+			id := (y%8)*16 + x%16
+			repeated.SetNRGBA(x, y, color.NRGBA{R: uint8(id), G: uint8(id * 37), B: uint8(id * 73), A: 255})
+		}
+	}
+	bounds = repeated.Bounds()
+	readPixel = pixelReaderFor(repeated)
+	baseAnalysis := analyzeImage(readPixel, bounds)
+	base := vp8lEncodingPlan{analysis: baseAnalysis, alpha: baseAnalysis.alpha}
+	cfg := vp8lDefaultEncodingConfig()
+	cfg.optimalLZ77Passes = 0
+	cfg.tryColorCache = false
+	cfg.tryLZ77MetaPrefix = false
+	lz77, _, ok := makeVP8LLZ77PlanConfigCandidateCount(readPixel, bounds, bounds.Dx(), bounds.Dy(), base, ^uint64(0), cfg, vp8lHashCandidateCount(bounds.Dx()*bounds.Dy()))
+	if !ok || len(lz77.lz77Tokens) == 0 {
+		t.Fatal("LZ77 plan was not available")
+	}
+	combinedLZ77 := vp8lBuildLZ77ColorCacheStatistics(readPixel, bounds, bounds.Dx(), lz77.lz77Tokens, baseAnalysis)
+	for bits := uint8(vp8lMinColorCacheBits); bits <= vp8lMaxColorCacheBits; bits++ {
+		_, analysis, counts, hits := vp8lBuildLZ77ColorCache(readPixel, bounds, bounds.Dx(), lz77.lz77Tokens, bits, false, baseAnalysis)
+		got := combinedLZ77[bits]
+		if !got.literalAnalysis.codingEqual(analysis) || !slices.Equal(got.greenCounts, counts) || got.cacheHits != hits || got.tokenCount != len(lz77.lz77Tokens) {
+			t.Fatalf("LZ77 color-cache statistics differ for %d bits", bits)
+		}
+	}
+}
+
+func TestVP8LColorCacheOptimalParserDoesNotRegressBestCompression(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		img  image.Image
+	}{
+		{name: "lz77-cache", img: newLZ77ColorCacheFixture()},
+		{name: "predictor-lz77-cache", img: newPredictorLZ77ColorCacheFixture()},
+		{name: "color-lz77-cache", img: newColorTransformLZ77ColorCacheFixture()},
+		{name: "photo-like", img: newBenchmarkFixtureImage(lossyBenchmarkCase{kind: benchmarkImagePhotoLike, width: 128, height: 128})},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bounds := tc.img.Bounds()
+			readPixel := pixelReaderFor(tc.img)
+			baselineConfig := vp8lEncodingConfigForMode(ModeBestCompression, tc.img, readPixel, bounds, bounds.Dx(), bounds.Dy())
+			baselineConfig.parallelTransforms = false
+			baselineConfig.tryOptimalLZ77ColorCache = false
+			optimizedConfig := baselineConfig
+			optimizedConfig.tryOptimalLZ77ColorCache = true
+			baseline := chooseVP8LEncodingPlanForImageWithConfig(tc.img, readPixel, bounds, bounds.Dx(), bounds.Dy(), baselineConfig)
+			optimized := chooseVP8LEncodingPlanForImageWithConfig(tc.img, readPixel, bounds, bounds.Dx(), bounds.Dy(), optimizedConfig)
+			baselineBits := vp8lPayloadBits(bounds.Dx(), bounds.Dy(), baseline)
+			optimizedBits := vp8lPayloadBits(bounds.Dx(), bounds.Dy(), optimized)
+			if optimizedBits > baselineBits {
+				t.Fatalf("optimized bits = %d, want <= baseline bits %d", optimizedBits, baselineBits)
+			}
+			assertLosslessBenchmarkWebP(t, encodeLosslessPlanForTest(t, tc.img, optimized), tc.img)
+		})
+	}
+}
+
+func TestVP8LOptimalParserCanChooseColorCacheTokens(t *testing.T) {
+	const width = 8
+	pixel := color.NRGBA{R: 1, G: 2, B: 3, A: 255}
+	packed := make([]uint32, width)
+	for i := range packed {
+		packed[i] = vp8lPackPixel(pixel)
+	}
+	bounds := image.Rect(0, 0, width, 1)
+	readPixel := vp8lPackedPixelReader(packed, bounds, width)
+	analysis := analyzeImage(readPixel, bounds)
+	greenLimit := nLiteralCodes + nLengthCodes + 2
+	counts := make([]uint32, greenLimit)
+	lengths := make([]uint8, greenLimit)
+	counts[pixel.G] = 1
+	lengths[pixel.G] = 8
+	for symbol := nLiteralCodes; symbol < nLiteralCodes+nLengthCodes; symbol++ {
+		counts[symbol] = 1
+		lengths[symbol] = 15
+	}
+	cacheSymbol := nLiteralCodes + nLengthCodes
+	counts[cacheSymbol] = width - 1
+	lengths[cacheSymbol] = 1
+	cacheIndices := make([]int32, width)
+	cacheIndices[0] = -1
+	for i := 1; i < width; i++ {
+		cacheIndices[i] = 0
+	}
+	model := vp8lLZ77CostModel{
+		literalAnalysis:   analysis,
+		distanceNormal:    true,
+		colorCacheCounts:  counts,
+		colorCacheLengths: lengths,
+		colorCacheIndices: cacheIndices,
+	}
+	for i := range model.distanceCounts {
+		model.distanceCounts[i] = 1
+		model.distanceLengths[i] = 15
+	}
+	tokens, ok := vp8lBuildOptimalLZ77Workspace(readPixel, bounds, width, vp8lMinHashCandidates, vp8lMaxBackwardRefLength, false, model, &vp8lLZ77Workspace{}, 0, width, packed, vp8lMatchGraph{})
+	if !ok {
+		t.Fatal("optimal parser returned false")
+	}
+	if len(tokens) != width || tokens[0].copyLength != 0 || tokens[0].colorCache {
+		t.Fatalf("tokens = %#v, want one literal followed by cache tokens", tokens)
+	}
+	for i, token := range tokens[1:] {
+		if !token.colorCache || token.cacheIndex != 0 || token.copyLength != 0 {
+			t.Fatalf("token %d = %#v, want color-cache token 0", i+1, token)
+		}
+	}
+}
+
 func TestEncodeLosslessUsesLZ77HashMatchesBeyondPreviousPixel(t *testing.T) {
 	img := image.NewNRGBA(image.Rect(0, 0, 320, 4))
 	for y := 0; y < img.Rect.Dy(); y++ {

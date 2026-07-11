@@ -100,13 +100,21 @@ is lower. Its bounded search includes:
 - A bounded packed color-index stream for small low-color inputs
 - A multi-candidate LZ77 match finder with one-step lazy matching
 - Cost-based optimal parsing for indexed and promising general-image streams
-- Dynamically selected 1- to 11-bit color caches
+- A bounded compact match graph for buffered finalist streams of at least
+  65,536 pixels
+- Dynamically selected 1- to 11-bit color caches analyzed in one source pass
 - Selected combinations of spatial prediction, LZ77, and color cache coding
   for literal and transformed residual streams
 - Tile-adaptive predictor modes and cross-color coefficients
 - Entropy-clustered meta-prefix histograms with up to 32 coding groups
 - A two-stage planner that shortlists candidates cheaply before comparing the
   complete emitted cost of optimal LZ77, color-cache, and histogram variants
+- Encode-scoped token, hash, and dynamic-programming workspaces reused across
+  finalist candidates
+
+`ModeBestCompression` can additionally re-run optimal LZ77 parsing with
+color-cache hit costs in the model. The original candidate remains available,
+so this pass is selected only when it reduces the complete emitted cost.
 
 The encoder does not use unbounded hash chains. This keeps work and memory
 bounded, but some inputs can remain larger than output from encoders that use
@@ -156,14 +164,17 @@ read through conversion equivalent to `color.NRGBAModel`.
 
 Encoding can scan the input more than once. Important resource bounds include:
 
-- Lossless `ModeBestCompression` can use a converted pixel plane up to 32 MiB
-  for safe parallel reads from custom image implementations
+- Buffered lossless profiles can use source and transformed-finalist pixel
+  planes capped at 32 MiB
+- Lossless compact match graphs are capped at 32 MiB and fall back to the
+  direct bounded matcher outside their size range
 - Buffered lossy profiles can retain quantized residuals up to an estimated
   32 MiB and reuse them for statistics and final coding
 - Lossy reconstructed pixels use a two-macroblock-row ring rather than a
   full-frame reconstruction plane
 - `ModeBestCompression` can analyze independent lossless candidates with up
-  to four workers
+  to four workers; custom image implementations use a converted plane capped
+  at 32 MiB when concurrent reads are not known to be safe
 - Standard image types can run lossy frame planning and alpha analysis with
   two workers
 - `ModeLowMemory` avoids the full-frame source plane, VP8 residual buffer,
