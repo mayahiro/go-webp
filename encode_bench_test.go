@@ -3,7 +3,6 @@ package webp
 import (
 	"bytes"
 	"image"
-	"image/color"
 	"math"
 	"testing"
 	"unsafe"
@@ -103,89 +102,6 @@ func BenchmarkEncodeLosslessEntropyRegions512(b *testing.B) {
 		width:  512,
 		height: 512,
 	})
-}
-
-func BenchmarkEncodeLosslessMetaPrefix512x256(b *testing.B) {
-	benchmarkEncodeLosslessImage(b, newMetaPrefixLocalEntropyFixture())
-}
-
-func BenchmarkEncodeLosslessMetaPrefixFine128x64(b *testing.B) {
-	benchmarkEncodeLosslessImage(b, newMetaPrefixFineLocalEntropyFixture())
-}
-
-func BenchmarkEncodeLosslessPredictorMetaPrefix512x256(b *testing.B) {
-	benchmarkEncodeLosslessImage(b, newPredictorMetaPrefixFixture())
-}
-
-func BenchmarkEncodeLosslessPredictorColorTransform(b *testing.B) {
-	benchmarkEncodeLosslessImage(b, newPredictorColorTransformFixture())
-}
-
-func BenchmarkEncodeLosslessColorIndexSortedTable(b *testing.B) {
-	benchmarkEncodeLosslessImage(b, newColorIndexSortedTableFixture())
-}
-
-func BenchmarkEncodeLosslessWideColorCache(b *testing.B) {
-	benchmarkEncodeLosslessImage(b, newWideColorCacheFixture())
-}
-
-func BenchmarkEncodeLosslessLZ77ColorCache(b *testing.B) {
-	benchmarkEncodeLosslessImage(b, newLZ77ColorCacheFixture())
-}
-
-func BenchmarkEncodeLosslessPredictorLZ77ColorCache(b *testing.B) {
-	benchmarkEncodeLosslessImage(b, newPredictorLZ77ColorCacheFixture())
-}
-
-func BenchmarkEncodeLosslessColorTransformLZ77ColorCache(b *testing.B) {
-	benchmarkEncodeLosslessImage(b, newColorTransformLZ77ColorCacheFixture())
-}
-
-func BenchmarkEncodeLosslessMatchGraphAblation(b *testing.B) {
-	img := newLosslessBenchmarkFixtureImage(losslessBenchmarkCase{
-		name:   "PhotoLike512",
-		kind:   benchmarkImagePhotoLike,
-		width:  512,
-		height: 512,
-	})
-	for _, mode := range []struct {
-		name string
-		mode Mode
-	}{
-		{name: "Default", mode: ModeDefault},
-		{name: "Best", mode: ModeBestCompression},
-	} {
-		for _, graph := range []struct {
-			name    string
-			enabled bool
-		}{
-			{name: "Direct"},
-			{name: "Graph", enabled: true},
-		} {
-			b.Run(mode.name+"/"+graph.name, func(b *testing.B) {
-				cfg := vp8lEncodingConfigForMode(mode.mode, img, pixelReaderFor(img), img.Bounds(), img.Bounds().Dx(), img.Bounds().Dy())
-				cfg.useLZ77MatchGraph = graph.enabled
-				benchmarkEncodeLosslessConfig(b, img, cfg)
-			})
-		}
-	}
-}
-
-func benchmarkEncodeLosslessConfig(b *testing.B, img image.Image, cfg vp8lEncodingConfig) {
-	source := newEncoderSource(img)
-	var output bytes.Buffer
-	b.ReportAllocs()
-	b.ResetTimer()
-	for b.Loop() {
-		output.Reset()
-		readPixel := source.pixels()
-		prepared, preparedConfig, _ := vp8lPrepareEncodingSource(source.image, readPixel, source.bounds, source.width, source.height, cfg)
-		plan := chooseVP8LEncodingPlanForPreparedImage(source.image, prepared, source.bounds, source.width, source.height, preparedConfig)
-		if err := writeLosslessVP8L(&output, source, prepared, plan); err != nil {
-			b.Fatal(err)
-		}
-	}
-	b.ReportMetric(float64(output.Len()), "encoded_B")
 }
 
 func benchmarkEncodeLossyImage(b *testing.B, img image.Image, quality int, inputBytes int) {
@@ -344,8 +260,8 @@ func TestEstimateLosslessWorkspaceScalesWithImageSize(t *testing.T) {
 	if large.totalBytes <= small.totalBytes {
 		t.Fatalf("large lossless workspace total = %d, want greater than small total %d", large.totalBytes, small.totalBytes)
 	}
-	if large.tokenUpperBoundBytes <= small.tokenUpperBoundBytes {
-		t.Fatalf("large token upper bound = %d, want greater than small token upper bound %d", large.tokenUpperBoundBytes, small.tokenUpperBoundBytes)
+	if large.workerBytes <= small.workerBytes {
+		t.Fatalf("large worker estimate = %d, want greater than small worker estimate %d", large.workerBytes, small.workerBytes)
 	}
 }
 
@@ -407,11 +323,10 @@ func benchmarkEncodeLosslessImage(b *testing.B, img image.Image) {
 	b.ReportMetric(float64(len(encoded))/float64(inputBytes), "encoded_per_input")
 	bounds := img.Bounds()
 	b.ReportMetric(float64(bounds.Dx()*bounds.Dy()), "pixels")
-	b.ReportMetric(float64(workspace.tokenUpperBoundBytes), "token_upper_est_B")
-	b.ReportMetric(float64(workspace.lz77HashBytes), "lz77_hash_est_B")
-	b.ReportMetric(float64(workspace.metaPrefixBytes), "meta_prefix_est_B")
-	b.ReportMetric(float64(workspace.colorCacheBytes), "color_cache_est_B")
-	b.ReportMetric(float64(workspace.planCandidateBytes), "plan_candidate_est_B")
+	b.ReportMetric(float64(workspace.sourceBytes), "source_est_B")
+	b.ReportMetric(float64(workspace.workerBytes), "worker_est_B")
+	b.ReportMetric(float64(workspace.searchBytes), "search_est_B")
+	b.ReportMetric(float64(workspace.limitBytes), "workspace_limit_B")
 	b.ReportMetric(float64(workspace.totalBytes), "workspace_est_B")
 }
 
@@ -484,12 +399,11 @@ type lossyWorkspaceMetrics struct {
 }
 
 type losslessWorkspaceMetrics struct {
-	tokenUpperBoundBytes int
-	lz77HashBytes        int
-	metaPrefixBytes      int
-	colorCacheBytes      int
-	planCandidateBytes   int
-	totalBytes           int
+	sourceBytes uint64
+	workerBytes uint64
+	searchBytes uint64
+	limitBytes  uint64
+	totalBytes  uint64
 }
 
 func estimateLossyWorkspace(tc lossyBenchmarkCase) lossyWorkspaceMetrics {
@@ -520,25 +434,18 @@ func estimateLossyWorkspaceForDimensions(width int, height int, quality int) los
 
 func estimateLosslessWorkspace(img image.Image) losslessWorkspaceMetrics {
 	bounds := img.Bounds()
-	width, height := bounds.Dx(), bounds.Dy()
-	pixels := width * height
-	prefixWidth, prefixHeight := vp8lMetaPrefixImageDimensions(width, height, vp8lMinMetaPrefixCandidateBits)
-	prefixBlocks := minInt(prefixWidth*prefixHeight, vp8lMaxMetaPrefixBlocks)
-	tokenUpperBoundBytes := pixels * int(unsafe.Sizeof(vp8lToken{}))
-	lz77HashBytes := 2 * vp8lHashSize * vp8lMinHashCandidates * int(unsafe.Sizeof(int32(0)))
-	metaPrefixBytes := prefixBlocks * (int(unsafe.Sizeof(uint16(0))) + int(unsafe.Sizeof(imageAnalysis{})))
-	metaPrefixBytes += vp8lMaxMetaPrefixGroups * (int(unsafe.Sizeof(imageAnalysis{})) + int(unsafe.Sizeof(int(0))))
-	colorCacheBytes := int(unsafe.Sizeof(vp8lColorCachePlan{})) + vp8lMaxColorCacheSize*int(unsafe.Sizeof(color.NRGBA{}))
-	colorCacheBytes += vp8lMaxColorCacheGreenCodes * (int(unsafe.Sizeof(uint32(0))) + int(unsafe.Sizeof(uint8(0))) + int(unsafe.Sizeof(uint16(0))))
-	planCandidateBytes := vp8lMaxEncodingPlanCandidates * int(unsafe.Sizeof(vp8lEncodingPlan{}))
+	pixels := uint64(bounds.Dx()) * uint64(bounds.Dy())
+	budget := vp8lBudgetForMode(ModeDefault)
+	sourceBytes := pixels * 4
+	workerBytes := vp8lWorkerBytes(pixels, budget)
+	searchBytes := vp8lBufferedSearchBytes(pixels, budget)
 
 	return losslessWorkspaceMetrics{
-		tokenUpperBoundBytes: tokenUpperBoundBytes,
-		lz77HashBytes:        lz77HashBytes,
-		metaPrefixBytes:      metaPrefixBytes,
-		colorCacheBytes:      colorCacheBytes,
-		planCandidateBytes:   planCandidateBytes,
-		totalBytes:           tokenUpperBoundBytes + lz77HashBytes + metaPrefixBytes + colorCacheBytes + planCandidateBytes,
+		sourceBytes: sourceBytes,
+		workerBytes: workerBytes,
+		searchBytes: searchBytes,
+		limitBytes:  budget.maxWorkspaceBytes,
+		totalBytes:  searchBytes,
 	}
 }
 

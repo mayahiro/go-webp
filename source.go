@@ -6,8 +6,8 @@ import (
 )
 
 const (
-	vp8SourcePlaneMaxBytes  = 32 << 20
-	vp8lSourcePlaneMaxBytes = 32 << 20
+	vp8SourcePlaneMaxBytes = 32 << 20
+	vp8lMaxSourceBytes     = 32 << 20
 )
 
 type pixelReader func(x int, y int) color.NRGBA
@@ -36,29 +36,6 @@ func materializePixelPlane(readPixel pixelReader, bounds image.Rectangle, width 
 
 func (p pixelPlane) pixel(x int, y int) color.NRGBA {
 	return p.pixels[(y-p.bounds.Min.Y)*p.width+x-p.bounds.Min.X]
-}
-
-func vp8lPrepareEncodingSource(m image.Image, readPixel pixelReader, bounds image.Rectangle, width int, height int, cfg vp8lEncodingConfig) (pixelReader, vp8lEncodingConfig, bool) {
-	materialized := false
-	if cfg.materializeSource && losslessSourceBenefitsFromMaterialization(m) {
-		if plane, ok := materializePixelPlane(readPixel, bounds, width, height, vp8lSourcePlaneMaxBytes); ok {
-			readPixel = plane.pixel
-			materialized = true
-		}
-	}
-	readPixel, cfg.parallelTransforms = vp8lPrepareParallelTransformReader(
-		m, readPixel, bounds, width, height, cfg.parallelTransforms, materialized,
-	)
-	return readPixel, cfg, materialized
-}
-
-func losslessSourceBenefitsFromMaterialization(m image.Image) bool {
-	switch m.(type) {
-	case *image.NRGBA, *image.RGBA, *image.Gray, *image.Paletted, *image.Uniform:
-		return false
-	default:
-		return true
-	}
 }
 
 func standardImageSupportsConcurrentRead(m image.Image) bool {

@@ -224,11 +224,42 @@ func alphaRelaxMatchLengths(start int, maxLength int, distanceCode int, model al
 		maxLength = alphaMaxBackwardRefLength
 	}
 	var lengths [64]uint16
-	count := vp8lOptimalMatchLengths(maxLength, &lengths)
+	count := alphaOptimalMatchLengths(maxLength, &lengths)
 	for _, matchLength := range lengths[:count] {
 		length := int(matchLength)
 		relax(start, length, distanceCode, model.copyCost(length, distanceCode))
 	}
+}
+
+func alphaOptimalMatchLengths(maxLength int, lengths *[64]uint16) int {
+	count := 0
+	last := 0
+	emit := func(length int) {
+		if length < alphaMinBackwardRefLength || length > maxLength || length == last {
+			return
+		}
+		last = length
+		lengths[count] = uint16(length)
+		count++
+	}
+	for length := alphaMinBackwardRefLength; length <= minInt(maxLength, 32); length++ {
+		emit(length)
+	}
+	for code := 4; code < nLengthCodes; code++ {
+		extraBits := vp8lPrefixExtraBits(code)
+		minLength := ((2 + code&1) << extraBits) + 1
+		maxForCode := minLength + (1 << extraBits) - 1
+		if maxForCode <= 32 {
+			continue
+		}
+		emit(minLength)
+		emit(minInt(maxForCode, maxLength))
+		if maxForCode >= maxLength {
+			break
+		}
+	}
+	emit(maxLength)
+	return count
 }
 
 func alphaSpatialCandidates() ([alphaOptimalSpatialDistanceCount]alphaSpatialCandidate, int) {

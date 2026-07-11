@@ -51,12 +51,12 @@ substitute for a natural-photo corpus.
 
 | Fixture | Time | encoded_B | B/op | allocs/op |
 | --- | ---: | ---: | ---: | ---: |
-| Gradient 128x128 | 33.987 ms | 58 | 1,075,421 | 610 |
-| UI 256x256 | 171.906 ms | 1,286 | 5,446,674 | 3,293 |
-| Flat 128x128 | 11.942 ms | 32 | 364,802 | 133 |
-| Palette 256x256 | 62.142 ms | 756 | 12,618,258 | 8,468 |
-| Alpha 128x128 | 37.999 ms | 368 | 1,300,914 | 927 |
-| Photo-like 512x512 | 1,728.762 ms | 18,918 | 95,121,496 | 46,593 |
+| Gradient 128x128 | 326.135 ms | 58 | 18,453,264 | 10,957 |
+| UI 256x256 | 650.467 ms | 1,284 | 58,717,701 | 19,167 |
+| Flat 128x128 | 200.477 ms | 32 | 14,056,565 | 3,130 |
+| Palette 256x256 | 474.438 ms | 834 | 54,151,536 | 21,041 |
+| Alpha 128x128 | 327.292 ms | 322 | 23,889,189 | 18,117 |
+| Photo-like 512x512 | 1,628.209 ms | 2,916 | 160,735,810 | 27,370 |
 
 ## Interpretation
 
@@ -68,17 +68,21 @@ substitute for a natural-photo corpus.
   1024x1024 reconstruction workspace from about 1.5 MiB to 48 KiB without
   changing the encoded stream
 - Lossless performance varies substantially with image structure. The
-  photo-like 512x512 fixture takes about 1.73 seconds and allocates about
-  95.1 MB per encode in this benchmark
-- Lossless finalist search reuses encode-scoped token, hash, Huffman, and
-  dynamic-programming workspaces. It also evaluates color-cache sizes in one
-  source traversal and may materialize a bounded transformed pixel plane
-- On standard image types, the default baseline and its independent
-  supplemental predictor search can run concurrently. Custom image types and
-  single-threaded runtimes keep the sequential path
-- The broader transform, optimal-LZ77, color-cache, and histogram search
-  favors encoded size over latency; use `ModeFast` or `ModeLowMemory` when
-  latency or retained state is more important
+  photo-like 512x512 fixture takes about 1.63 seconds and reports about
+  160.7 MB of cumulative allocation per encode
+- `B/op` is cumulative heap allocation, not peak live memory. Candidate
+  rematerialization can increase `B/op` while encode-scoped workspaces keep
+  simultaneously retained search state bounded
+- Lossless screening keeps transform descriptors and cost summaries, then
+  performs exact match, cache, Huffman, and spatial-entropy optimization only
+  for a bounded finalist set
+- Default buffered search uses a 96 MiB estimated workspace gate and at most
+  two finalist workers. Inputs outside that gate fall back to the streaming
+  encoder; `BestCompression` raises the search gate to 192 MiB and permits up
+  to four workers
+- The broader transform, optimal-LZ77, color-cache, and entropy search favors
+  encoded size over latency; use `ModeFast` or `ModeLowMemory` when latency or
+  retained state is more important
 - Current lossy latency does not justify architecture-specific assembly in the
   project scope, where encoded size and decoded quality take priority
 - Before adding SIMD or assembly, profile-guided work should identify a stable

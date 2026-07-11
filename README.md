@@ -84,8 +84,8 @@ Representative measurements on an Apple M1 Max, darwin/arm64, with Go 1.26.5:
 | --- | --- | ---: | ---: |
 | Lossy Q75 | UI 256x256 | 17.542 ms | 2,906 bytes |
 | Lossy Q75 | Photo-like 512x512 | 115.525 ms | 142,078 bytes |
-| Lossless | Gradient 128x128 | 33.987 ms | 58 bytes |
-| Lossless | Photo-like 512x512 | 1,728.762 ms | 18,918 bytes |
+| Lossless | Gradient 128x128 | 326.135 ms | 58 bytes |
+| Lossless | Photo-like 512x512 | 1,628.209 ms | 2,916 bytes |
 
 These are local development references, not portable guarantees. The fixtures
 are deterministic synthetic images. See [Benchmarks](BENCHMARKS.md) for the

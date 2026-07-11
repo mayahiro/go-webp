@@ -55,6 +55,23 @@ func TestMeasureImageReportsRGBAndAlphaError(t *testing.T) {
 	}
 }
 
+func TestFilterLosslessFixtures(t *testing.T) {
+	fixtures := []fixture{{name: "a"}, {name: "b"}, {name: "c"}}
+	got, filter, err := filterLosslessFixtures(fixtures, "c, a,c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if names := []string{got[0].name, got[1].name}; !slices.Equal(names, []string{"a", "c"}) {
+		t.Fatalf("filtered fixtures = %v", names)
+	}
+	if !slices.Equal(filter, []string{"c", "a"}) {
+		t.Fatalf("recorded filter = %v", filter)
+	}
+	if _, _, err := filterLosslessFixtures(fixtures, "missing"); err == nil {
+		t.Fatal("missing fixture filter succeeded")
+	}
+}
+
 func TestLoadLosslessComparisonFixturesUsesAnonymousCorpusIdentity(t *testing.T) {
 	root := t.TempDir()
 	const privateName = "private-customer-name.jpg"

@@ -72,6 +72,7 @@ func main() {
 	corpusSplit := flag.String("split", "holdout", "private corpus split: train, holdout, or all")
 	holdoutPercent := flag.Int("holdout", 20, "deterministic private corpus holdout percentage")
 	jsonPath := flag.String("json", "", "optional JSON report path")
+	fixtureIDs := flag.String("fixtures", "", "optional comma-separated fixture names or anonymous corpus IDs")
 	flag.Parse()
 	if *runs <= 0 {
 		fatal(errors.New("runs must be positive"))
@@ -110,6 +111,10 @@ func main() {
 	if err != nil {
 		fatal(err)
 	}
+	fixtures, selectedFixtureIDs, err := filterLosslessFixtures(fixtures, *fixtureIDs)
+	if err != nil {
+		fatal(err)
+	}
 
 	version, err := commandVersion("cwebp", "-version")
 	if err != nil {
@@ -118,6 +123,9 @@ func main() {
 	fmt.Printf("workdir=%s\n", dir)
 	fmt.Printf("mode=%s method=%d quality=%d cwebp=%s\n", cfg.name, *method, *quality, version)
 	fmt.Printf("corpus=%s split=%s holdout=%d sha256=%s\n", corpus.name, corpus.split, corpus.holdoutPercent, corpus.sha256)
+	if len(selectedFixtureIDs) != 0 {
+		fmt.Printf("fixtures=%s\n", strings.Join(selectedFixtureIDs, ","))
+	}
 	fmt.Printf("%-14s %-10s %4s %12s %10s %10s %8s %11s\n", "fixture", "encoder", "runs", "encoded_B", "avg_ms", "rgb_mae", "rgb_max", "alpha_exact")
 	report := losslessComparisonReport{
 		SchemaVersion: 1,
@@ -135,6 +143,7 @@ func main() {
 			CorpusSHA256:     corpus.sha256,
 			CorpusSplit:      corpus.split,
 			HoldoutPercent:   corpus.holdoutPercent,
+			FixtureFilter:    selectedFixtureIDs,
 		},
 	}
 	var goBytes, libwebpBytes int64
@@ -186,6 +195,43 @@ func main() {
 			fatal(err)
 		}
 	}
+}
+
+func filterLosslessFixtures(fixtures []fixture, raw string) ([]fixture, []string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return fixtures, nil, nil
+	}
+	requested := make(map[string]bool)
+	ordered := make([]string, 0)
+	for _, value := range strings.Split(raw, ",") {
+		value = strings.TrimSpace(value)
+		if value == "" || requested[value] {
+			continue
+		}
+		requested[value] = true
+		ordered = append(ordered, value)
+	}
+	selected := make([]fixture, 0, len(ordered))
+	for _, candidate := range fixtures {
+		if requested[candidate.name] {
+			selected = append(selected, candidate)
+			requested[candidate.name] = false
+		}
+	}
+	missing := make([]string, 0)
+	for _, value := range ordered {
+		if requested[value] {
+			missing = append(missing, value)
+		}
+	}
+	if len(missing) != 0 {
+		return nil, nil, fmt.Errorf("fixtures not found in selected corpus: %s", strings.Join(missing, ","))
+	}
+	if len(selected) == 0 {
+		return nil, nil, errors.New("fixture filter selected no images")
+	}
+	return selected, ordered, nil
 }
 
 func makeComparisonConfig(mode string, quality int, method int) (comparisonConfig, error) {

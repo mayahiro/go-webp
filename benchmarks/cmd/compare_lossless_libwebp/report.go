@@ -17,19 +17,20 @@ type losslessComparisonReport struct {
 }
 
 type losslessReportConfiguration struct {
-	Runs             int    `json:"runs"`
-	CWebPVersion     string `json:"cwebp_version"`
-	CWebPMethod      int    `json:"cwebp_method"`
-	GoVersion        string `json:"go_version"`
-	GOOS             string `json:"goos"`
-	GOARCH           string `json:"goarch"`
-	GoMode           string `json:"go_mode"`
-	GoTimingScope    string `json:"go_timing_scope"`
-	CWebPTimingScope string `json:"cwebp_timing_scope"`
-	Corpus           string `json:"corpus"`
-	CorpusSHA256     string `json:"corpus_sha256,omitempty"`
-	CorpusSplit      string `json:"corpus_split"`
-	HoldoutPercent   int    `json:"holdout_percent,omitempty"`
+	Runs             int      `json:"runs"`
+	CWebPVersion     string   `json:"cwebp_version"`
+	CWebPMethod      int      `json:"cwebp_method"`
+	GoVersion        string   `json:"go_version"`
+	GOOS             string   `json:"goos"`
+	GOARCH           string   `json:"goarch"`
+	GoMode           string   `json:"go_mode"`
+	GoTimingScope    string   `json:"go_timing_scope"`
+	CWebPTimingScope string   `json:"cwebp_timing_scope"`
+	Corpus           string   `json:"corpus"`
+	CorpusSHA256     string   `json:"corpus_sha256,omitempty"`
+	CorpusSplit      string   `json:"corpus_split"`
+	HoldoutPercent   int      `json:"holdout_percent,omitempty"`
+	FixtureFilter    []string `json:"fixture_filter,omitempty"`
 }
 
 type losslessFixtureReport struct {

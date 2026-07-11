@@ -57,12 +57,14 @@ make compare-lossless ARGS='-runs 3 -mode default -method 4'
 make compare-lossless ARGS='-runs 3 -mode best -method 6'
 make compare-lossless ARGS='-runs 3 -mode near-lossless -quality 75 -method 4'
 make compare-lossless ARGS='-runs 1 -mode best -method 6 -corpus ../.local/corpus/production -split holdout'
+make compare-lossless ARGS='-runs 1 -mode default -method 4 -corpus ../.local/corpus/production -split holdout -fixtures anonymous-id-1,anonymous-id-2'
 ```
 
 reportにはdecode後のRGB誤差とalpha一致を記録します
 通常のlossless profileではpixel完全一致を必須とします
 private corpusではpixel hash由来の匿名IDを使い、corpus SHA-256だけを表示してsource nameとpathは出力しません
 `ARGS` のpathは `benchmarks` directoryから解決されます
+`-fixtures` では生成fixture名またはprivate corpusの匿名IDを指定して調整用の再測定ができ、filter条件はJSON reportへ記録されます
 
 ## ローカルLossy Rate-Distortion比較
 

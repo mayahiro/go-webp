@@ -1,126 +1,147 @@
 # Architecture
 
-go-webp has one public encoding entry point and two independent codec
-pipelines. The shared layer validates the request and adapts `image.Image`;
-VP8L and VP8 keep their own analysis, planning, and bitstream state.
+go-webp exposes one public encoding entry point and keeps VP8L lossless and
+VP8 lossy encoding as independent pipelines. Shared code validates requests,
+adapts `image.Image`, and writes the WebP container; each codec owns its search
+and bitstream state.
 
 ## Entry Point and Source Boundary
 
 `Encode` validates dimensions and options, creates an immutable
-`encoderSource`, and dispatches to the lossless or lossy pipeline. The source
-keeps the original bounds and dimensions so internal stages do not pass these
-values independently.
+`encoderSource`, and dispatches to the selected codec. `encode.go` contains
+the public API and WebP container primitives. `pixel_reader.go` contains the
+specialized image readers, while `source.go` defines the shared source types.
 
-Image-type-specific readers provide direct paths for `image.NRGBA`,
-`image.RGBA`, `image.Gray`, `image.YCbCr`, `image.Paletted`, and
-`image.Uniform`. Other `image.Image` implementations use the standard color
-model conversion path.
-
-Lossless balanced profiles may materialize one immutable RGBA pixel plane for
-inputs whose native conversion is expensive, including YCbCr, 64-bit color,
-and custom image implementations. Lossy `BestCompression` may instead
-materialize full-resolution Y, Cb, and Cr source planes. Both paths are bounded
-to 32 MiB, and `LowMemory` explicitly keeps direct readers.
+Direct readers cover `image.NRGBA`, `image.NRGBA64`, `image.RGBA`,
+`image.RGBA64`, `image.Gray`, `image.YCbCr`, `image.Paletted`, and
+`image.Uniform`. Other implementations use conversion through
+`color.NRGBAModel`.
 
 ## Lossless VP8L Pipeline
 
-The VP8L planner analyzes source pixels and compares bounded combinations of
-predictor, cross-color, subtract-green, color-indexing, 1- to 11-bit color
-cache, LZ77, and spatial prefix-code choices. Predictor modes and cross-color
-coefficients can vary by tile. Channel coding retains full 256-symbol
-histograms and compares complete Huffman tree and data costs.
+The lossless pipeline is organized around a row-readable `vp8lSource`, a
+mode-specific `vp8lBudget`, and an immutable final `vp8lPlan`.
 
-Planning is split into two stages. Literal cost and a bounded greedy LZ77 pass
-shortlist structurally different candidates; optimal parsing, color-cache,
-and entropy-clustered meta-prefix searches then run only on the finalists.
-This keeps the final decision based on emitted bit cost without applying every
-expensive post-processing path to every transform candidate.
+### Search Profiles and Source Policy
 
-For each shortlisted LZ77 finalist, balanced profiles may materialize the
-transformed stream as one packed pixel plane capped at 32 MiB. Greedy parsing,
-optimal parsing, and color-cache analysis then share that plane instead of
-recomputing predictor and cross-color residuals. Images with at least 65,536
-pixels may also use a compact match graph capped at 32 MiB; smaller or larger
-inputs keep the direct bounded matcher.
+`ModeFast` and `ModeLowMemory` use the streaming encoder directly. They keep
+row-sized source state, evaluate a small transform set, and use a bounded
+greedy parser without retaining a full-image token graph.
 
-LZ77 token buffers, hash tables, and optimal-parser arrays belong to one
-encode-scoped workspace and are reused across finalists. Screening plans keep
-only symbol statistics. The eleven color-cache sizes are analyzed in one
-source traversal, while selected plans retain their own immutable tokens.
-`BestCompression` can run an additional cache-aware optimal parse whose cost
-model compares literals, cache hits, and backward references together.
+Default and balanced profiles first check a 96 MiB estimated workspace gate.
+Eligible inputs are materialized into one packed ARGB plane capped at 32 MiB;
+inputs outside either limit fall back to streaming. `ModeBestCompression`
+widens transform, match, parse, and entropy budgets and raises the estimated
+workspace gate to 192 MiB.
 
-The default profile evaluates one supplemental spatial-predictor path outside
-the main candidate reservoir and keeps the smaller complete plan. This keeps a
-useful structurally different candidate from displacing the baseline shortlist
-or being displaced by it. Standard image types can evaluate these two plans
-concurrently; custom image types keep sequential reads.
+`ModeAuto` examines a bounded pixel sample. It selects the streaming fast path
+only when a verified low-color palette plan is sufficiently small, selects
+the low-memory path for very large inputs, and otherwise uses the balanced
+profile.
 
-The selected `vp8lEncodingPlan` is immutable during emission. The VP8L writer
-serializes transforms and image data from that plan; it does not repeat the
-candidate search. `Fast`, `Balanced`, `BestCompression`, and `LowMemory`
-control which candidates and buffered token paths are available.
+`ModeBestCompression` keeps the complete default plan as an incumbent and
+uses the expanded-search plan only when its exact payload is smaller. This
+makes the profile monotonic with respect to the default encoded size.
 
-`BestCompression` may analyze independent base predictor and color-transform
-candidates with a bounded four-worker pool. Standard image types support
-concurrent direct reads. Custom image types are first copied into an immutable
-pixel plane limited to 32 MiB; inputs above that limit stay sequential.
+### Transform Graph and Screening
 
-Near-lossless encoding preprocesses RGB with cwebp-compatible quality bands
-and four-neighbor edge detection while preserving alpha. A bounded 32 MiB
-pixel plane supports the normal multi-pass path; larger images use a direct
-single-pass reader with the same maximum-error bound.
+The buffered search constructs a bounded graph of direct, subtract-green,
+predictor, cross-color, palette, and selected combined transforms. Predictor
+modes can vary by tile. `BestCompression` can additionally evaluate
+block-adaptive cross-color coefficients.
+
+Transform screening uses exact literal coding cost together with sampled local
+and distant match potential. A family-aware reservoir keeps structurally
+different candidates instead of retaining only candidates with the lowest
+literal entropy. Screening stores rematerializable descriptors, so every
+transform candidate does not remain as an owned full-image plane.
+
+### Match, Parse, Cache, and Entropy Optimization
+
+Exact finalists use a reverse-built match graph. Repeated runs and previous-row
+matches propagate their lengths instead of rescanning the same interval, and a
+bounded hash chain supplies more distant alternatives. Each compact match edge
+stores its distance prefix information and occupies eight bytes.
+
+A dynamic-programming parser compares literals, color-cache references, and
+backward references using current Huffman costs. The selected stream may be
+reparsed for a bounded number of iterations. Color-cache sizes from 1 through
+11 bits are compared only when enabled by the profile.
+
+Spatial entropy optimization builds sparse tile histograms, clusters them into
+at most 16 code groups, and compares the complete meta-prefix cost. The
+candidate retains the lowest exact emitted bit count, including side images,
+tree headers, symbols, and extra bits.
+
+### Count and Write Kernel
+
+`vp8lBitSink` is shared by size counting and emission. Huffman trees and plans
+therefore use the same serialization logic for both operations. A completed
+plan records its payload bit length, and the writer verifies that emission
+produces exactly that count before flushing the WebP chunk.
+
+Plans own the tokens, transforms, trees, and entropy maps needed for emission.
+Search scratch is held in typed encode-scoped workspaces and is never observed
+by the writer.
+
+### Determinism and Parallelism
+
+Finalists may be evaluated by a bounded worker pool: at most two workers for
+default search and four for `BestCompression`, further limited by
+`GOMAXPROCS` and the parallel workspace budget. Results are written to their
+original candidate slots and reduced in stable order, so worker scheduling
+does not change the selected bitstream.
+
+### Near-Lossless
+
+Near-lossless encoding applies edge-aware RGB quantization with quality bands
+compatible with the documented cwebp behavior and preserves alpha exactly.
+Its processed source is encoded by the VP8L streaming path, avoiding a second
+full-image search workspace.
 
 ## Lossy VP8 Pipeline
 
 The lossy path converts the shared source into a `vp8Source`. Analysis produces
 a `vp8FramePlan` containing macroblock prediction modes, skip decisions, token
 probabilities, and an optional reusable residual buffer. Partition emission
-then consumes that plan to write the first partition and residual partition
-before assembling the VP8 key frame. Buffered profiles evaluate skip and
-no-skip plans with independently optimized token probabilities and retain the
-lower estimated total bit cost.
+consumes that plan to write an intra-only VP8 key frame.
 
-Alpha is analyzed separately and, when needed, is written in an extended WebP
-container alongside the VP8 frame. Opaque standard image types skip alpha
-analysis. Alpha candidates compare all four global filters, run references,
-and previous-row spatial distances by encoded bit cost. `BestCompression` can
-retain a bounded dynamic-programming parse; lower-effort profiles use the
-greedy parse or omit spatial candidates. For standard image types, frame
-planning and alpha analysis may run concurrently with one worker each.
+Alpha is analyzed independently and, when required, is written in an extended
+WebP container beside the VP8 frame. Candidates compare raw and compressed
+alpha, all enabled filters, run references, and bounded previous-row spatial
+references. `BestCompression` can apply a dynamic-programming parse to the
+strongest alpha candidates.
 
-## Memory and Determinism
+VP8 reconstruction uses a two-macroblock-row ring rather than a full-frame
+reconstruction plane. Standard opaque image types skip alpha analysis, and
+standard images with alpha can run frame planning and alpha analysis in
+parallel.
 
-Search limits, materialization limits, and residual-buffer limits are explicit
-parts of internal mode configuration. `LowMemory` avoids full-frame source and
-residual materialization, while `BestCompression` permits more retained state
-for broader search.
+## Memory and Concurrency
 
-VP8L finalist planes and match graphs are bounded independently at 32 MiB.
-They are sequential scratch state rather than global pools, so concurrent
-calls do not retain or share encoder memory. Plans copy only the token stream
-that survives candidate reduction.
+All search state is local to one encode call. The package has no mutable global
+encoder pool, and concurrent calls do not share plans or scratch buffers.
 
-VP8 reconstruction uses a two-macroblock-row ring: 32 luma rows and 16 rows for
-each chroma plane. Top-row contexts, the skip map, and the optional residual
-buffer are encode-scoped workspaces reused across analysis passes. Parallel
-candidate builders write disjoint result slots, and candidate reduction remains
-ordered, so worker scheduling does not affect the selected bitstream.
+VP8L source, worker, parallel, and total-search estimates are explicit fields
+of `vp8lBudget`. The estimates gate expensive buffered search; cumulative heap
+allocation can be higher because finalists may be rematerialized sequentially.
+Streaming modes retain only row state and immutable transform metadata.
 
-Candidate selection and output are deterministic. The project remains pure Go
-and does not depend on libwebp or cgo at runtime.
+The project remains pure Go and has no runtime dependency on libwebp, cgo, or
+architecture-specific assembly.
 
 ## Development Module Boundaries
 
-The repository root is the published encoder module. The nested `benchmarks`
-module contains the public-API performance suite, generated comparison
-fixtures, corpus tooling, external decoder verification, and optional libwebp
-comparison commands. Its local `replace` directive always targets the
-current root checkout without adding development dependencies to the published
-module graph.
+The repository root is the published encoder module. Root `internal` packages
+contain benchmark and evaluation support shared by root tests and benchmark
+commands; production encoding does not import them.
 
-White-box benchmarks and ablation tests that require unexported encoder
-configuration remain in the root package. This keeps implementation-specific
-hooks out of the public API. The nested `tools` module pins development
-executables, and the root Makefile coordinates verification across all three
-module boundaries.
+The nested `benchmarks` module contains the public-API performance suite,
+deterministic fixture generation, corpus tooling, external decoder
+verification, and optional libwebp comparison commands. Its local `replace`
+directive targets the current root checkout without adding development
+dependencies to the published module graph.
+
+The nested `tools` module pins development executables. The root Makefile
+coordinates tests, vet, formatting, benchmarks, and optional external checks
+across these module boundaries.

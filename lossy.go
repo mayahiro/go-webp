@@ -361,13 +361,13 @@ func writeAlphaVP8LImageStream(bits *bitWriter, readPixel pixelReader, bounds im
 	bits.writeBits(0, 1) // no meta prefix image
 
 	writeAlphaGreenTree(bits, code)
-	writeSimpleTree(bits, 0)
-	writeSimpleTree(bits, 0)
-	writeSimpleTree(bits, 0)
+	writeAlphaSimpleTree(bits, 0)
+	writeAlphaSimpleTree(bits, 0)
+	writeAlphaSimpleTree(bits, 0)
 	if code.lz77 {
 		writeAlphaDistanceTree(bits, code)
 	} else {
-		writeSimpleTree(bits, 0)
+		writeAlphaSimpleTree(bits, 0)
 	}
 
 	if len(plan.tokens) != 0 {
@@ -388,9 +388,9 @@ func writeAlphaGreenTree(bits *bitWriter, code alphaCode) {
 	}
 	switch code.n {
 	case 1:
-		writeSimpleTree(bits, uint8(code.symbols[0]))
+		writeAlphaSimpleTree(bits, uint8(code.symbols[0]))
 	case 2:
-		writeTwoSymbolTree(bits, uint8(code.symbols[0]), uint8(code.symbols[1]))
+		writeAlphaTwoSymbolTree(bits, uint8(code.symbols[0]), uint8(code.symbols[1]))
 	default:
 		writeAlphaNormalTree(bits, code.lengths[:])
 	}
@@ -403,12 +403,37 @@ func writeAlphaDistanceTree(bits *bitWriter, code alphaCode) {
 	}
 	switch code.distanceN {
 	case 1:
-		writeSimpleTree(bits, code.distanceSymbols[0])
+		writeAlphaSimpleTree(bits, code.distanceSymbols[0])
 	case 2:
-		writeTwoSymbolTree(bits, code.distanceSymbols[0], code.distanceSymbols[1])
+		writeAlphaTwoSymbolTree(bits, code.distanceSymbols[0], code.distanceSymbols[1])
 	default:
-		writeSimpleTree(bits, 0)
+		writeAlphaSimpleTree(bits, 0)
 	}
+}
+
+func writeAlphaSimpleTree(bits *bitWriter, symbol uint8) {
+	bits.writeBits(1, 1)
+	bits.writeBits(0, 1)
+	if symbol < 2 {
+		bits.writeBits(0, 1)
+		bits.writeBits(uint32(symbol), 1)
+		return
+	}
+	bits.writeBits(1, 1)
+	bits.writeBits(uint32(symbol), 8)
+}
+
+func writeAlphaTwoSymbolTree(bits *bitWriter, symbol0 uint8, symbol1 uint8) {
+	bits.writeBits(1, 1)
+	bits.writeBits(1, 1)
+	if symbol0 < 2 {
+		bits.writeBits(0, 1)
+		bits.writeBits(uint32(symbol0), 1)
+	} else {
+		bits.writeBits(1, 1)
+		bits.writeBits(uint32(symbol0), 8)
+	}
+	bits.writeBits(uint32(symbol1), 8)
 }
 
 func alphaVP8LStreamSize(plan alphaResidualPlan, code alphaCode) uint64 {

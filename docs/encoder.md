@@ -84,43 +84,44 @@ No profile guarantees the smallest or fastest output for every image.
 `ModeFast` and `ModeLowMemory` can produce larger output because they
 intentionally reduce search work.
 
-Balanced lossless profiles can stop transform search when color indexing is
-clearly better on a low-color image. `ModeBestCompression` retains a broader
-bounded transform search, while `ModeAuto` selects the fast lossless profile only
-for very small indexed payloads.
+Balanced lossless profiles use the default bounded transform, match, and
+entropy budgets. `ModeBestCompression` broadens those budgets, while
+`ModeAuto` selects the fast lossless profile only for very small verified
+indexed payloads.
 
 ## Lossless Encoding
 
-The lossless encoder can select VP8L predictor, color, color-indexing,
-subtract-green, and palette transforms when their estimated complete bit cost
-is lower. Its bounded search includes:
+The lossless encoder compares complete VP8L plans rather than selecting each
+feature independently. Buffered profiles use a two-stage bounded search:
 
-- Single-symbol Huffman trees for constant channels
-- Full 256-symbol channel histograms and normal Huffman trees
-- A bounded packed color-index stream for small low-color inputs
-- A multi-candidate LZ77 match finder with one-step lazy matching
-- Cost-based optimal parsing for indexed and promising general-image streams
-- A bounded compact match graph for buffered finalist streams of at least
-  65,536 pixels
-- Dynamically selected 1- to 11-bit color caches analyzed in one source pass
-- Selected combinations of spatial prediction, LZ77, and color cache coding
-  for literal and transformed residual streams
-- Tile-adaptive predictor modes and cross-color coefficients
-- Entropy-clustered meta-prefix histograms with up to 32 coding groups
-- A two-stage planner that shortlists candidates cheaply before comparing the
-  complete emitted cost of optimal LZ77, color-cache, and histogram variants
-- An independent supplemental spatial-predictor candidate for the default
-  profile, selected only when its complete output is smaller than the baseline
-- Encode-scoped token, hash, and dynamic-programming workspaces reused across
-  finalist candidates
+- A transform graph covering direct, subtract-green, predictor, cross-color,
+  palette, and selected combined transforms
+- Tile-adaptive predictor modes and, in `ModeBestCompression`, optional
+  block-adaptive cross-color coefficients
+- Family-aware screening that combines exact literal bits with sampled local
+  and distant match potential
+- A compact reverse-built match graph with bounded hash chains and propagated
+  run and previous-row matches
+- Cost-based dynamic-programming parsing across literals, backward references,
+  and 1- to 11-bit color-cache references
+- Sparse spatial histograms and entropy clustering with up to 16 coding groups
+- Exact size comparison using the same bit-writing logic used for emission
+- Encode-scoped transform, match, Huffman, cache, entropy, and parser
+  workspaces reused across finalists
 
-`ModeBestCompression` can additionally re-run optimal LZ77 parsing with
-color-cache hit costs in the model. The original candidate remains available,
-so this pass is selected only when it reduces the complete emitted cost.
+`ModeFast` and `ModeLowMemory` use a row-streaming path with inexpensive
+transforms and greedy matches. Buffered modes also fall back to streaming when
+the source or estimated search workspace exceeds its configured limit.
 
-The encoder does not use unbounded hash chains. This keeps work and memory
-bounded, but some inputs can remain larger than output from encoders that use
-broader searches.
+`ModeBestCompression` retains the complete default plan as an incumbent and
+selects its expanded-search result only when the exact payload is smaller.
+It therefore does not produce a larger lossless payload than `ModeDefault` for
+the same input.
+
+The matcher does not use unbounded hash chains, and every profile limits
+candidate counts, edges, parse iterations, entropy groups, workers, and
+workspace estimates. Some inputs can therefore remain larger than output from
+encoders with broader searches.
 
 ## Lossy Encoding
 
@@ -166,29 +167,32 @@ read through conversion equivalent to `color.NRGBAModel`.
 
 Encoding can scan the input more than once. Important resource bounds include:
 
-- Buffered lossless profiles can use source and transformed-finalist pixel
-  planes capped at 32 MiB
-- Lossless compact match graphs are capped at 32 MiB and fall back to the
-  direct bounded matcher outside their size range
+- Buffered lossless profiles use a packed source plane capped at 32 MiB
+- Default buffered lossless search has a 96 MiB estimated workspace gate and
+  up to two finalist workers
+- `ModeBestCompression` has a 192 MiB estimated workspace gate and up to four
+  finalist workers
+- Inputs outside a buffered lossless gate fall back to row-streaming encoding
+- Lossless screening retains rematerializable transform descriptors; exact
+  finalist workspaces are encode-scoped and reused sequentially or by a
+  bounded worker pool
 - Buffered lossy profiles can retain quantized residuals up to an estimated
   32 MiB and reuse them for statistics and final coding
 - Lossy reconstructed pixels use a two-macroblock-row ring rather than a
   full-frame reconstruction plane
-- `ModeBestCompression` can analyze independent lossless candidates with up
-  to four workers; custom image implementations use a converted plane capped
-  at 32 MiB when concurrent reads are not known to be safe
-- The default baseline and supplemental predictor search can run concurrently
-  for standard image types. Each branch keeps a separate bounded workspace,
-  so this favors latency and encoded size over peak working memory
 - Standard image types can run lossy frame planning and alpha analysis with
   two workers
 - `ModeLowMemory` avoids the full-frame source plane, VP8 residual buffer,
   VP8L token stream, meta-prefix plan, and color-cache plan
 
-Inputs above a buffer limit fall back to a bounded repeated-pass or sequential
-path. Standard image types use direct readers where possible. Small images,
-custom image implementations, and single-threaded runtimes use sequential
-lossless candidate search and sequential lossy frame and alpha analysis.
+`B/op` from Go benchmarks measures cumulative allocation, not peak live memory.
+Candidate rematerialization can make cumulative allocation exceed the search
+workspace estimate while simultaneously retained state remains bounded.
+Standard image types use direct readers where possible.
+
+Encoded bytes are not a stable serialization contract. Encoder versions may
+select different valid VP8L or VP8 plans while preserving the documented pixel
+behavior and public API.
 
 ## Limits
 

@@ -78,33 +78,31 @@ near-lossless qualityに対するRGB各channelの最大誤差は次のとおり�
 すべての画像で最小または最速になることを保証するprofileはありません
 `ModeFast` と `ModeLowMemory` は意図的にsearchを減らすため、出力が大きくなる場合があります
 
-Balanced lossless profileはlow-color画像でcolor indexingが明確に有利な場合にtransform searchを終了できます
-`ModeBestCompression` はより広い上限付きtransform searchを行い、`ModeAuto` は非常に小さいindexed payloadの場合だけfast lossless profileを選択します
+Balanced lossless profileは標準の上限付きtransform、match、entropy budgetを使用します
+`ModeBestCompression` は各budgetを広げ、`ModeAuto` は検証済みindexed payloadが非常に小さい場合だけfast lossless profileを選択します
 
 ## Lossless Encoding
 
-lossless encoderはVP8L predictor、color、color indexing、subtract-green、palette transformを評価し、推定した全体bit costが小さくなる場合に使用します
-上限付きsearchには次を含みます
+lossless encoderは各機能を個別に選ぶのではなく、完全なVP8L planを比較します
+bufferを使うprofileは次の2段階の上限付きsearchを行います
 
-- constant channel向けsingle-symbol Huffman tree
-- 256 symbols全体のchannel histogramとnormal Huffman tree
-- 小さいlow-color入力向けの上限付きpacked color-index stream
-- 複数候補LZ77 match finderと1手先のlazy matching
-- indexed streamと有望な一般画像stream向けのcost-based optimal parsing
-- 65,536 pixels以上のbuffered finalist stream向け上限付きcompact match graph
-- 1回のsource走査で解析し、1から11 bitsから動的に選択するcolor cache
-- literalと変換済みresidual stream向けのspatial prediction、LZ77、color cache codingの選択的な組み合わせ
-- tile適応のpredictor modeとcross-color係数
-- 最大32 coding groupsのentropy-clustered meta-prefix histogram
-- cheapなshortlist後にoptimal LZ77、color cache、histogram候補の完全な出力costを比較する2段階planner
-- Default profileでbaselineとは独立して評価し、完全な出力が小さい場合だけ採用する補助spatial-predictor候補
-- finalist候補間で再利用するencode単位のtoken、hash、dynamic-programming workspace
+- direct、subtract-green、predictor、cross-color、paletteと選択的な組み合わせを含むtransform graph
+- tile適応predictor modeと、`ModeBestCompression` で任意に使うblock適応cross-color係数
+- exact literal bitsとlocal、distant match potentialを組み合わせるfamily-aware screening
+- 上限付きhash chainとrun、前行matchの伝播を持つcompactな逆向きmatch graph
+- literal、backward reference、1から11 bitsのcolor-cache referenceを比較するcost-based dynamic-programming parser
+- sparse spatial histogramと最大16 coding groupsのentropy clustering
+- emissionと同じbit writerを使うexact size比較
+- finalist間で再利用するencode単位のtransform、match、Huffman、cache、entropy、parser workspace
 
-`ModeBestCompression` はcolor-cache hit costをmodelへ含めたoptimal LZ77 parsingを追加実行できます
-元の候補も維持し、完全な出力costが小さくなる場合だけこのpassを採用します
+`ModeFast` と `ModeLowMemory` はcheapなtransformとgreedy matchを持つrow-streaming pathを使用します
+bufferを使うmodeでもsourceまたは推定search workspaceが設定上限を超える場合はstreamingへfallbackします
 
-制限なしのhash chainは使用しません
-これによりworkとmemoryを制限できますが、より広いsearchを行うencoderより出力が大きくなる入力もあります
+`ModeBestCompression` はDefaultの完全planをincumbentとして保持し、拡張searchのexact payloadが小さい場合だけ置き換えます
+そのため同じ入力で `ModeDefault` より大きいlossless payloadを出力しません
+
+matcherは制限なしのhash chainを使いません
+各profileはcandidate数、edge数、parse反復、entropy group、worker、workspace推定を制限するため、より広いsearchを行うencoderより出力が大きくなる入力もあります
 
 ## Lossy Encoding
 
@@ -142,18 +140,22 @@ compressed lossy alphaはglobal filter、frequency-coded residual、連続runと
 encodingでは入力を複数回走査する場合があります
 主なresource上限は次のとおりです
 
-- bufferを使うlossless profileは最大32 MiBのsource planeと変換済みfinalist pixel planeを使う場合がある
-- lossless compact match graphは最大32 MiBで、対象size外では上限付きdirect matcherへfallbackする
+- bufferを使うlossless profileは最大32 MiBのpacked source planeを使用する
+- Defaultのbuffered lossless searchは96 MiBの推定workspace gateと最大2 finalist workersを持つ
+- `ModeBestCompression` は192 MiBの推定workspace gateと最大4 finalist workersを持つ
+- buffered lossless gateの範囲外の入力はrow-streaming encodingへfallbackする
+- lossless screeningは再生成可能なtransform descriptorを保持し、exact finalist workspaceはencode単位で逐次または上限付きworker poolから再利用する
 - bufferを使うlossy profileは推定32 MiBまで量子化済みresidualを保持し、統計と最終codingで再利用できる
 - lossyの再構成pixelはfull-frame planeではなく2 macroblock rowsのringを使う
-- `ModeBestCompression` は独立したlossless候補を最大4 workersで解析でき、並行readの安全性が既知でないcustom画像実装には最大32 MiBの変換済みplaneを使う
-- 標準画像型ではDefault baselineと補助predictor searchを並列実行できる。各branchは独立した上限付きworkspaceを持つため、peak working memoryよりlatencyとencoded sizeを優先する
 - 標準画像型ではlossy frame planningとalpha解析を2 workersで実行できる
 - `ModeLowMemory` はfull-frame source plane、VP8 residual buffer、VP8L token stream、meta-prefix plan、color-cache planを保持しない
 
-buffer上限を超える入力では、上限付きの反復passまたは逐次pathへfallbackします
+Go benchmarkの `B/op` はpeak live memoryではなく累積allocationを表します
+candidateの再生成により累積allocationがsearch workspace推定を超えても、同時に保持するstateは上限付きです
 標準画像型は可能な場合にdirect readerを使います
-小さい画像、custom画像実装、single-thread runtimeではlossless候補searchとlossy frame、alphaを逐次解析します
+
+encoded bytesは安定したserialization contractではありません
+encoder versionによって異なる有効なVP8LまたはVP8 planを選択する場合がありますが、文書化したpixel behaviorとpublic APIは維持します
 
 ## 制約
 
