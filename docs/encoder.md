@@ -85,8 +85,8 @@ No profile guarantees the smallest or fastest output for every image.
 intentionally reduce search work.
 
 Balanced lossless profiles can stop transform search when color indexing is
-clearly better on a low-color image. `ModeBestCompression` retains exhaustive
-transform selection, while `ModeAuto` selects the fast lossless profile only
+clearly better on a low-color image. `ModeBestCompression` retains a broader
+bounded transform search, while `ModeAuto` selects the fast lossless profile only
 for very small indexed payloads.
 
 ## Lossless Encoding
@@ -96,13 +96,17 @@ subtract-green, and palette transforms when their estimated complete bit cost
 is lower. Its bounded search includes:
 
 - Single-symbol Huffman trees for constant channels
+- Full 256-symbol channel histograms and normal Huffman trees
 - A bounded packed color-index stream for small low-color inputs
 - A multi-candidate LZ77 match finder with one-step lazy matching
-- Cost-based optimal parsing for selected indexed streams
+- Cost-based optimal parsing for indexed and promising general-image streams
+- Dynamically selected 1- to 11-bit color caches
 - Selected combinations of spatial prediction, LZ77, and color cache coding
   for literal and transformed residual streams
-- A block-adaptive predictor and one coarse meta-prefix histogram candidate in
-  `ModeBestCompression`
+- Tile-adaptive predictor modes and cross-color coefficients
+- Entropy-clustered meta-prefix histograms with up to 32 coding groups
+- A two-stage planner that shortlists candidates cheaply before comparing the
+  complete emitted cost of optimal LZ77, color-cache, and histogram variants
 
 The encoder does not use unbounded hash chains. This keeps work and memory
 bounded, but some inputs can remain larger than output from encoders that use
@@ -156,6 +160,8 @@ Encoding can scan the input more than once. Important resource bounds include:
   for safe parallel reads from custom image implementations
 - Buffered lossy profiles can retain quantized residuals up to an estimated
   32 MiB and reuse them for statistics and final coding
+- Lossy reconstructed pixels use a two-macroblock-row ring rather than a
+  full-frame reconstruction plane
 - `ModeBestCompression` can analyze independent lossless candidates with up
   to four workers
 - Standard image types can run lossy frame planning and alpha analysis with

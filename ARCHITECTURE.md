@@ -16,17 +16,25 @@ Image-type-specific readers provide direct paths for `image.NRGBA`,
 `image.Uniform`. Other `image.Image` implementations use the standard color
 model conversion path.
 
-The lossy `BestCompression` profile may materialize full-resolution Y, Cb, and
-Cr source planes in one bounded allocation. Other profiles keep the direct
-readers, and `LowMemory` explicitly avoids the materialized plane. The plane is
-limited to 32 MiB so large images fall back to direct readers.
+Lossless balanced profiles may materialize one immutable RGBA pixel plane for
+inputs whose native conversion is expensive, including YCbCr, 64-bit color,
+and custom image implementations. Lossy `BestCompression` may instead
+materialize full-resolution Y, Cb, and Cr source planes. Both paths are bounded
+to 32 MiB, and `LowMemory` explicitly keeps direct readers.
 
 ## Lossless VP8L Pipeline
 
 The VP8L planner analyzes source pixels and compares bounded combinations of
-predictor, color, subtract-green, color-indexing, color-cache, LZ77, and
-spatial prefix-code choices. Candidate costs include transform headers,
-prefix-code trees, token data, and image-data overhead.
+predictor, cross-color, subtract-green, color-indexing, 1- to 11-bit color
+cache, LZ77, and spatial prefix-code choices. Predictor modes and cross-color
+coefficients can vary by tile. Channel coding retains full 256-symbol
+histograms and compares complete Huffman tree and data costs.
+
+Planning is split into two stages. Literal cost and a bounded greedy LZ77 pass
+shortlist structurally different candidates; optimal parsing, color-cache,
+and entropy-clustered meta-prefix searches then run only on the finalists.
+This keeps the final decision based on emitted bit cost without applying every
+expensive post-processing path to every transform candidate.
 
 The selected `vp8lEncodingPlan` is immutable during emission. The VP8L writer
 serializes transforms and image data from that plan; it does not repeat the
@@ -68,7 +76,8 @@ parts of internal mode configuration. `LowMemory` avoids full-frame source and
 residual materialization, while `BestCompression` permits more retained state
 for broader search.
 
-VP8 reconstruction planes, top-row contexts, the skip map, and the residual
+VP8 reconstruction uses a two-macroblock-row ring: 32 luma rows and 16 rows for
+each chroma plane. Top-row contexts, the skip map, and the optional residual
 buffer are encode-scoped workspaces reused across analysis passes. Parallel
 candidate builders write disjoint result slots, and candidate reduction remains
 ordered, so worker scheduling does not affect the selected bitstream.

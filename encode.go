@@ -8,6 +8,7 @@ import (
 	"image"
 	"image/color"
 	"io"
+	"math"
 	"sort"
 )
 
@@ -29,18 +30,18 @@ const (
 	vp8lLazyMatchMinGain              = 2
 	vp8lMaxDistanceCode               = 1048576
 	vp8lMinColorCacheBits             = 1
-	vp8lMaxColorCacheBits             = 6
+	vp8lMaxColorCacheBits             = 11
 	vp8lMaxColorCacheSize             = 1 << vp8lMaxColorCacheBits
 	vp8lColorCacheSampleSize          = 2048
 	vp8lMinMetaPrefixBits             = 2
 	vp8lMaxMetaPrefixBits             = 9
 	vp8lMinMetaPrefixCandidateBits    = 4
-	vp8lMaxMetaPrefixGroups           = 16
-	vp8lMaxMetaPrefixBlocks           = 1024
+	vp8lMaxMetaPrefixGroups           = 32
+	vp8lMaxMetaPrefixBlocks           = 4096
 	vp8lMaxMetaPrefixColorCacheTokens = 1 << 18
 	vp8lMaxChannelSmallSymbols        = 16
 	vp8lMaxMaterializedIndexPixels    = 1 << 16
-	nColorCacheGreenCodes             = nLiteralCodes + nLengthCodes + vp8lMaxColorCacheSize
+	vp8lMaxColorCacheGreenCodes       = nLiteralCodes + nLengthCodes + vp8lMaxColorCacheSize
 )
 
 // Compression selects the WebP bitstream written by Encode.
@@ -238,6 +239,7 @@ type imageAnalysis struct {
 }
 
 type vp8lEncodingPlan struct {
+	baselineCandidate   bool
 	analysis            imageAnalysis
 	alpha               bool
 	predictor           bool
@@ -248,6 +250,7 @@ type vp8lEncodingPlan struct {
 	colorTransform      bool
 	colorSizeBits       uint8
 	colorElement        vp8lColorTransformElement
+	colorImage          []vp8lColorTransformElement
 	colorAnalysis       imageAnalysis
 	colorIndexing       bool
 	colorIndexWidthBits uint8
@@ -282,9 +285,9 @@ type vp8lColorCachePlan struct {
 	bits     uint8
 	tokens   []vp8lToken
 	analysis imageAnalysis
-	counts   [nColorCacheGreenCodes]uint32
-	lengths  [nColorCacheGreenCodes]uint8
-	codes    [nColorCacheGreenCodes]uint16
+	counts   []uint32
+	lengths  []uint8
+	codes    []uint16
 }
 
 type vp8lMetaPrefixPlan struct {
@@ -302,9 +305,9 @@ type vp8lMetaPrefixPlan struct {
 
 type vp8lColorCacheGroupPlan struct {
 	literalAnalysis imageAnalysis
-	counts          [nColorCacheGreenCodes]uint32
-	lengths         [nColorCacheGreenCodes]uint8
-	codes           [nColorCacheGreenCodes]uint16
+	counts          []uint32
+	lengths         []uint8
+	codes           []uint16
 }
 
 type vp8lLZ77GroupPlan struct {
@@ -346,18 +349,25 @@ type vp8lEncodingConfig struct {
 	tryLZ77TokenMetaPrefix          bool
 	optimalLZ77Passes               int
 	maxOptimalLZ77Pixels            int
+	optimalLZ77MinSeedBitsNumerator int
 	tryTransformedLZ77ColorCache    bool
 	tryBlockPredictor               bool
+	tryBlockColorTransform          bool
 	minColorIndexEarlyExitPixels    int
 	palettedColorIndexEarlyExitRate uint64
 	nrgbaColorIndexEarlyExitRate    uint64
 	predictorModes                  []uint8
 	predictorBlockSizeBits          []uint8
+	colorTransformBlockSizeBits     []uint8
 	colorTransformCandidates        []vp8lColorTransformElement
 	prioritizeColorIndexCandidate   bool
 	maxMetaPrefixLZ77Tokens         int
 	maxTransformedLZ77CacheTokens   int
 	parallelTransforms              bool
+	materializeSource               bool
+	finalLZ77Candidates             int
+	finalLiteralCandidates          int
+	tryFinalColorCacheMetaPrefix    bool
 }
 
 type vp8lAutoLosslessReason int
@@ -378,10 +388,12 @@ type channelPlan struct {
 	constant             bool
 	value                uint8
 	n                    int
+	total                uint64
 	symbols              [vp8lMaxChannelSmallSymbols]uint8
 	counts               [vp8lMaxChannelSmallSymbols]uint32
 	lengths              [vp8lMaxChannelSmallSymbols]uint8
 	codes                [vp8lMaxChannelSmallSymbols]uint16
+	histogram            *vp8lChannelHistogram
 	normal               bool
 	normalTreeBaseBits   uint32
 	normalTreeTokenCount uint16
@@ -390,6 +402,12 @@ type channelPlan struct {
 	last                 uint8
 	lastPos              uint8
 	lastOK               bool
+}
+
+type vp8lChannelHistogram struct {
+	counts  [nLiteralCodes]uint32
+	lengths [nLiteralCodes]uint8
+	codes   [nLiteralCodes]uint16
 }
 
 func analyzeImage(readPixel pixelReader, bounds image.Rectangle) imageAnalysis {
@@ -424,6 +442,7 @@ func newConstantChannelPlan(v uint8) channelPlan {
 		constant: true,
 		value:    v,
 		n:        1,
+		total:    1,
 		symbols:  [vp8lMaxChannelSmallSymbols]uint8{v},
 		counts:   counts,
 		last:     v,
@@ -443,7 +462,15 @@ func (p *channelPlan) observeSymbol(v uint8) {
 }
 
 func (p *channelPlan) observeSymbolCount(v uint8, count uint32) {
-	if p.n < 0 {
+	if count == 0 {
+		return
+	}
+	p.total += uint64(count)
+	if p.histogram != nil {
+		if p.histogram.counts[v] == 0 {
+			p.n++
+		}
+		p.histogram.counts[v] += count
 		return
 	}
 	if p.lastOK && p.last == v {
@@ -460,8 +487,13 @@ func (p *channelPlan) observeSymbolCount(v uint8, count uint32) {
 		}
 	}
 	if p.n >= len(p.symbols) {
-		p.n = -1
-		p.normal = false
+		histogram := &vp8lChannelHistogram{}
+		for i := 0; i < p.n; i++ {
+			histogram.counts[p.symbols[i]] = p.counts[i]
+		}
+		histogram.counts[v] += count
+		p.histogram = histogram
+		p.n++
 		p.lastOK = false
 		return
 	}
@@ -493,7 +525,27 @@ func (p *channelPlan) finalize() {
 	p.normalCostCached = false
 	clear(p.lengths[:])
 	clear(p.codes[:])
+	if p.histogram != nil {
+		clear(p.histogram.lengths[:])
+		clear(p.histogram.codes[:])
+	}
 	if p.constant || p.n < 3 {
+		return
+	}
+	if p.histogram != nil {
+		if !huffmanCodeLengthsInto(p.histogram.lengths[:], p.histogram.counts[:]) {
+			return
+		}
+		codes := canonicalChannelCodes(p.histogram.lengths[:])
+		copy(p.histogram.codes[:], codes)
+		for symbol, count := range p.histogram.counts {
+			p.normalDataBits += uint64(count) * uint64(p.histogram.lengths[symbol])
+		}
+		normalTreeBaseBits, normalTreeTokenCount := alphaNormalTreeBaseBits(p.histogram.lengths[:])
+		p.normalTreeBaseBits = uint32(normalTreeBaseBits)
+		p.normalTreeTokenCount = normalTreeTokenCount
+		p.normalCostCached = true
+		p.normal = true
 		return
 	}
 	var counts [nLiteralCodes]uint32
@@ -541,7 +593,11 @@ func chooseVP8LEncodingPlanForImageMode(m image.Image, readPixel pixelReader, bo
 }
 
 func chooseVP8LEncodingPlanForImageWithConfig(m image.Image, readPixel pixelReader, bounds image.Rectangle, width int, height int, cfg vp8lEncodingConfig) vp8lEncodingPlan {
-	readPixel, cfg.parallelTransforms = vp8lPrepareParallelTransformReader(m, readPixel, bounds, width, height, cfg.parallelTransforms)
+	readPixel, cfg, _ = vp8lPrepareEncodingSource(m, readPixel, bounds, width, height, cfg)
+	return chooseVP8LEncodingPlanForPreparedImage(m, readPixel, bounds, width, height, cfg)
+}
+
+func chooseVP8LEncodingPlanForPreparedImage(m image.Image, readPixel pixelReader, bounds image.Rectangle, width int, height int, cfg vp8lEncodingConfig) vp8lEncodingPlan {
 	analysis := analyzeImage(readPixel, bounds)
 	best := vp8lEncodingPlan{
 		analysis: analysis,
@@ -570,7 +626,7 @@ func chooseVP8LEncodingPlanForImageWithConfig(m image.Image, readPixel pixelRead
 			return vp8lFinalizeEncodingPlan(readPixel, bounds, width, height, literalPlan, &candidates, candidateCount, literalBestIndex, best, bestBits, cfg)
 		}
 	}
-	if colorIndexOK && cfg.prioritizeColorIndexCandidate {
+	if colorIndexOK && (cfg.prioritizeColorIndexCandidate || !cfg.allowColorIndexEarlyExit) {
 		candidateCount, literalBestIndex, best, bestBits = vp8lAddEncodingPlanCandidate(&candidates, candidateCount, literalBestIndex, colorIndexPlan, width, height, best, bestBits)
 		if indexedPredictorOK {
 			candidateCount, literalBestIndex, best, bestBits = vp8lAddEncodingPlanCandidate(&candidates, candidateCount, literalBestIndex, indexedPredictorPlan, width, height, best, bestBits)
@@ -590,6 +646,16 @@ func chooseVP8LEncodingPlanForImageWithConfig(m image.Image, readPixel pixelRead
 		if cfg.tryBlockPredictor {
 			if blockPredictorPlan, ok := makeVP8LBlockPredictorPlan(readPixel, bounds, width, height, analysis.alpha, cfg); ok {
 				candidateCount, literalBestIndex, best, bestBits = vp8lAddEncodingPlanCandidate(&candidates, candidateCount, literalBestIndex, blockPredictorPlan, width, height, best, bestBits)
+				if cfg.tryBlockColorTransform {
+					if combined, combinedOK := makeVP8LBlockColorTransformPlan(readPixel, bounds, width, height, blockPredictorPlan, cfg); combinedOK {
+						candidateCount, literalBestIndex, best, bestBits = vp8lAddEncodingPlanCandidate(&candidates, candidateCount, literalBestIndex, combined, width, height, best, bestBits)
+					}
+				}
+			}
+		}
+		if cfg.tryBlockColorTransform {
+			if blockColorPlan, ok := makeVP8LBlockColorTransformPlan(readPixel, bounds, width, height, literalPlan, cfg); ok {
+				candidateCount, literalBestIndex, best, bestBits = vp8lAddEncodingPlanCandidate(&candidates, candidateCount, literalBestIndex, blockColorPlan, width, height, best, bestBits)
 			}
 		}
 
@@ -691,16 +757,23 @@ func vp8lDefaultEncodingConfig() vp8lEncodingConfig {
 		tryLZ77ColorCache:               true,
 		tryLZ77MetaPrefix:               true,
 		tryTransformedLZ77ColorCache:    true,
+		tryBlockPredictor:               true,
+		tryBlockColorTransform:          true,
 		optimalLZ77Passes:               1,
 		maxOptimalLZ77Pixels:            vp8lMaxOptimalLZ77Pixels,
+		optimalLZ77MinSeedBitsNumerator: 1,
 		minColorIndexEarlyExitPixels:    vp8lMinColorIndexEarlyExitPixels,
 		palettedColorIndexEarlyExitRate: 2,
 		nrgbaColorIndexEarlyExitRate:    4,
 		predictorModes:                  vp8lPredictorModeCandidates[:],
 		predictorBlockSizeBits:          vp8lPredictorBlockSizeBitCandidates[:],
+		colorTransformBlockSizeBits:     vp8lColorTransformBlockSizeBitCandidates[:],
 		colorTransformCandidates:        vp8lColorTransformCandidates[:],
 		maxMetaPrefixLZ77Tokens:         vp8lMaxMetaPrefixLZ77Tokens,
 		maxTransformedLZ77CacheTokens:   vp8lMaxTransformedLZ77CacheTokens,
+		materializeSource:               true,
+		finalLZ77Candidates:             3,
+		finalLiteralCandidates:          2,
 	}
 }
 
@@ -711,6 +784,7 @@ func vp8lEncodingConfigForMode(mode Mode, m image.Image, readPixel pixelReader, 
 	cfg := vp8lDefaultEncodingConfig()
 	switch mode {
 	case ModeFast:
+		cfg.materializeSource = false
 		cfg.tryTransforms = false
 		cfg.tryCombinedTransforms = false
 		cfg.tryLZ77 = false
@@ -724,16 +798,23 @@ func vp8lEncodingConfigForMode(mode Mode, m image.Image, readPixel pixelReader, 
 		cfg.allowColorIndexEarlyExit = false
 		cfg.predictorModes = vp8lBestCompressionPredictorModeCandidates[:]
 		cfg.predictorBlockSizeBits = vp8lBestCompressionPredictorBlockSizeBitCandidates[:]
+		cfg.colorTransformBlockSizeBits = vp8lBestCompressionColorTransformBlockSizeBitCandidates[:]
 		cfg.colorTransformCandidates = vp8lBestCompressionColorTransformCandidates[:]
 		cfg.tryBlockPredictor = true
 		cfg.prioritizeColorIndexCandidate = true
 		cfg.tryLZ77TokenMetaPrefix = true
 		cfg.optimalLZ77Passes = 2
 		cfg.maxOptimalLZ77Pixels = vp8lBestCompressionMaxOptimalLZ77Pixels
+		cfg.optimalLZ77MinSeedBitsNumerator = 0
 		cfg.maxMetaPrefixLZ77Tokens = vp8lBestCompressionMaxMetaPrefixLZ77Tokens
 		cfg.maxTransformedLZ77CacheTokens = vp8lBestCompressionMaxTransformedLZ77CacheTokens
 		cfg.parallelTransforms = true
+		cfg.finalLZ77Candidates = 5
+		cfg.finalLiteralCandidates = 3
+		cfg.tryFinalColorCacheMetaPrefix = true
 	case ModeLowMemory:
+		cfg.materializeSource = false
+		cfg.tryBlockColorTransform = false
 		cfg.tryLZ77 = false
 		cfg.tryMetaPrefix = false
 		cfg.tryColorCache = false
@@ -742,6 +823,7 @@ func vp8lEncodingConfigForMode(mode Mode, m image.Image, readPixel pixelReader, 
 		cfg.tryTransformedLZ77ColorCache = false
 		cfg.optimalLZ77Passes = 0
 	case ModeNearLossless:
+		cfg.materializeSource = false
 		cfg.tryMetaPrefix = false
 		cfg.tryLZ77MetaPrefix = false
 		cfg.optimalLZ77Passes = 0
@@ -914,29 +996,7 @@ const (
 )
 
 func vp8lFinalizeEncodingPlan(readPixel pixelReader, bounds image.Rectangle, width int, height int, literalPlan vp8lEncodingPlan, candidates *[vp8lMaxEncodingPlanCandidates]vp8lEncodingPlan, candidateCount int, literalBestIndex int, best vp8lEncodingPlan, bestBits uint64, cfg vp8lEncodingConfig) vp8lEncodingPlan {
-	literalBestUsesTransform := vp8lPlanUsesTransform(candidates[literalBestIndex])
-	if cfg.tryLZ77 {
-		for i := 0; i < candidateCount; i++ {
-			candidate := candidates[i]
-			if literalBestUsesTransform && !vp8lPlanUsesTransform(candidate) {
-				continue
-			}
-			best, bestBits = vp8lConsiderCandidateLZ77Config(readPixel, bounds, width, height, candidate, best, bestBits, cfg)
-		}
-	}
-	if cfg.tryMetaPrefix {
-		for i := 0; i < candidateCount; i++ {
-			best, bestBits = vp8lConsiderCandidateMetaPrefix(readPixel, bounds, width, height, candidates[i], best, bestBits)
-		}
-	}
-	if cfg.tryColorCache && vp8lShouldTryDefaultColorCache(best, literalPlan) {
-		if colorCachePlan, ok := makeVP8LColorCachePlanConfig(readPixel, bounds, width, height, literalPlan, bestBits, cfg); ok {
-			best = colorCachePlan
-			bestBits = vp8lPayloadBits(width, height, best)
-		}
-	}
-
-	return best
+	return vp8lFinalizeEncodingPlanV2(readPixel, bounds, width, height, literalPlan, candidates, candidateCount, literalBestIndex, best, bestBits, cfg)
 }
 
 func vp8lAddEncodingPlanCandidate(candidates *[vp8lMaxEncodingPlanCandidates]vp8lEncodingPlan, candidateCount int, literalBestIndex int, candidate vp8lEncodingPlan, width int, height int, best vp8lEncodingPlan, bestBits uint64) (int, int, vp8lEncodingPlan, uint64) {
@@ -1094,60 +1154,107 @@ func vp8lChooseBlockPredictorImage(readPixel pixelReader, bounds image.Rectangle
 	}
 	transformWidth, transformHeight := vp8lTransformDimensions(width, height, sizeBits)
 	image := make([]uint8, transformWidth*transformHeight)
+	var accumulated vp8lPredictorResidualHistogram
+	var modeCounts [14]uint32
 	uniform := true
 	firstMode := uint8(0)
 	for by := 0; by < transformHeight; by++ {
 		for bx := 0; bx < transformWidth; bx++ {
-			mode := vp8lBestPredictorModeForBlock(readPixel, bounds, width, height, sizeBits, bx, by, modes)
+			leftMode := uint8(255)
+			if bx > 0 {
+				leftMode = image[by*transformWidth+bx-1]
+			}
+			aboveMode := uint8(255)
+			if by > 0 {
+				aboveMode = image[(by-1)*transformWidth+bx]
+			}
+			mode, histogram := vp8lBestPredictorModeForBlock(readPixel, bounds, width, height, sizeBits, bx, by, modes, &accumulated, &modeCounts, leftMode, aboveMode)
 			if bx == 0 && by == 0 {
 				firstMode = mode
 			} else if mode != firstMode {
 				uniform = false
 			}
 			image[by*transformWidth+bx] = mode
+			accumulated.add(histogram)
+			modeCounts[mode]++
 		}
 	}
 	return image, uniform
 }
 
-func vp8lBestPredictorModeForBlock(readPixel pixelReader, bounds image.Rectangle, width int, height int, sizeBits uint8, blockX int, blockY int, modes []uint8) uint8 {
+type vp8lPredictorResidualHistogram [4][nLiteralCodes]uint32
+
+func (h *vp8lPredictorResidualHistogram) add(other vp8lPredictorResidualHistogram) {
+	for channel := range h {
+		for symbol, count := range other[channel] {
+			h[channel][symbol] += count
+		}
+	}
+}
+
+func vp8lBestPredictorModeForBlock(readPixel pixelReader, bounds image.Rectangle, width int, height int, sizeBits uint8, blockX int, blockY int, modes []uint8, accumulated *vp8lPredictorResidualHistogram, modeCounts *[14]uint32, leftMode uint8, aboveMode uint8) (uint8, vp8lPredictorResidualHistogram) {
 	x0 := bounds.Min.X + blockX*(1<<sizeBits)
 	y0 := bounds.Min.Y + blockY*(1<<sizeBits)
 	x1 := minInt(x0+(1<<sizeBits), bounds.Max.X)
 	y1 := minInt(y0+(1<<sizeBits), bounds.Max.Y)
 	bestMode := modes[0]
-	bestScore := uint64(1<<64 - 1)
+	bestScore := -math.MaxFloat64
+	var bestHistogram vp8lPredictorResidualHistogram
 	for _, mode := range modes {
-		score := vp8lPredictorBlockResidualScore(readPixel, bounds, width, height, x0, y0, x1, y1, mode)
-		if score < bestScore {
+		histogram := vp8lPredictorBlockResidualHistogramFor(readPixel, bounds, width, height, x0, y0, x1, y1, mode)
+		score := vp8lMergedHistogramConcentration(accumulated, &histogram)
+		score += vp8lEntropyTerm(modeCounts[mode]+1) - vp8lEntropyTerm(modeCounts[mode])
+		if mode == leftMode {
+			score += 0.5
+		}
+		if mode == aboveMode {
+			score += 0.5
+		}
+		if score > bestScore {
 			bestScore = score
 			bestMode = mode
+			bestHistogram = histogram
 		}
 	}
-	return bestMode
+	return bestMode, bestHistogram
 }
 
-func vp8lPredictorBlockResidualScore(readPixel pixelReader, bounds image.Rectangle, width int, height int, x0 int, y0 int, x1 int, y1 int, mode uint8) uint64 {
-	var score uint64
+func vp8lPredictorBlockResidualHistogramFor(readPixel pixelReader, bounds image.Rectangle, width int, height int, x0 int, y0 int, x1 int, y1 int, mode uint8) vp8lPredictorResidualHistogram {
+	var histogram vp8lPredictorResidualHistogram
 	for y := y0; y < y1; y++ {
 		for x := x0; x < x1; x++ {
 			c := readPixel(x, y)
 			pred := vp8lPredictorPixel(readPixel, bounds, width, height, x, y, mode)
 			residual := subtractNRGBA(c, pred)
-			score += uint64(vp8lResidualMagnitude(residual.G))
-			score += uint64(vp8lResidualMagnitude(residual.R))
-			score += uint64(vp8lResidualMagnitude(residual.B))
-			score += uint64(vp8lResidualMagnitude(residual.A))
+			histogram[0][residual.G]++
+			histogram[1][residual.R]++
+			histogram[2][residual.B]++
+			histogram[3][residual.A]++
+		}
+	}
+	return histogram
+}
+
+func vp8lMergedHistogramConcentration(accumulated *vp8lPredictorResidualHistogram, block *vp8lPredictorResidualHistogram) float64 {
+	var score float64
+	for channel := range accumulated {
+		for symbol, count := range block[channel] {
+			if count == 0 {
+				continue
+			}
+			previous := accumulated[channel][symbol]
+			score += vp8lEntropyTerm(previous+count) - vp8lEntropyTerm(previous)
 		}
 	}
 	return score
 }
 
-func vp8lResidualMagnitude(v uint8) uint8 {
-	if v <= 128 {
-		return v
+func vp8lEntropyTerm(count uint32) float64 {
+	if count < 2 {
+		return 0
 	}
-	return uint8(256 - int(v))
+	value := float64(count)
+	return value * math.Log2(value)
 }
 
 func vp8lConsiderCandidateLZ77(readPixel pixelReader, bounds image.Rectangle, width int, height int, candidate vp8lEncodingPlan, best vp8lEncodingPlan, bestBits uint64) (vp8lEncodingPlan, uint64) {
@@ -1246,6 +1353,10 @@ func pixelReaderFor(m image.Image) pixelReader {
 				A: pix[i+3],
 			}
 		}
+	case *image.NRGBA64:
+		return func(x int, y int) color.NRGBA {
+			return nrgbaFromNRGBA64(img.NRGBA64At(x, y))
+		}
 	case *image.RGBA:
 		pix := img.Pix
 		stride := img.Stride
@@ -1258,6 +1369,10 @@ func pixelReaderFor(m image.Image) pixelReader {
 				return color.NRGBA{R: pix[i+0], G: pix[i+1], B: pix[i+2], A: 255}
 			}
 			return nrgbaFromRGBA(pix[i+0], pix[i+1], pix[i+2], a)
+		}
+	case *image.RGBA64:
+		return func(x int, y int) color.NRGBA {
+			return nrgbaFromRGBA64(img.RGBA64At(x, y))
 		}
 	case *image.Gray:
 		pix := img.Pix
@@ -1301,6 +1416,10 @@ func pixelReaderFor(m image.Image) pixelReader {
 		c := color.NRGBAModel.Convert(img.C).(color.NRGBA)
 		return func(int, int) color.NRGBA {
 			return c
+		}
+	case image.RGBA64Image:
+		return func(x int, y int) color.NRGBA {
+			return nrgbaFromRGBA64(img.RGBA64At(x, y))
 		}
 	default:
 		return func(x int, y int) color.NRGBA {
@@ -1380,6 +1499,11 @@ func lumaReaderFor(m image.Image) lumaReader {
 		return func(int, int) uint8 {
 			return y
 		}
+	case image.RGBA64Image:
+		return func(x int, y int) uint8 {
+			c := nrgbaFromRGBA64(img.RGBA64At(x, y))
+			return rgbToLuma(c.R, c.G, c.B)
+		}
 	default:
 		readPixel := pixelReaderFor(m)
 		return func(x int, y int) uint8 {
@@ -1457,6 +1581,11 @@ func chromaReaderFor(m image.Image) chromaReader {
 		return func(int, int) (uint8, uint8) {
 			return cb, cr
 		}
+	case image.RGBA64Image:
+		return func(x int, y int) (uint8, uint8) {
+			c := nrgbaFromRGBA64(img.RGBA64At(x, y))
+			return rgbToChroma(c.R, c.G, c.B)
+		}
 	default:
 		readPixel := pixelReaderFor(m)
 		return func(x int, y int) (uint8, uint8) {
@@ -1487,6 +1616,41 @@ func nrgbaFromRGBA(r uint8, g uint8, b uint8, a uint8) color.NRGBA {
 	return color.NRGBA{R: uint8(r16 >> 8), G: uint8(g16 >> 8), B: uint8(b16 >> 8), A: a}
 }
 
+func nrgbaFromRGBA64(c color.RGBA64) color.NRGBA {
+	if c.A == 0xffff {
+		return color.NRGBA{R: uint8(c.R >> 8), G: uint8(c.G >> 8), B: uint8(c.B >> 8), A: 0xff}
+	}
+	if c.A == 0 {
+		return color.NRGBA{}
+	}
+	a := uint32(c.A)
+	return color.NRGBA{
+		R: uint8((uint32(c.R) * 0xffff / a) >> 8),
+		G: uint8((uint32(c.G) * 0xffff / a) >> 8),
+		B: uint8((uint32(c.B) * 0xffff / a) >> 8),
+		A: uint8(c.A >> 8),
+	}
+}
+
+func nrgbaFromNRGBA64(c color.NRGBA64) color.NRGBA {
+	if c.A == 0xffff {
+		return color.NRGBA{R: uint8(c.R >> 8), G: uint8(c.G >> 8), B: uint8(c.B >> 8), A: 0xff}
+	}
+	if c.A == 0 {
+		return color.NRGBA{}
+	}
+	a := uint32(c.A)
+	r := uint32(c.R) * a / 0xffff
+	g := uint32(c.G) * a / 0xffff
+	b := uint32(c.B) * a / 0xffff
+	return color.NRGBA{
+		R: uint8((r * 0xffff / a) >> 8),
+		G: uint8((g * 0xffff / a) >> 8),
+		B: uint8((b * 0xffff / a) >> 8),
+		A: uint8(c.A >> 8),
+	}
+}
+
 const (
 	vp8lDefaultPredictorSizeBits                     = 9
 	vp8lDefaultColorTransformSizeBits                = 9
@@ -1503,9 +1667,11 @@ const (
 )
 
 var vp8lPredictorModeCandidates = [...]uint8{1, 2, 12}
-var vp8lBestCompressionPredictorModeCandidates = [...]uint8{1, 2, 12, 3, 5, 6, 7, 8, 9, 10, 11, 13}
-var vp8lPredictorBlockSizeBitCandidates = [...]uint8{vp8lDefaultPredictorSizeBits}
-var vp8lBestCompressionPredictorBlockSizeBitCandidates = [...]uint8{6, 7, 8, vp8lDefaultPredictorSizeBits}
+var vp8lBestCompressionPredictorModeCandidates = [...]uint8{1, 2, 12, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 0}
+var vp8lPredictorBlockSizeBitCandidates = [...]uint8{4, 5, 6, 7, 8, vp8lDefaultPredictorSizeBits}
+var vp8lBestCompressionPredictorBlockSizeBitCandidates = [...]uint8{4, 5, 6, 7, 8, vp8lDefaultPredictorSizeBits}
+var vp8lColorTransformBlockSizeBitCandidates = [...]uint8{4, 6, 8, vp8lDefaultColorTransformSizeBits}
+var vp8lBestCompressionColorTransformBlockSizeBitCandidates = [...]uint8{4, 5, 6, 7, 8, vp8lDefaultColorTransformSizeBits}
 var vp8lColorTransformCandidates = [...]vp8lColorTransformElement{
 	{greenToRed: 32},
 	{greenToBlue: 32},
@@ -1898,7 +2064,12 @@ func channelNormalTreeBits(ch channelPlan, alphabetSize int) uint64 {
 	if ch.normalCostCached {
 		return uint64(ch.normalTreeBaseBits) + alphaCodeLengthLimitBits(int(ch.normalTreeTokenCount), alphabetSize)
 	}
-	var lengths [nColorCacheGreenCodes]uint8
+	if ch.histogram != nil {
+		var lengths [nLiteralCodes + nLengthCodes]uint8
+		copy(lengths[:], ch.histogram.lengths[:])
+		return alphaNormalTreeBits(lengths[:alphabetSize])
+	}
+	var lengths [nLiteralCodes + nLengthCodes]uint8
 	for i := 0; i < ch.n; i++ {
 		lengths[ch.symbols[i]] = ch.lengths[i]
 	}
@@ -1909,6 +2080,13 @@ func channelNormalDataBits(ch channelPlan) uint64 {
 	if ch.normalCostCached {
 		return ch.normalDataBits
 	}
+	if ch.histogram != nil {
+		var bits uint64
+		for symbol, count := range ch.histogram.counts {
+			bits += uint64(count) * uint64(ch.histogram.lengths[symbol])
+		}
+		return bits
+	}
 	var bits uint64
 	for i := 0; i < ch.n; i++ {
 		bits += uint64(ch.counts[i]) * uint64(ch.lengths[i])
@@ -1917,6 +2095,16 @@ func channelNormalDataBits(ch channelPlan) uint64 {
 }
 
 func channelFull8DataBits(ch channelPlan) uint64 {
+	if ch.total != 0 {
+		return ch.total * 8
+	}
+	if ch.histogram != nil {
+		var total uint64
+		for _, count := range ch.histogram.counts {
+			total += uint64(count)
+		}
+		return total * 8
+	}
 	var total uint64
 	for i := 0; i < ch.n; i++ {
 		total += uint64(ch.counts[i])
@@ -1950,7 +2138,7 @@ func writeVP8L(bits *bitWriter, readPixel pixelReader, bounds image.Rectangle, w
 		bits.writeBits(uint32(plan.colorSizeBits-2), 3)
 		transformWidth, transformHeight := vp8lTransformDimensions(width, height, plan.colorSizeBits)
 		transformBounds := image.Rect(0, 0, transformWidth, transformHeight)
-		writeVP8LImageData(bits, vp8lColorTransformImageReader(plan.colorElement), transformBounds, plan.colorAnalysis, false)
+		writeVP8LImageData(bits, vp8lColorTransformImageReaderForPlan(plan, transformWidth), transformBounds, plan.colorAnalysis, false)
 	}
 	if plan.subtractGreen {
 		bits.writeBits(1, 1)
@@ -2054,6 +2242,25 @@ func vp8lColorTransformImageAnalysis(element vp8lColorTransformElement) imageAna
 
 func vp8lColorTransformImageReader(element vp8lColorTransformElement) pixelReader {
 	return func(int, int) color.NRGBA {
+		return color.NRGBA{
+			R: element.redToBlue,
+			G: element.greenToBlue,
+			B: element.greenToRed,
+			A: 255,
+		}
+	}
+}
+
+func vp8lColorTransformImageReaderForPlan(plan vp8lEncodingPlan, width int) pixelReader {
+	if len(plan.colorImage) == 0 {
+		return vp8lColorTransformImageReader(plan.colorElement)
+	}
+	return vp8lColorTransformImageReaderFromImage(plan.colorImage, width)
+}
+
+func vp8lColorTransformImageReaderFromImage(elements []vp8lColorTransformElement, width int) pixelReader {
+	return func(x int, y int) color.NRGBA {
+		element := elements[y*width+x]
 		return color.NRGBA{
 			R: element.redToBlue,
 			G: element.greenToBlue,
@@ -2352,13 +2559,13 @@ func makeVP8LColorCachePlanConfig(readPixel pixelReader, bounds image.Rectangle,
 	best := vp8lEncodingPlan{}
 	bestBits := maxBits
 	ok := false
+	var tokenScratch []vp8lToken
 	for bits := uint8(vp8lMinColorCacheBits); bits <= vp8lMaxColorCacheBits; bits++ {
 		_, literalAnalysis, greenCounts, cacheHits, tokenCount := vp8lBuildColorCache(read, mainBounds, mainWidth, bits, false, 0)
 		if cacheHits == 0 {
 			continue
 		}
-		greenLengthLimit := nLiteralCodes + nLengthCodes + 1<<bits
-		greenLengths, lengthsOK := huffmanColorCacheCodeLengths(greenCounts[:greenLengthLimit])
+		greenLengths, lengthsOK := huffmanColorCacheCodeLengths(greenCounts)
 		if !lengthsOK {
 			continue
 		}
@@ -2376,25 +2583,29 @@ func makeVP8LColorCachePlanConfig(readPixel pixelReader, bounds image.Rectangle,
 				continue
 			}
 		}
+		needsTokens := candidateBits < bestBits || cfg.tryMetaPrefix && tokenCount <= vp8lMaxMetaPrefixColorCacheTokens
 		var tokens []vp8lToken
-		if candidateBits < bestBits || tokenCount <= vp8lMaxMetaPrefixColorCacheTokens {
-			tokens, _, _, _, _ = vp8lBuildColorCache(read, mainBounds, mainWidth, bits, true, tokenCount)
+		if needsTokens {
+			tokens, _, _, _, _ = vp8lBuildColorCacheInto(read, mainBounds, mainWidth, bits, true, tokenCount, tokenScratch)
+			tokenScratch = tokens[:0]
 		}
 		if candidateBits < bestBits {
-			candidate.colorCache.tokens = tokens
 			best = candidate
 			bestBits = candidateBits
 			ok = true
 		}
 		if cfg.tryMetaPrefix && tokenCount <= vp8lMaxMetaPrefixColorCacheTokens {
 			metaBase := candidate
-			metaBase.colorCache.tokens = tokens
 			if metaPrefixPlan, metaOK := makeVP8LMetaPrefixColorCachePlan(read, mainBounds, mainWidth, mainHeight, metaBase, tokens, bestBits); metaOK {
 				best = metaPrefixPlan
 				bestBits = vp8lPayloadBits(width, height, best)
 				ok = true
 			}
 		}
+	}
+	if ok {
+		tokens, _, _, _, _ := vp8lBuildColorCacheInto(read, mainBounds, mainWidth, best.colorCache.bits, true, mainWidth*mainHeight, tokenScratch)
+		best.colorCache.tokens = tokens
 	}
 	return best, ok
 }
@@ -2408,7 +2619,7 @@ func vp8lShouldTryColorCache(readPixel pixelReader, bounds image.Rectangle, widt
 	if total > vp8lColorCacheSampleSize {
 		step = total / vp8lColorCacheSampleSize
 	}
-	var cache [vp8lMaxColorCacheSize]color.NRGBA
+	cache := make([]color.NRGBA, vp8lMaxColorCacheSize)
 	hits := 0
 	samples := 0
 	for pos := 0; pos < total && samples < vp8lColorCacheSampleSize; pos += step {
@@ -2424,14 +2635,22 @@ func vp8lShouldTryColorCache(readPixel pixelReader, bounds image.Rectangle, widt
 	return hits >= 16 && hits*100 >= samples*10
 }
 
-func vp8lBuildColorCache(readPixel pixelReader, bounds image.Rectangle, width int, bits uint8, collectTokens bool, tokenCapacity int) ([]vp8lToken, imageAnalysis, [nColorCacheGreenCodes]uint32, int, int) {
+func vp8lBuildColorCache(readPixel pixelReader, bounds image.Rectangle, width int, bits uint8, collectTokens bool, tokenCapacity int) ([]vp8lToken, imageAnalysis, []uint32, int, int) {
+	return vp8lBuildColorCacheInto(readPixel, bounds, width, bits, collectTokens, tokenCapacity, nil)
+}
+
+func vp8lBuildColorCacheInto(readPixel pixelReader, bounds image.Rectangle, width int, bits uint8, collectTokens bool, tokenCapacity int, tokenBuffer []vp8lToken) ([]vp8lToken, imageAnalysis, []uint32, int, int) {
 	var tokens []vp8lToken
-	if collectTokens && tokenCapacity > 0 {
-		tokens = make([]vp8lToken, 0, tokenCapacity)
+	if collectTokens {
+		if cap(tokenBuffer) >= tokenCapacity {
+			tokens = tokenBuffer[:0]
+		} else if tokenCapacity > 0 {
+			tokens = make([]vp8lToken, 0, tokenCapacity)
+		}
 	}
 	var literalAnalysis imageAnalysis
-	var greenCounts [nColorCacheGreenCodes]uint32
-	var cache [vp8lMaxColorCacheSize]color.NRGBA
+	greenCounts := make([]uint32, nLiteralCodes+nLengthCodes+1<<bits)
+	cache := make([]color.NRGBA, 1<<bits)
 	firstLiteral := true
 	cacheHits := 0
 	tokenCount := 0
@@ -2479,16 +2698,16 @@ func vp8lColorCacheIndex(pixel color.NRGBA, bits uint8) int {
 	return int((0x1e35a7bd * colorValue) >> (32 - bits))
 }
 
-func huffmanColorCacheCodeLengths(counts []uint32) ([nColorCacheGreenCodes]uint8, bool) {
-	var lengths [nColorCacheGreenCodes]uint8
-	return lengths, huffmanCodeLengthsInto(lengths[:len(counts)], counts)
+func huffmanColorCacheCodeLengths(counts []uint32) ([]uint8, bool) {
+	lengths := make([]uint8, len(counts))
+	return lengths, huffmanCodeLengthsInto(lengths, counts)
 }
 
-func canonicalColorCacheCodes(lengths [nColorCacheGreenCodes]uint8) [nColorCacheGreenCodes]uint16 {
-	return canonicalChannelCodes(lengths[:])
+func canonicalColorCacheCodes(lengths []uint8) []uint16 {
+	return canonicalChannelCodes(lengths)
 }
 
-func canonicalChannelCodes(lengths []uint8) [nColorCacheGreenCodes]uint16 {
+func canonicalChannelCodes(lengths []uint8) []uint16 {
 	var histogram [16]uint16
 	for _, length := range lengths {
 		if length != 0 {
@@ -2503,7 +2722,7 @@ func canonicalChannelCodes(lengths []uint8) [nColorCacheGreenCodes]uint16 {
 		nextCodes[length] = code
 	}
 
-	var codes [nColorCacheGreenCodes]uint16
+	codes := make([]uint16, len(lengths))
 	for symbol, length := range lengths {
 		if length == 0 {
 			continue
@@ -2581,15 +2800,28 @@ func makeVP8LTokenMetaPrefixLZ77Plan(readPixel pixelReader, bounds image.Rectang
 	if !base.lz77 || base.colorCache != nil || base.colorIndexing || len(tokens) == 0 || len(tokens) > maxTokens {
 		return vp8lEncodingPlan{}, false
 	}
-	prefixBits, ok := vp8lTokenMetaPrefixCandidateBits(width, height)
-	if !ok {
-		return vp8lEncodingPlan{}, false
+	best := vp8lEncodingPlan{}
+	bestBits := maxBits
+	found := false
+	for prefixBits := uint8(vp8lMinMetaPrefixCandidateBits); prefixBits <= vp8lMaxMetaPrefixBits; prefixBits++ {
+		prefixWidth, prefixHeight := vp8lMetaPrefixImageDimensions(width, height, prefixBits)
+		prefixBlocks := prefixWidth * prefixHeight
+		if prefixBlocks < 2 || prefixBlocks > vp8lMaxMetaPrefixBlocks {
+			continue
+		}
+		candidate, ok := makeVP8LTokenMetaPrefixLZ77PlanForBits(width, height, base, tokens, prefixBits)
+		if !ok {
+			continue
+		}
+		candidateBits := vp8lPayloadBits(width, height, candidate)
+		if candidateBits >= bestBits {
+			continue
+		}
+		best = candidate
+		bestBits = candidateBits
+		found = true
 	}
-	candidate, ok := makeVP8LTokenMetaPrefixLZ77PlanForBits(width, height, base, tokens, prefixBits)
-	if !ok || vp8lPayloadBits(width, height, candidate) >= maxBits {
-		return vp8lEncodingPlan{}, false
-	}
-	return candidate, true
+	return best, found
 }
 
 func vp8lTokenMetaPrefixCandidateBits(width int, height int) (uint8, bool) {
@@ -2697,7 +2929,6 @@ func makeVP8LMetaPrefixColorCachePlanForBits(readPixel pixelReader, bounds image
 	if !ok {
 		return vp8lEncodingPlan{}, false
 	}
-	candidate.colorCache.tokens = tokens
 	candidate.metaPrefix.colorCacheGroups = colorCacheGroups
 	candidate.metaPrefix.groupTokens = groupTokens
 	return candidate, true
@@ -2707,10 +2938,11 @@ func vp8lBuildMetaPrefixColorCacheGroups(metaPrefix *vp8lMetaPrefixPlan, tokens 
 	colorCacheGroups := make([]vp8lColorCacheGroupPlan, len(metaPrefix.groups))
 	groupTokens := make([]int, len(metaPrefix.groups))
 	observers := make([]vp8lLiteralAnalysisObserver, len(metaPrefix.groups))
+	greenLimit := nLiteralCodes + nLengthCodes + 1<<bits
 	for i := range observers {
 		observers[i] = newVP8LLiteralAnalysisObserver(baseAnalysis)
+		colorCacheGroups[i].counts = make([]uint32, greenLimit)
 	}
-	greenLimit := nLiteralCodes + nLengthCodes + 1<<bits
 	pos := 0
 	for _, token := range tokens {
 		if pos >= total || token.copyLength > 0 {
@@ -2738,7 +2970,7 @@ func vp8lBuildMetaPrefixColorCacheGroups(metaPrefix *vp8lMetaPrefixPlan, tokens 
 		if groupTokens[i] == 0 {
 			colorCacheGroups[i].counts[0] = 1
 		}
-		greenLengths, ok := huffmanColorCacheCodeLengths(colorCacheGroups[i].counts[:greenLimit])
+		greenLengths, ok := huffmanColorCacheCodeLengths(colorCacheGroups[i].counts)
 		if !ok {
 			return nil, nil, false
 		}
@@ -3110,7 +3342,9 @@ func makeVP8LLZ77PlanConfigCandidateCount(readPixel pixelReader, bounds image.Re
 	if !ok {
 		return vp8lEncodingPlan{}, 0, false
 	}
-	if cfg.optimalLZ77Passes > 0 && base.colorIndexing && total <= cfg.maxOptimalLZ77Pixels && candidateCount == vp8lOptimalLZ77CandidateCount(total) {
+	seedLZ77Bits := vp8lPayloadBits(width, height, base)
+	optimizeSeed := base.colorIndexing || cfg.optimalLZ77MinSeedBitsNumerator == 0 || seedLZ77Bits*2 > uint64(total*cfg.optimalLZ77MinSeedBitsNumerator)
+	if cfg.optimalLZ77Passes > 0 && optimizeSeed && total <= cfg.maxOptimalLZ77Pixels && candidateCount == vp8lOptimalLZ77CandidateCount(total) {
 		if optimized, improved := vp8lOptimizeLZ77Plan(read, mainBounds, mainWidth, width, height, literalBase, base, candidateCount, cfg.optimalLZ77Passes); improved {
 			base = optimized
 			lz77Tokens = optimized.lz77Tokens
@@ -3431,8 +3665,7 @@ func makeVP8LLZ77ColorCachePlan(readPixel pixelReader, bounds image.Rectangle, m
 		if cacheHits == 0 {
 			continue
 		}
-		greenLimit := nLiteralCodes + nLengthCodes + 1<<bits
-		greenLengths, lengthsOK := huffmanColorCacheCodeLengths(greenCounts[:greenLimit])
+		greenLengths, lengthsOK := huffmanColorCacheCodeLengths(greenCounts)
 		if !lengthsOK {
 			continue
 		}
@@ -3448,23 +3681,25 @@ func makeVP8LLZ77ColorCachePlan(readPixel pixelReader, bounds image.Rectangle, m
 		if candidateBits >= bestBits {
 			continue
 		}
-		tokens, _, _, _ := vp8lBuildLZ77ColorCache(readPixel, bounds, mainWidth, lz77Tokens, bits, true, base.analysis)
-		candidate.colorCache.tokens = tokens
 		best = candidate
 		bestBits = candidateBits
 		ok = true
 	}
+	if ok {
+		tokens, _, _, _ := vp8lBuildLZ77ColorCache(readPixel, bounds, mainWidth, lz77Tokens, best.colorCache.bits, true, base.analysis)
+		best.colorCache.tokens = tokens
+	}
 	return best, ok
 }
 
-func vp8lBuildLZ77ColorCache(readPixel pixelReader, bounds image.Rectangle, width int, lz77Tokens []vp8lToken, bits uint8, collectTokens bool, baseAnalysis imageAnalysis) ([]vp8lToken, imageAnalysis, [nColorCacheGreenCodes]uint32, int) {
+func vp8lBuildLZ77ColorCache(readPixel pixelReader, bounds image.Rectangle, width int, lz77Tokens []vp8lToken, bits uint8, collectTokens bool, baseAnalysis imageAnalysis) ([]vp8lToken, imageAnalysis, []uint32, int) {
 	var tokens []vp8lToken
 	if collectTokens {
 		tokens = make([]vp8lToken, 0, len(lz77Tokens))
 	}
 	literalObserver := newVP8LLiteralAnalysisObserver(baseAnalysis)
-	var greenCounts [nColorCacheGreenCodes]uint32
-	var cache [vp8lMaxColorCacheSize]color.NRGBA
+	greenCounts := make([]uint32, nLiteralCodes+nLengthCodes+1<<bits)
+	cache := make([]color.NRGBA, 1<<bits)
 	firstLiteral := true
 	cacheHits := 0
 	pos := 0
@@ -3789,7 +4024,12 @@ func vp8lPlanPixelReader(readPixel pixelReader, bounds image.Rectangle, width in
 		}
 	}
 	if plan.colorTransform {
-		read = vp8lColorTransformReader(read, plan.colorElement)
+		if len(plan.colorImage) == 0 {
+			read = vp8lColorTransformReader(read, plan.colorElement)
+		} else {
+			transformWidth, _ := vp8lTransformDimensions(width, height, plan.colorSizeBits)
+			read = vp8lBlockColorTransformReader(read, bounds, plan.colorSizeBits, plan.colorImage, transformWidth)
+		}
 	}
 	if plan.subtractGreen {
 		read = vp8lSubtractGreenReader(read)
@@ -4409,6 +4649,14 @@ func (p channelPlan) codingEqual(q channelPlan) bool {
 		if p.n != q.n {
 			return false
 		}
+		if p.histogram != nil || q.histogram != nil {
+			for symbol := 0; symbol < nLiteralCodes; symbol++ {
+				if p.symbolLength(uint8(symbol)) != q.symbolLength(uint8(symbol)) {
+					return false
+				}
+			}
+			return true
+		}
 		for i := 0; i < p.n; i++ {
 			if p.symbols[i] != q.symbols[i] || p.lengths[i] != q.lengths[i] {
 				return false
@@ -4416,7 +4664,7 @@ func (p channelPlan) codingEqual(q channelPlan) bool {
 		}
 		return true
 	}
-	return p.n < 0 && q.n < 0
+	return true
 }
 
 func (a imageAnalysis) merge(b imageAnalysis) imageAnalysis {
@@ -4433,17 +4681,28 @@ func (a imageAnalysis) merge(b imageAnalysis) imageAnalysis {
 
 func (p channelPlan) merge(q channelPlan) channelPlan {
 	if p.constant && q.constant && p.value == q.value {
+		p.counts[0] += q.counts[0]
+		p.total += q.total
 		return p
 	}
-	if p.n < 0 || q.n < 0 {
-		return channelPlan{n: -1}
-	}
 	var merged channelPlan
-	for i := 0; i < p.n; i++ {
-		merged.observeSymbolCount(p.symbols[i], p.counts[i])
+	if p.histogram != nil {
+		for symbol, count := range p.histogram.counts {
+			merged.observeSymbolCount(uint8(symbol), count)
+		}
+	} else {
+		for i := 0; i < p.n; i++ {
+			merged.observeSymbolCount(p.symbols[i], p.counts[i])
+		}
 	}
-	for i := 0; i < q.n; i++ {
-		merged.observeSymbolCount(q.symbols[i], q.counts[i])
+	if q.histogram != nil {
+		for symbol, count := range q.histogram.counts {
+			merged.observeSymbolCount(uint8(symbol), count)
+		}
+	} else {
+		for i := 0; i < q.n; i++ {
+			merged.observeSymbolCount(q.symbols[i], q.counts[i])
+		}
 	}
 	merged.finalize()
 	return merged
@@ -4470,9 +4729,13 @@ func writeChannelTree(bits *bitWriter, ch channelPlan, alphabetSize int) {
 }
 
 func writeChannelNormalTree(bits *bitWriter, ch channelPlan, alphabetSize int) {
-	var lengths [nColorCacheGreenCodes]uint8
-	for i := 0; i < ch.n; i++ {
-		lengths[ch.symbols[i]] = ch.lengths[i]
+	var lengths [nLiteralCodes + nLengthCodes]uint8
+	if ch.histogram != nil {
+		copy(lengths[:], ch.histogram.lengths[:])
+	} else {
+		for i := 0; i < ch.n; i++ {
+			lengths[ch.symbols[i]] = ch.lengths[i]
+		}
 	}
 	writeAlphaNormalTree(bits, lengths[:alphabetSize])
 }
@@ -4535,9 +4798,14 @@ func writeChannelSymbolSelected(bits *bitWriter, ch channelPlan, useNormal bool,
 		return
 	}
 	if ch.normal && useNormal {
-		index := ch.smallSymbolIndex(symbol)
-		length := ch.lengths[index]
-		bits.writeBits(uint32(reverseBits(ch.codes[index], length)), length)
+		if ch.histogram != nil {
+			length := ch.histogram.lengths[symbol]
+			bits.writeBits(uint32(reverseBits(ch.histogram.codes[symbol], length)), length)
+		} else {
+			index := ch.smallSymbolIndex(symbol)
+			length := ch.lengths[index]
+			bits.writeBits(uint32(reverseBits(ch.codes[index], length)), length)
+		}
 		return
 	}
 	bits.writeBits(uint32(reverse8(symbol)), 8)
@@ -4547,6 +4815,18 @@ func (p channelPlan) smallSymbolIndex(symbol uint8) int {
 	for i := 0; i < p.n; i++ {
 		if p.symbols[i] == symbol {
 			return i
+		}
+	}
+	return 0
+}
+
+func (p channelPlan) symbolLength(symbol uint8) uint8 {
+	if p.histogram != nil {
+		return p.histogram.lengths[symbol]
+	}
+	for i := 0; i < p.n; i++ {
+		if p.symbols[i] == symbol {
+			return p.lengths[i]
 		}
 	}
 	return 0

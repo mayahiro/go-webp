@@ -79,7 +79,7 @@ near-lossless qualityに対するRGB各channelの最大誤差は次のとおり�
 `ModeFast` と `ModeLowMemory` は意図的にsearchを減らすため、出力が大きくなる場合があります
 
 Balanced lossless profileはlow-color画像でcolor indexingが明確に有利な場合にtransform searchを終了できます
-`ModeBestCompression` はすべてのtransform選択を維持し、`ModeAuto` は非常に小さいindexed payloadの場合だけfast lossless profileを選択します
+`ModeBestCompression` はより広い上限付きtransform searchを行い、`ModeAuto` は非常に小さいindexed payloadの場合だけfast lossless profileを選択します
 
 ## Lossless Encoding
 
@@ -87,11 +87,15 @@ lossless encoderはVP8L predictor、color、color indexing、subtract-green、pa
 上限付きsearchには次を含みます
 
 - constant channel向けsingle-symbol Huffman tree
+- 256 symbols全体のchannel histogramとnormal Huffman tree
 - 小さいlow-color入力向けの上限付きpacked color-index stream
 - 複数候補LZ77 match finderと1手先のlazy matching
-- 選択したindexed stream向けのcost-based optimal parsing
+- indexed streamと有望な一般画像stream向けのcost-based optimal parsing
+- 1から11 bitsから動的に選択するcolor cache
 - literalと変換済みresidual stream向けのspatial prediction、LZ77、color cache codingの選択的な組み合わせ
-- `ModeBestCompression` のblock-adaptive predictorと1個の粗いmeta-prefix histogram候補
+- tile適応のpredictor modeとcross-color係数
+- 最大32 coding groupsのentropy-clustered meta-prefix histogram
+- cheapなshortlist後にoptimal LZ77、color cache、histogram候補の完全な出力costを比較する2段階planner
 
 制限なしのhash chainは使用しません
 これによりworkとmemoryを制限できますが、より広いsearchを行うencoderより出力が大きくなる入力もあります
@@ -134,6 +138,7 @@ encodingでは入力を複数回走査する場合があります
 
 - lossless `ModeBestCompression` はcustom画像実装を安全に並列読み取りするため、最大32 MiBの変換済みpixel planeを使う場合がある
 - bufferを使うlossy profileは推定32 MiBまで量子化済みresidualを保持し、統計と最終codingで再利用できる
+- lossyの再構成pixelはfull-frame planeではなく2 macroblock rowsのringを使う
 - `ModeBestCompression` は独立したlossless候補を最大4 workersで解析できる
 - 標準画像型ではlossy frame planningとalpha解析を2 workersで実行できる
 - `ModeLowMemory` はfull-frame source plane、VP8 residual buffer、VP8L token stream、meta-prefix plan、color-cache planを保持しない

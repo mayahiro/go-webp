@@ -376,7 +376,7 @@ var vp8Y1SansY2TokenProb = [8][3][11]uint8{
 
 var vp8DefaultTokenProbs = makeVP8DefaultTokenProbs()
 
-const vp8CoeffValueCostCacheLimit = 256
+const vp8CoeffValueCostCacheLimit = 64
 
 var vp8DefaultCoeffValueSignBitCosts [4][8][3][vp8CoeffValueCostCacheLimit]int32
 var vp8ZeroCoeff vp8QuantizedBlock

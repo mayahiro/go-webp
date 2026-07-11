@@ -189,6 +189,12 @@ func vp8lChannelSymbolCost(channel channelPlan, symbol uint8) uint64 {
 	if !channelUseNormal(channel, nLiteralCodes) {
 		return 8
 	}
+	if channel.histogram != nil {
+		if length := channel.histogram.lengths[symbol]; length != 0 {
+			return uint64(length)
+		}
+		return 8
+	}
 	for i := 0; i < channel.n; i++ {
 		if channel.symbols[i] == symbol {
 			return uint64(channel.lengths[i])

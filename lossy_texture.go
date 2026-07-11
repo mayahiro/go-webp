@@ -8,11 +8,18 @@ var vp8TextureWeights = [16]int64{
 }
 
 func (rd vp8RDConfig) lumaDistortion(target *[16]uint8, reconstructed [16]uint8) int64 {
+	if rd.textureLambda <= 0 {
+		return scoreLuma4FromTarget(target, reconstructed)
+	}
+	return rd.lumaDistortionWithTargetTexture(target, reconstructed, vp8WeightedHadamard(target))
+}
+
+func (rd vp8RDConfig) lumaDistortionWithTargetTexture(target *[16]uint8, reconstructed [16]uint8, targetTexture int64) int64 {
 	distortion := scoreLuma4FromTarget(target, reconstructed)
 	if rd.textureLambda <= 0 {
 		return distortion
 	}
-	texture := vp8TextureDistortion(target, &reconstructed)
+	texture := absInt64(targetTexture-vp8WeightedHadamard(&reconstructed)) >> 5
 	return distortion + (rd.textureLambda*texture+128)/256
 }
 

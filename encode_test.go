@@ -276,6 +276,9 @@ func TestVP8LEncodingConfigForMode(t *testing.T) {
 	if fast.optimalLZ77Passes != 0 {
 		t.Fatal("ModeFast enabled optimal LZ77 parsing")
 	}
+	if fast.materializeSource {
+		t.Fatal("ModeFast enabled source materialization")
+	}
 
 	lowMemory := vp8lEncodingConfigForMode(ModeLowMemory, img, readPixel, bounds, bounds.Dx(), bounds.Dy())
 	if !lowMemory.tryTransforms {
@@ -286,6 +289,9 @@ func TestVP8LEncodingConfigForMode(t *testing.T) {
 	}
 	if lowMemory.optimalLZ77Passes != 0 {
 		t.Fatal("ModeLowMemory enabled optimal LZ77 parsing")
+	}
+	if lowMemory.materializeSource {
+		t.Fatal("ModeLowMemory enabled source materialization")
 	}
 
 	best := vp8lEncodingConfigForMode(ModeBestCompression, img, readPixel, bounds, bounds.Dx(), bounds.Dy())
@@ -310,6 +316,9 @@ func TestVP8LEncodingConfigForMode(t *testing.T) {
 	if !best.tryLZ77TokenMetaPrefix {
 		t.Fatal("ModeBestCompression disabled token-driven meta-prefix search")
 	}
+	if !best.materializeSource {
+		t.Fatal("ModeBestCompression disabled source materialization")
+	}
 	if best.optimalLZ77Passes <= vp8lDefaultEncodingConfig().optimalLZ77Passes || best.maxOptimalLZ77Pixels <= vp8lMaxOptimalLZ77Pixels {
 		t.Fatal("ModeBestCompression did not expand optimal LZ77 parsing")
 	}
@@ -319,6 +328,32 @@ func TestVP8LEncodingConfigForMode(t *testing.T) {
 	nearLossless := vp8lEncodingConfigForMode(ModeNearLossless, img, readPixel, bounds, bounds.Dx(), bounds.Dy())
 	if nearLossless.optimalLZ77Passes != 0 || nearLossless.tryMetaPrefix || nearLossless.tryLZ77MetaPrefix {
 		t.Fatal("ModeNearLossless enabled redundant post-processing search")
+	}
+	if nearLossless.materializeSource {
+		t.Fatal("ModeNearLossless enabled duplicate source materialization")
+	}
+}
+
+func TestModeBestCompressionKeepsTransformedLZ77WhenWideColorCacheIsAvailable(t *testing.T) {
+	img := newBenchmarkFixtureImage(lossyBenchmarkCase{kind: benchmarkImagePhotoLike, width: 128, height: 128})
+	readPixel := pixelReaderFor(img)
+	cfg := vp8lEncodingConfigForMode(ModeBestCompression, img, readPixel, img.Bounds(), img.Rect.Dx(), img.Rect.Dy())
+	plan := chooseVP8LEncodingPlanForImageWithConfig(img, readPixel, img.Bounds(), img.Rect.Dx(), img.Rect.Dy(), cfg)
+	if !vp8lPlanUsesTransform(plan) || !plan.lz77 {
+		t.Fatalf("best plan = transform:%v lz77:%v colorCache:%v", vp8lPlanUsesTransform(plan), plan.lz77, plan.colorCache != nil)
+	}
+}
+
+func TestModeBestCompressionDoesNotRegressDefaultBlockTransforms(t *testing.T) {
+	img := newMixedColorTransformFixture()
+	readPixel := pixelReaderFor(img)
+	bounds := img.Bounds()
+	defaultPlan := chooseVP8LEncodingPlanForImageMode(img, readPixel, bounds, bounds.Dx(), bounds.Dy(), ModeDefault)
+	bestPlan := chooseVP8LEncodingPlanForImageMode(img, readPixel, bounds, bounds.Dx(), bounds.Dy(), ModeBestCompression)
+	defaultBits := vp8lPayloadBits(bounds.Dx(), bounds.Dy(), defaultPlan)
+	bestBits := vp8lPayloadBits(bounds.Dx(), bounds.Dy(), bestPlan)
+	if bestBits > defaultBits {
+		t.Fatalf("best-compression bits = %d, want <= default bits %d", bestBits, defaultBits)
 	}
 }
 
@@ -410,6 +445,47 @@ func TestLowMemoryProfilesAvoidBufferedPlans(t *testing.T) {
 	}
 	if lossyConfig.parallelAlpha {
 		t.Fatal("ModeLowMemory enabled parallel alpha analysis")
+	}
+}
+
+func TestVP8ReconstructionRowRingMatchesFullFrameBuffers(t *testing.T) {
+	const width, height = 80, 64
+	img := newBenchmarkFixtureImage(lossyBenchmarkCase{kind: benchmarkImagePhotoLike, width: width, height: height})
+	bounds := img.Bounds()
+	readLuma := lumaReaderFor(img)
+	readChroma := chromaReaderFor(img)
+	mbw := (width + 15) >> 4
+	mbh := (height + 15) >> 4
+	cfg := vp8LossyConfigForModeQuality(ModeDefault, 75)
+
+	ring := newVP8EncodeBuffers(mbw, mbh)
+	if got, want := len(ring.recY), mbw*16*32; got != want {
+		t.Fatalf("luma ring bytes = %d, want %d", got, want)
+	}
+	if got, want := len(ring.recCb)+len(ring.recCr), 2*mbw*8*16; got != want {
+		t.Fatalf("chroma ring bytes = %d, want %d", got, want)
+	}
+
+	full := newVP8EncodeBuffers(mbw, mbh)
+	full.recY = make([]uint8, mbw*16*mbh*16)
+	full.recCb = make([]uint8, mbw*8*mbh*8)
+	full.recCr = make([]uint8, mbw*8*mbh*8)
+	ringModes := analyzeVP8ModesConfig(readLuma, readChroma, bounds, mbw, mbh, cfg, ring)
+	fullModes := analyzeVP8ModesConfig(readLuma, readChroma, bounds, mbw, mbh, cfg, full)
+	if !slices.Equal(ringModes, fullModes) {
+		t.Fatal("row-ring mode selection differs from full-frame reconstruction")
+	}
+
+	ringStats := collectVP8TokenStats(readLuma, readChroma, bounds, mbw, mbh, cfg.quant, ringModes, ring)
+	fullStats := collectVP8TokenStats(readLuma, readChroma, bounds, mbw, mbh, cfg.quant, fullModes, full)
+	if ringStats != fullStats {
+		t.Fatal("row-ring token statistics differ from full-frame reconstruction")
+	}
+	tokenProbs := chooseVP8TokenProbs(&ringStats)
+	ringResiduals := encodeVP8Residuals(readLuma, readChroma, bounds, width, height, mbw, mbh, cfg.quant, ringModes, ring, &tokenProbs)
+	fullResiduals := encodeVP8Residuals(readLuma, readChroma, bounds, width, height, mbw, mbh, cfg.quant, fullModes, full, &tokenProbs)
+	if !bytes.Equal(ringResiduals, fullResiduals) {
+		t.Fatal("row-ring residual stream differs from full-frame reconstruction")
 	}
 }
 
@@ -812,6 +888,102 @@ func TestPixelReaderForFastPaths(t *testing.T) {
 	}
 }
 
+func TestPixelReaderFor64BitFastPaths(t *testing.T) {
+	bounds := image.Rect(3, 5, 6, 6)
+	nrgba64 := image.NewNRGBA64(bounds)
+	nrgba64.SetNRGBA64(3, 5, color.NRGBA64{R: 0xffff, G: 0x8000, B: 0x4000, A: 0})
+	nrgba64.SetNRGBA64(4, 5, color.NRGBA64{R: 0x7000, G: 0x5000, B: 0x3000, A: 0x8080})
+	nrgba64.SetNRGBA64(5, 5, color.NRGBA64{R: 0x1234, G: 0xabcd, B: 0x789a, A: 0xffff})
+
+	rgba64 := image.NewRGBA64(bounds)
+	rgba64.SetRGBA64(3, 5, color.RGBA64{R: 0, G: 0, B: 0, A: 0})
+	rgba64.SetRGBA64(4, 5, color.RGBA64{R: 0x4000, G: 0x3000, B: 0x2000, A: 0x8080})
+	rgba64.SetRGBA64(5, 5, color.RGBA64{R: 0x1234, G: 0xabcd, B: 0x789a, A: 0xffff})
+
+	for _, tc := range []struct {
+		name string
+		img  image.Image
+	}{
+		{name: "NRGBA64", img: nrgba64},
+		{name: "RGBA64", img: rgba64},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			readPixel := pixelReaderFor(tc.img)
+			readGeneric := pixelReaderFor(benchmarkImageWrapper{Image: tc.img})
+			readLuma := lumaReaderFor(tc.img)
+			readChroma := chromaReaderFor(tc.img)
+			for x := bounds.Min.X; x < bounds.Max.X; x++ {
+				want := color.NRGBAModel.Convert(tc.img.At(x, bounds.Min.Y)).(color.NRGBA)
+				if got := readPixel(x, bounds.Min.Y); got != want {
+					t.Fatalf("pixel at x=%d = %#v, want %#v", x, got, want)
+				}
+				if got := readPixel(x, bounds.Min.Y); got != readGeneric(x, bounds.Min.Y) {
+					t.Fatalf("fast pixel at x=%d = %#v, generic %#v", x, got, readGeneric(x, bounds.Min.Y))
+				}
+				if got, want := readLuma(x, bounds.Min.Y), rgbToLuma(want.R, want.G, want.B); got != want {
+					t.Fatalf("luma at x=%d = %d, want %d", x, got, want)
+				}
+				gotCb, gotCr := readChroma(x, bounds.Min.Y)
+				wantCb, wantCr := rgbToChroma(want.R, want.G, want.B)
+				if gotCb != wantCb || gotCr != wantCr {
+					t.Fatalf("chroma at x=%d = (%d,%d), want (%d,%d)", x, gotCb, gotCr, wantCb, wantCr)
+				}
+			}
+
+			var sink color.NRGBA
+			if allocs := testing.AllocsPerRun(100, func() {
+				sink = readPixel(bounds.Min.X+1, bounds.Min.Y)
+			}); allocs != 0 {
+				t.Fatalf("pixel read allocations = %f, want 0", allocs)
+			}
+			if sink.A == 0xff && sink.R == 0xff && sink.G == 0xff && sink.B == 0xff {
+				t.Fatal("unexpected allocation test sink")
+			}
+		})
+	}
+}
+
+func TestVP8LPreparedSourceMatchesDirectReader(t *testing.T) {
+	img := image.NewYCbCr(image.Rect(3, 5, 35, 37), image.YCbCrSubsampleRatio420)
+	for y := img.Rect.Min.Y; y < img.Rect.Max.Y; y++ {
+		for x := img.Rect.Min.X; x < img.Rect.Max.X; x++ {
+			img.Y[img.YOffset(x, y)] = uint8(x*7 + y*11)
+			index := img.COffset(x, y)
+			img.Cb[index] = uint8(80 + index*3)
+			img.Cr[index] = uint8(160 + index*5)
+		}
+	}
+	source := newEncoderSource(img)
+	direct := source.pixels()
+	cfg := vp8lDefaultEncodingConfig()
+	cfg.parallelTransforms = false
+	prepared, preparedConfig, materialized := vp8lPrepareEncodingSource(img, direct, source.bounds, source.width, source.height, cfg)
+	if !materialized {
+		t.Fatal("YCbCr source was not materialized")
+	}
+	if preparedConfig.parallelTransforms {
+		t.Fatal("sequential config enabled parallel transforms")
+	}
+	for _, point := range []image.Point{{X: 3, Y: 5}, {X: 17, Y: 19}, {X: 34, Y: 36}} {
+		if got, want := prepared(point.X, point.Y), direct(point.X, point.Y); got != want {
+			t.Fatalf("prepared pixel at %v = %#v, want %#v", point, got, want)
+		}
+	}
+
+	directConfig := cfg
+	directConfig.materializeSource = false
+	directPlan := chooseVP8LEncodingPlanForImageWithConfig(img, direct, source.bounds, source.width, source.height, directConfig)
+	preparedPlan := chooseVP8LEncodingPlanForPreparedImage(img, prepared, source.bounds, source.width, source.height, preparedConfig)
+	if got, want := encodeLosslessPlanForTest(t, img, preparedPlan), encodeLosslessPlanForTest(t, img, directPlan); !bytes.Equal(got, want) {
+		t.Fatalf("prepared output = %d bytes, want direct output %d bytes", len(got), len(want))
+	}
+
+	lowMemory := vp8lEncodingConfigForMode(ModeLowMemory, img, direct, source.bounds, source.width, source.height)
+	if _, _, materialized := vp8lPrepareEncodingSource(img, direct, source.bounds, source.width, source.height, lowMemory); materialized {
+		t.Fatal("ModeLowMemory materialized the lossless source")
+	}
+}
+
 func TestVP8StudioRangeColorConversion(t *testing.T) {
 	y := rgbToLuma(16, 32, 48)
 	cb, cr := rgbToChroma(16, 32, 48)
@@ -1057,15 +1229,22 @@ func TestEncodeLosslessUsesColorTransformForRedBlueCorrelation(t *testing.T) {
 		}
 	}
 
-	var buf bytes.Buffer
-	if err := Encode(&buf, img, nil); err != nil {
-		t.Fatalf("Encode failed: %v", err)
+	readPixel := pixelReaderFor(img)
+	element := vp8lColorTransformElement{redToBlue: 32}
+	readTransformed := vp8lColorTransformReader(readPixel, element)
+	plan := vp8lEncodingPlan{
+		analysis:       analyzeImage(readTransformed, img.Bounds()),
+		colorTransform: true,
+		colorSizeBits:  vp8lDefaultColorTransformSizeBits,
+		colorElement:   element,
+		colorAnalysis:  vp8lColorTransformImageAnalysis(element),
 	}
-	if !hasVP8LFirstTransform(t, buf.Bytes(), 1) {
+	data := encodeLosslessPlanForTest(t, img, plan)
+	if !hasVP8LFirstTransform(t, data, 1) {
 		t.Fatal("missing VP8L color transform")
 	}
 
-	got, width, height, alpha, err := decodeEncoderOutput(buf.Bytes())
+	got, width, height, alpha, err := decodeEncoderOutput(data)
 	if err != nil {
 		t.Fatalf("decodeEncoderOutput failed: %v", err)
 	}
@@ -1145,6 +1324,53 @@ func TestVP8LBlockPredictorPlanUsesPerBlockModes(t *testing.T) {
 
 	data := encodeLosslessPlanForTest(t, img, plan)
 	assertLosslessBenchmarkWebP(t, data, img)
+}
+
+func TestVP8LBlockColorTransformPlanUsesPerBlockCoefficients(t *testing.T) {
+	img := newMixedColorTransformFixture()
+	readPixel := pixelReaderFor(img)
+	analysis := analyzeImage(readPixel, img.Bounds())
+	base := vp8lEncodingPlan{analysis: analysis, alpha: analysis.alpha}
+	cfg := vp8lDefaultEncodingConfig()
+	cfg.colorTransformBlockSizeBits = []uint8{5}
+
+	plan, ok := makeVP8LBlockColorTransformPlan(readPixel, img.Bounds(), img.Rect.Dx(), img.Rect.Dy(), base, cfg)
+	if !ok || !plan.colorTransform {
+		t.Fatal("missing block color transform plan")
+	}
+	if len(plan.colorImage) != 8 {
+		t.Fatalf("color transform image length = %d, want 8", len(plan.colorImage))
+	}
+	distinct := map[vp8lColorTransformElement]bool{}
+	for _, element := range plan.colorImage {
+		distinct[element] = true
+	}
+	if len(distinct) < 2 {
+		t.Fatalf("color transform elements = %v, want at least two", plan.colorImage)
+	}
+
+	data := encodeLosslessPlanForTest(t, img, plan)
+	assertLosslessBenchmarkWebP(t, data, img)
+}
+
+func newMixedColorTransformFixture() *image.NRGBA {
+	img := image.NewNRGBA(image.Rect(0, 0, 128, 64))
+	for y := 0; y < img.Rect.Dy(); y++ {
+		for x := 0; x < img.Rect.Dx(); x++ {
+			v := uint32(x)*747796405 + uint32(y)*2891336453 + uint32(x*y)*3266489917 + 0x9e3779b9
+			v ^= v >> 16
+			v *= 2246822519
+			v ^= v >> 13
+			r := uint8(v >> 16)
+			g := uint8(v >> 8)
+			b := r + 7
+			if x >= 64 {
+				b = g + 11
+			}
+			img.SetNRGBA(x, y, color.NRGBA{R: r, G: g, B: b, A: 255})
+		}
+	}
+	return img
 }
 
 func newMixedPredictorModeFixture() *image.NRGBA {
@@ -1828,6 +2054,42 @@ func TestVP8LOptimalParserImprovesIndexedFixture(t *testing.T) {
 	}
 }
 
+func TestVP8LOptimalParserImprovesGeneralImageFixture(t *testing.T) {
+	paletted := newBenchmarkLimitedPalettedFixtureImage(256, 256)
+	img := image.NewNRGBA(paletted.Bounds())
+	for y := img.Rect.Min.Y; y < img.Rect.Max.Y; y++ {
+		for x := img.Rect.Min.X; x < img.Rect.Max.X; x++ {
+			img.Set(x, y, paletted.At(x, y))
+		}
+	}
+	bounds := img.Bounds()
+	readPixel := pixelReaderFor(img)
+	analysis := analyzeImage(readPixel, bounds)
+	base := vp8lEncodingPlan{analysis: analysis, alpha: analysis.alpha}
+	greedyConfig := vp8lDefaultEncodingConfig()
+	greedyConfig.optimalLZ77Passes = 0
+	greedyConfig.tryColorCache = false
+	greedyConfig.tryLZ77MetaPrefix = false
+	greedyConfig.tryLZ77TokenMetaPrefix = false
+	greedy, ok := makeVP8LLZ77PlanConfig(readPixel, bounds, bounds.Dx(), bounds.Dy(), base, ^uint64(0), greedyConfig)
+	if !ok {
+		t.Fatal("greedy LZ77 plan was not available")
+	}
+	optimalConfig := greedyConfig
+	optimalConfig.optimalLZ77Passes = 1
+	optimal, ok := makeVP8LLZ77PlanConfig(readPixel, bounds, bounds.Dx(), bounds.Dy(), base, ^uint64(0), optimalConfig)
+	if !ok {
+		t.Fatal("optimal LZ77 plan was not available")
+	}
+	greedyBits := vp8lPayloadBits(bounds.Dx(), bounds.Dy(), greedy)
+	optimalBits := vp8lPayloadBits(bounds.Dx(), bounds.Dy(), optimal)
+	if optimalBits >= greedyBits {
+		t.Fatalf("optimal LZ77 bits = %d, want less than greedy bits %d", optimalBits, greedyBits)
+	}
+	data := encodeLosslessPlanForTest(t, img, optimal)
+	assertLosslessBenchmarkWebP(t, data, img)
+}
+
 func TestEncodeLosslessUsesLZ77HashMatchesBeyondPreviousPixel(t *testing.T) {
 	img := image.NewNRGBA(image.Rect(0, 0, 320, 4))
 	for y := 0; y < img.Rect.Dy(); y++ {
@@ -2052,15 +2314,60 @@ func TestEncodeLosslessUsesWideColorCacheWhenNeeded(t *testing.T) {
 	}
 }
 
+func TestEncodeLosslessUsesTenBitColorCache(t *testing.T) {
+	const cacheBits = 10
+	colors := colorCacheFixtureColorsByIndex(cacheBits, 113)
+	img := image.NewNRGBA(image.Rect(0, 0, len(colors)*2, 1))
+	for x, c := range colors {
+		img.SetNRGBA(x, 0, c)
+		img.SetNRGBA(len(colors)+x, 0, c)
+	}
+
+	readPixel := pixelReaderFor(img)
+	analysis := analyzeImage(readPixel, img.Bounds())
+	base := vp8lEncodingPlan{analysis: analysis, alpha: analysis.alpha}
+	plan, ok := makeVP8LColorCachePlan(readPixel, img.Bounds(), img.Rect.Dx(), img.Rect.Dy(), base, ^uint64(0))
+	if !ok || plan.colorCache == nil {
+		t.Fatal("missing color cache plan")
+	}
+	if plan.colorCache.bits < cacheBits {
+		t.Fatalf("color cache bits = %d, want at least %d", plan.colorCache.bits, cacheBits)
+	}
+	greenLimit := nLiteralCodes + nLengthCodes + 1<<plan.colorCache.bits
+	if len(plan.colorCache.counts) != greenLimit || len(plan.colorCache.lengths) != greenLimit || len(plan.colorCache.codes) != greenLimit {
+		t.Fatalf("color cache alphabet = %d/%d/%d, want %d", len(plan.colorCache.counts), len(plan.colorCache.lengths), len(plan.colorCache.codes), greenLimit)
+	}
+
+	data := encodeLosslessPlanForTest(t, img, plan)
+	got, width, height, alpha, err := decodeEncoderOutput(data)
+	if err != nil {
+		t.Fatalf("decodeEncoderOutput failed: %v", err)
+	}
+	if width != img.Rect.Dx() || height != img.Rect.Dy() || alpha {
+		t.Fatalf("decoded header = %dx%d alpha=%v", width, height, alpha)
+	}
+	for x := 0; x < width; x++ {
+		if want := img.NRGBAAt(x, 0); got[x] != want {
+			t.Fatalf("pixel %d = %#v, want %#v", x, got[x], want)
+		}
+	}
+}
+
 func TestEncodeLosslessUsesLZ77WithColorCache(t *testing.T) {
 	img := newLZ77ColorCacheFixture()
 	readPixel := pixelReaderFor(img)
-	plan := chooseVP8LEncodingPlan(readPixel, img.Bounds(), img.Rect.Dx(), img.Rect.Dy())
-	if !plan.lz77 {
-		t.Fatal("missing VP8L LZ77 in default plan")
+	base := vp8lEncodingPlan{analysis: analyzeImage(readPixel, img.Bounds())}
+	cfg := vp8lDefaultEncodingConfig()
+	cfg.tryColorCache = false
+	cfg.tryLZ77MetaPrefix = false
+	cfg.tryLZ77TokenMetaPrefix = false
+	lz77Plan, ok := makeVP8LLZ77PlanConfig(readPixel, img.Bounds(), img.Rect.Dx(), img.Rect.Dy(), base, ^uint64(0), cfg)
+	if !ok || !lz77Plan.lz77 {
+		t.Fatal("missing VP8L LZ77 plan")
 	}
-	if plan.colorCache == nil {
-		t.Fatal("missing VP8L color cache in default plan")
+	plan, ok := makeVP8LLZ77ColorCachePlan(readPixel, img.Bounds(), img.Rect.Dx(), img.Rect.Dx(), img.Rect.Dy(), lz77Plan, lz77Plan.lz77Tokens, ^uint64(0))
+	if !ok || plan.colorCache == nil {
+		t.Fatal("missing VP8L LZ77 color cache plan")
 	}
 	hasCopyToken := false
 	hasCacheToken := false
@@ -2104,43 +2411,34 @@ func TestEncodeLosslessUsesLZ77WithColorCache(t *testing.T) {
 }
 
 func TestEncodeLosslessLZ77GeneratedWriterMatchesPayloadBits(t *testing.T) {
-	for _, tc := range []losslessBenchmarkCase{
-		{name: "Alpha128", kind: benchmarkImageAlpha, width: 128, height: 128},
-		{name: "Gradient512", kind: benchmarkImageGradient, width: 512, height: 512},
-		{name: "RGBA512", kind: benchmarkImageGradient, width: 512, height: 512, format: benchmarkFixtureRGBA},
-		{name: "PhotoLike256", kind: benchmarkImagePhotoLike, width: 256, height: 256},
-		{name: "AlphaBands512", kind: benchmarkImageAlphaBands, width: 512, height: 512},
-		{name: "EntropyRegions512", kind: benchmarkImageEntropyRegions, width: 512, height: 512},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			img := newLosslessBenchmarkFixtureImage(tc)
-			readPixel := pixelReaderFor(img)
-			bounds := img.Bounds()
-			width, height := bounds.Dx(), bounds.Dy()
-			plan := chooseVP8LEncodingPlanForImage(img, readPixel, bounds, width, height)
-			if !plan.lz77 {
-				t.Fatal("missing LZ77 plan")
-			}
-			if plan.colorCache != nil && len(plan.colorCache.tokens) == 0 {
-				t.Fatal("missing LZ77 color cache tokens")
-			}
+	img := newLZ77ColorCacheFixture()
+	readPixel := pixelReaderFor(img)
+	bounds := img.Bounds()
+	width, height := bounds.Dx(), bounds.Dy()
+	base := vp8lEncodingPlan{analysis: analyzeImage(readPixel, bounds)}
+	cfg := vp8lDefaultEncodingConfig()
+	cfg.tryColorCache = false
+	cfg.tryLZ77MetaPrefix = false
+	cfg.tryLZ77TokenMetaPrefix = false
+	plan, ok := makeVP8LLZ77PlanConfig(readPixel, bounds, width, height, base, ^uint64(0), cfg)
+	if !ok || !plan.lz77 {
+		t.Fatal("missing LZ77 plan")
+	}
 
-			var buf bytes.Buffer
-			bw := bufio.NewWriter(&buf)
-			bits := newBitWriter(bw)
-			writeVP8L(bits, readPixel, bounds, width, height, plan)
-			if err := bits.flush(); err != nil {
-				t.Fatal(err)
-			}
-			if err := bw.Flush(); err != nil {
-				t.Fatal(err)
-			}
+	var buf bytes.Buffer
+	bw := bufio.NewWriter(&buf)
+	bits := newBitWriter(bw)
+	writeVP8L(bits, readPixel, bounds, width, height, plan)
+	if err := bits.flush(); err != nil {
+		t.Fatal(err)
+	}
+	if err := bw.Flush(); err != nil {
+		t.Fatal(err)
+	}
 
-			want := int((vp8lPayloadBits(width, height, plan) + 7) / 8)
-			if got := buf.Len(); got != want {
-				t.Fatalf("payload bytes = %d, want %d", got, want)
-			}
-		})
+	want := int((vp8lPayloadBits(width, height, plan) + 7) / 8)
+	if got := buf.Len(); got != want {
+		t.Fatalf("payload bytes = %d, want %d", got, want)
 	}
 }
 
@@ -2275,15 +2573,21 @@ func TestEncodeLosslessUsesColorTransformLZ77WithColorCache(t *testing.T) {
 func TestEncodeLosslessLZ77ColorCacheCountsMixedGreenSymbols(t *testing.T) {
 	img := newLZ77ColorCacheFixture()
 	readPixel := pixelReaderFor(img)
-	plan := chooseVP8LEncodingPlan(readPixel, img.Bounds(), img.Rect.Dx(), img.Rect.Dy())
-	if !plan.lz77 {
-		t.Fatal("missing VP8L LZ77 in default plan")
+	base := vp8lEncodingPlan{analysis: analyzeImage(readPixel, img.Bounds())}
+	cfg := vp8lDefaultEncodingConfig()
+	cfg.tryColorCache = false
+	cfg.tryLZ77MetaPrefix = false
+	cfg.tryLZ77TokenMetaPrefix = false
+	lz77Plan, ok := makeVP8LLZ77PlanConfig(readPixel, img.Bounds(), img.Rect.Dx(), img.Rect.Dy(), base, ^uint64(0), cfg)
+	if !ok || !lz77Plan.lz77 {
+		t.Fatal("missing VP8L LZ77 plan")
 	}
-	if plan.colorCache == nil {
-		t.Fatal("missing VP8L color cache in default plan")
+	plan, ok := makeVP8LLZ77ColorCachePlan(readPixel, img.Bounds(), img.Rect.Dx(), img.Rect.Dx(), img.Rect.Dy(), lz77Plan, lz77Plan.lz77Tokens, ^uint64(0))
+	if !ok || plan.colorCache == nil {
+		t.Fatal("missing VP8L LZ77 color cache plan")
 	}
 
-	var wantGreenCounts [nColorCacheGreenCodes]uint32
+	wantGreenCounts := make([]uint32, len(plan.colorCache.counts))
 	var wantDistanceCounts [nDistanceCodes]uint32
 	hasLiteral := false
 	hasLength := false
@@ -2817,6 +3121,29 @@ func TestVP8LMetaPrefixRowsSelectTheirGroups(t *testing.T) {
 }
 
 func TestVP8LMetaPrefixLZ77CopyCrossesGroupBoundary(t *testing.T) {
+	img, plan := makeVP8LMetaPrefixCrossGroupCopyFixture(t)
+	const width = 8
+	data := encodeLosslessPlanForTest(t, img, plan)
+	got, gotWidth, gotHeight, _, err := decodeEncoderOutput(data)
+	if err != nil {
+		t.Fatalf("decodeEncoderOutput failed: %v", err)
+	}
+	if gotWidth != width || gotHeight != 1 {
+		t.Fatalf("dimensions = %dx%d, want %dx1", gotWidth, gotHeight, width)
+	}
+	colors := [2]color.NRGBA{
+		{R: 17, G: 41, B: 83, A: 255},
+		{R: 191, G: 149, B: 107, A: 255},
+	}
+	for x := 0; x < width; x++ {
+		if got[x] != colors[x&1] {
+			t.Fatalf("pixel %d = %#v, want %#v", x, got[x], colors[x&1])
+		}
+	}
+}
+
+func makeVP8LMetaPrefixCrossGroupCopyFixture(t *testing.T) (*image.NRGBA, vp8lEncodingPlan) {
+	t.Helper()
 	const width = 8
 	bounds := image.Rect(0, 0, width, 1)
 	img := image.NewNRGBA(bounds)
@@ -2863,46 +3190,22 @@ func TestVP8LMetaPrefixLZ77CopyCrossesGroupBoundary(t *testing.T) {
 		lz77Tokens: tokens,
 		metaPrefix: metaPrefix,
 	}
-	data := encodeLosslessPlanForTest(t, img, plan)
-	got, gotWidth, gotHeight, _, err := decodeEncoderOutput(data)
-	if err != nil {
-		t.Fatalf("decodeEncoderOutput failed: %v", err)
-	}
-	if gotWidth != width || gotHeight != 1 {
-		t.Fatalf("dimensions = %dx%d, want %dx1", gotWidth, gotHeight, width)
-	}
-	for x := 0; x < width; x++ {
-		if got[x] != colors[x&1] {
-			t.Fatalf("pixel %d = %#v, want %#v", x, got[x], colors[x&1])
-		}
-	}
+	return img, plan
 }
 
 func TestEncodeLosslessMetaPrefixLZ77CrossGroupCopyWithDWebP(t *testing.T) {
 	if _, err := exec.LookPath("dwebp"); err != nil {
 		t.Skip("dwebp is not available")
 	}
-	img := newLosslessBenchmarkFixtureImage(losslessBenchmarkCase{
-		name:   "Alpha128",
-		kind:   benchmarkImageAlpha,
-		width:  128,
-		height: 128,
-	})
-	readPixel := pixelReaderFor(img)
-	bounds := img.Bounds()
-	plan := chooseVP8LEncodingPlanForImage(img, readPixel, bounds, bounds.Dx(), bounds.Dy())
-	if !vp8lPlanHasMetaPrefixCrossGroupCopy(plan, bounds.Dx()) {
+	img, plan := makeVP8LMetaPrefixCrossGroupCopyFixture(t)
+	if !vp8lPlanHasMetaPrefixCrossGroupCopy(plan, img.Rect.Dx()) {
 		t.Fatal("selected plan has no meta-prefix copy crossing a group boundary")
 	}
-
-	var buf bytes.Buffer
-	if err := Encode(&buf, img, &Options{Compression: CompressionLossless}); err != nil {
-		t.Fatalf("Encode failed: %v", err)
-	}
+	data := encodeLosslessPlanForTest(t, img, plan)
 	dir := t.TempDir()
 	webpPath := dir + "/cross-group.webp"
 	pngPath := dir + "/cross-group.png"
-	if err := os.WriteFile(webpPath, buf.Bytes(), 0o600); err != nil {
+	if err := os.WriteFile(webpPath, data, 0o600); err != nil {
 		t.Fatalf("write WebP: %v", err)
 	}
 	cmd := exec.Command("dwebp", "-quiet", webpPath, "-o", pngPath)
@@ -3089,6 +3392,46 @@ func TestEncodeLosslessUsesNormalChannelTreeForSmallSymbolSet(t *testing.T) {
 	for x := 0; x < width; x++ {
 		want := img.NRGBAAt(x, 0)
 		if got[x] != want {
+			t.Fatalf("pixel %d = %#v, want %#v", x, got[x], want)
+		}
+	}
+}
+
+func TestEncodeLosslessUsesNormalChannelTreeForFullSymbolHistogram(t *testing.T) {
+	img := image.NewNRGBA(image.Rect(0, 0, 4096, 1))
+	for x := 0; x < img.Rect.Dx(); x++ {
+		img.SetNRGBA(x, 0, color.NRGBA{R: 12, G: uint8(x % 32), B: 200, A: 255})
+	}
+
+	readPixel := pixelReaderFor(img)
+	analysis := analyzeImage(readPixel, img.Bounds())
+	green := analysis.channels[0]
+	if green.histogram == nil || green.n != 32 {
+		t.Fatalf("green histogram = %v, symbols = %d, want full histogram with 32 symbols", green.histogram != nil, green.n)
+	}
+	if !green.normal || !channelUseNormal(green, nLiteralCodes+nLengthCodes) {
+		t.Fatal("green channel did not select a normal Huffman tree")
+	}
+	if got, wantMax := channelDataBits(green, nLiteralCodes+nLengthCodes, img.Rect.Dx()), uint64(img.Rect.Dx()*8); got >= wantMax {
+		t.Fatalf("green channel data bits = %d, want less than %d", got, wantMax)
+	}
+
+	left := analyzeImage(readPixel, image.Rect(0, 0, img.Rect.Dx()/2, 1))
+	right := analyzeImage(readPixel, image.Rect(img.Rect.Dx()/2, 0, img.Rect.Dx(), 1))
+	if merged := left.merge(right); !merged.codingEqual(analysis) {
+		t.Fatal("merged full histogram differs from whole-image analysis")
+	}
+
+	data := encodeLosslessPlanForTest(t, img, vp8lEncodingPlan{analysis: analysis})
+	got, width, height, alpha, err := decodeEncoderOutput(data)
+	if err != nil {
+		t.Fatalf("decodeEncoderOutput failed: %v", err)
+	}
+	if width != img.Rect.Dx() || height != img.Rect.Dy() || alpha {
+		t.Fatalf("decoded header = %dx%d alpha=%v", width, height, alpha)
+	}
+	for x := 0; x < width; x++ {
+		if want := img.NRGBAAt(x, 0); got[x] != want {
 			t.Fatalf("pixel %d = %#v, want %#v", x, got[x], want)
 		}
 	}
@@ -3305,12 +3648,17 @@ func TestEncodeLosslessUsesMetaPrefixWithLZ77(t *testing.T) {
 	readPixel := pixelReaderFor(img)
 	analysis := analyzeImage(readPixel, img.Bounds())
 	base := vp8lEncodingPlan{analysis: analysis, alpha: analysis.alpha}
-	lz77Plan, ok := makeVP8LLZ77Plan(readPixel, img.Bounds(), img.Rect.Dx(), img.Rect.Dy(), base, ^uint64(0))
-	if !ok {
+	cfg := vp8lDefaultEncodingConfig()
+	cfg.tryColorCache = false
+	cfg.tryLZ77MetaPrefix = false
+	cfg.tryLZ77TokenMetaPrefix = false
+	lz77Base, ok := makeVP8LLZ77PlanConfig(readPixel, img.Bounds(), img.Rect.Dx(), img.Rect.Dy(), base, ^uint64(0), cfg)
+	if !ok || !lz77Base.lz77 {
 		t.Fatal("makeVP8LLZ77Plan returned false")
 	}
-	if !lz77Plan.lz77 {
-		t.Fatal("missing VP8L LZ77 plan")
+	lz77Plan, ok := makeVP8LMetaPrefixLZ77Plan(readPixel, img.Bounds(), img.Rect.Dx(), img.Rect.Dy(), lz77Base, lz77Base.lz77Tokens, ^uint64(0), vp8lMaxMetaPrefixLZ77Tokens)
+	if !ok {
+		t.Fatal("makeVP8LMetaPrefixLZ77Plan returned false")
 	}
 	if lz77Plan.metaPrefix == nil {
 		t.Fatal("missing VP8L meta prefix on LZ77 plan")
@@ -3341,7 +3689,7 @@ func TestEncodeLosslessUsesMetaPrefixWithLZ77(t *testing.T) {
 }
 
 func TestVP8LTokenMetaPrefixGroupCountsMatchTokens(t *testing.T) {
-	img := newMetaPrefixLZ77Fixture()
+	img := newTokenLocalityMetaPrefixFixture()
 	readPixel := pixelReaderFor(img)
 	bounds := img.Bounds()
 	analysis := analyzeImage(readPixel, bounds)
@@ -3451,8 +3799,8 @@ func TestVP8LTokenMetaPrefixCandidateBits(t *testing.T) {
 	}
 }
 
-func TestVP8LTokenMetaPrefixGroupingMatchesOrImprovesLegacy(t *testing.T) {
-	img := newMetaPrefixLZ77Fixture()
+func TestVP8LMetaPrefixGroupingChoosesBetterCandidate(t *testing.T) {
+	img := newTokenLocalityMetaPrefixFixture()
 	readPixel := pixelReaderFor(img)
 	bounds := img.Bounds()
 	analysis := analyzeImage(readPixel, bounds)
@@ -3472,8 +3820,17 @@ func TestVP8LTokenMetaPrefixGroupingMatchesOrImprovesLegacy(t *testing.T) {
 	if !ok {
 		t.Fatal("legacy grouping did not produce a meta-prefix LZ77 plan")
 	}
-	if got, wantMax := vp8lPayloadBits(bounds.Dx(), bounds.Dy(), newPlan), vp8lPayloadBits(bounds.Dx(), bounds.Dy(), legacy); got > wantMax {
-		t.Fatalf("token grouping bits = %d, want <= legacy bits %d", got, wantMax)
+	cfg.tryLZ77MetaPrefix = true
+	cfg.tryLZ77TokenMetaPrefix = true
+	configured, ok := makeVP8LLZ77PlanConfig(readPixel, bounds, bounds.Dx(), bounds.Dy(), vp8lEncodingPlan{analysis: analysis, alpha: analysis.alpha}, ^uint64(0), cfg)
+	if !ok {
+		t.Fatal("configured LZ77 search returned false")
+	}
+	newBits := vp8lPayloadBits(bounds.Dx(), bounds.Dy(), newPlan)
+	legacyBits := vp8lPayloadBits(bounds.Dx(), bounds.Dy(), legacy)
+	wantMax := min(newBits, legacyBits)
+	if got := vp8lPayloadBits(bounds.Dx(), bounds.Dy(), configured); got > wantMax {
+		t.Fatalf("configured LZ77 bits = %d, want <= best meta-prefix candidate %d", got, wantMax)
 	}
 }
 
@@ -6731,20 +7088,20 @@ func TestHuffmanCodeLengthsFallBackWhenTreeWouldExceedVP8LLimit(t *testing.T) {
 }
 
 func TestCanonicalCodesHandleSparseAndMaxLengthSymbols(t *testing.T) {
-	var channelLengths [nColorCacheGreenCodes]uint8
+	channelLengths := make([]uint8, vp8lMaxColorCacheGreenCodes)
 	channelLengths[0] = 1
 	channelLengths[nLiteralCodes+nLengthCodes-1] = 2
-	channelLengths[nColorCacheGreenCodes-1] = 2
-	channelCodes := canonicalChannelCodes(channelLengths[:])
-	assertCanonicalCodesForTest(t, channelLengths[:], channelCodes[:])
+	channelLengths[vp8lMaxColorCacheGreenCodes-1] = 2
+	channelCodes := canonicalChannelCodes(channelLengths)
+	assertCanonicalCodesForTest(t, channelLengths, channelCodes)
 	if channelCodes[0] != 0 {
 		t.Fatalf("channel code for first symbol = %b, want 0", channelCodes[0])
 	}
 	if channelCodes[nLiteralCodes+nLengthCodes-1] != 2 {
 		t.Fatalf("channel code for sparse length-2 symbol = %b, want 10", channelCodes[nLiteralCodes+nLengthCodes-1])
 	}
-	if channelCodes[nColorCacheGreenCodes-1] != 3 {
-		t.Fatalf("channel code for high color-cache symbol = %b, want 11", channelCodes[nColorCacheGreenCodes-1])
+	if channelCodes[vp8lMaxColorCacheGreenCodes-1] != 3 {
+		t.Fatalf("channel code for high color-cache symbol = %b, want 11", channelCodes[vp8lMaxColorCacheGreenCodes-1])
 	}
 
 	var greenLengths [nLiteralCodes + nLengthCodes]uint8

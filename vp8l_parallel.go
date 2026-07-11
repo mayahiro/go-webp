@@ -7,27 +7,34 @@ import (
 )
 
 const (
-	vp8lParallelPlaneMaxBytes = 32 << 20
-	vp8lParallelMinPixels     = 64 * 64
-	vp8lParallelMaxWorkers    = 4
+	vp8lParallelMinPixels  = 64 * 64
+	vp8lParallelMaxWorkers = 4
 )
 
 type vp8lParallelTransformResults struct {
-	blockPredictor    vp8lEncodingPlan
-	hasBlockPredictor bool
-	predictors        []imageAnalysis
-	subtractGreen     imageAnalysis
-	colors            []imageAnalysis
+	blockPredictor         vp8lEncodingPlan
+	hasBlockPredictor      bool
+	blockColor             vp8lEncodingPlan
+	hasBlockColor          bool
+	blockPredictorColor    vp8lEncodingPlan
+	hasBlockPredictorColor bool
+	baselineBlockPredictor vp8lEncodingPlan
+	hasBaselinePredictor   bool
+	baselinePredictorColor vp8lEncodingPlan
+	hasBaselineColor       bool
+	predictors             []imageAnalysis
+	subtractGreen          imageAnalysis
+	colors                 []imageAnalysis
 }
 
-func vp8lPrepareParallelTransformReader(m image.Image, readPixel pixelReader, bounds image.Rectangle, width int, height int, enabled bool) (pixelReader, bool) {
+func vp8lPrepareParallelTransformReader(m image.Image, readPixel pixelReader, bounds image.Rectangle, width int, height int, enabled bool, knownConcurrent bool) (pixelReader, bool) {
 	if !enabled || width*height < vp8lParallelMinPixels || runtime.GOMAXPROCS(0) < 2 {
 		return readPixel, false
 	}
-	if standardImageSupportsConcurrentRead(m) {
+	if knownConcurrent || standardImageSupportsConcurrentRead(m) {
 		return readPixel, true
 	}
-	plane, ok := materializePixelPlane(readPixel, bounds, width, height, vp8lParallelPlaneMaxBytes)
+	plane, ok := materializePixelPlane(readPixel, bounds, width, height, vp8lSourcePlaneMaxBytes)
 	if !ok {
 		return readPixel, false
 	}
@@ -51,6 +58,26 @@ func vp8lAddParallelTransformCandidates(
 	if results.hasBlockPredictor {
 		candidateCount, literalBestIndex, best, bestBits = vp8lAddEncodingPlanCandidate(
 			candidates, candidateCount, literalBestIndex, results.blockPredictor, width, height, best, bestBits,
+		)
+	}
+	if results.hasBlockPredictorColor {
+		candidateCount, literalBestIndex, best, bestBits = vp8lAddEncodingPlanCandidate(
+			candidates, candidateCount, literalBestIndex, results.blockPredictorColor, width, height, best, bestBits,
+		)
+	}
+	if results.hasBaselinePredictor {
+		candidateCount, literalBestIndex, best, bestBits = vp8lAddEncodingPlanCandidate(
+			candidates, candidateCount, literalBestIndex, results.baselineBlockPredictor, width, height, best, bestBits,
+		)
+	}
+	if results.hasBaselineColor {
+		candidateCount, literalBestIndex, best, bestBits = vp8lAddEncodingPlanCandidate(
+			candidates, candidateCount, literalBestIndex, results.baselinePredictorColor, width, height, best, bestBits,
+		)
+	}
+	if results.hasBlockColor {
+		candidateCount, literalBestIndex, best, bestBits = vp8lAddEncodingPlanCandidate(
+			candidates, candidateCount, literalBestIndex, results.blockColor, width, height, best, bestBits,
 		)
 	}
 	for i, candidateAnalysis := range results.predictors {
@@ -137,6 +164,11 @@ func vp8lBuildParallelTransformCandidates(readPixel pixelReader, bounds image.Re
 		colors:     make([]imageAnalysis, len(cfg.colorTransformCandidates)),
 	}
 	taskCount := len(results.predictors) + len(results.colors) + 1
+	blockColorTask := -1
+	if cfg.tryBlockColorTransform {
+		blockColorTask = taskCount
+		taskCount++
+	}
 	blockTask := -1
 	if cfg.tryBlockPredictor {
 		blockTask = taskCount
@@ -162,8 +194,26 @@ func vp8lBuildParallelTransformCandidates(readPixel pixelReader, bounds image.Re
 				case task == len(results.predictors)+len(results.colors):
 					readSubtractGreen := vp8lSubtractGreenReader(readPixel)
 					results.subtractGreen = analyzeImage(readSubtractGreen, bounds)
+				case task == blockColorTask:
+					base := vp8lEncodingPlan{analysis: analysis, alpha: analysis.alpha}
+					results.blockColor, results.hasBlockColor = makeVP8LBlockColorTransformPlan(readPixel, bounds, width, height, base, cfg)
 				case task == blockTask:
 					results.blockPredictor, results.hasBlockPredictor = makeVP8LBlockPredictorPlan(readPixel, bounds, width, height, analysis.alpha, cfg)
+					if results.hasBlockPredictor && cfg.tryBlockColorTransform {
+						results.blockPredictorColor, results.hasBlockPredictorColor = makeVP8LBlockColorTransformPlan(readPixel, bounds, width, height, results.blockPredictor, cfg)
+					}
+					if len(cfg.predictorModes) > len(vp8lPredictorModeCandidates) {
+						baselineConfig := cfg
+						baselineConfig.predictorModes = vp8lPredictorModeCandidates[:]
+						results.baselineBlockPredictor, results.hasBaselinePredictor = makeVP8LBlockPredictorPlan(readPixel, bounds, width, height, analysis.alpha, baselineConfig)
+						if results.hasBaselinePredictor {
+							results.baselineBlockPredictor.baselineCandidate = true
+							if cfg.tryBlockColorTransform {
+								results.baselinePredictorColor, results.hasBaselineColor = makeVP8LBlockColorTransformPlan(readPixel, bounds, width, height, results.baselineBlockPredictor, baselineConfig)
+								results.baselinePredictorColor.baselineCandidate = results.hasBaselineColor
+							}
+						}
+					}
 				}
 			}
 		}()

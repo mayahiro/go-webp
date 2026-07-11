@@ -668,6 +668,12 @@ func alphaCodeLengthCodeLengthsForUsage(usage [alphaCodeLengthCodeCount]uint32) 
 		return lengths, alphaCodeLengthCodeCountForUsage(usage)
 	}
 
+	var nodes [alphaCodeLengthCodeCount*2 - 1]huffmanNode
+	var active [alphaCodeLengthCodeCount]int
+	if huffmanCodeLengthsIntoWorkspace(lengths[:], usage[:], nodes[:0], active[:0], alphaCodeLengthCodeMaxLength, false) {
+		return lengths, alphaCodeLengthCodeCountForUsage(usage)
+	}
+
 	for i := 1; i < n; i++ {
 		sym := symbols[i]
 		j := i - 1
@@ -1615,7 +1621,7 @@ type huffmanNode struct {
 }
 
 const (
-	maxAlphaHuffmanSymbols = nColorCacheGreenCodes
+	maxAlphaHuffmanSymbols = nLiteralCodes + nLengthCodes + 64
 	maxAlphaHuffmanNodes   = maxAlphaHuffmanSymbols*2 - 1
 )
 
@@ -1650,6 +1656,23 @@ func huffmanDistanceCodeLengthsWithScratch(counts [nDistanceCodes]uint32, scratc
 }
 
 func huffmanCodeLengthsInto(lengths []uint8, counts []uint32) bool {
+	if len(counts) > maxAlphaHuffmanSymbols {
+		if len(lengths) < len(counts) {
+			return false
+		}
+		symbolCount := 0
+		for _, count := range counts {
+			if count != 0 {
+				symbolCount++
+			}
+		}
+		if symbolCount == 0 {
+			return false
+		}
+		nodes := make([]huffmanNode, 0, symbolCount*2-1)
+		active := make([]int, 0, symbolCount)
+		return huffmanCodeLengthsIntoWorkspace(lengths, counts, nodes, active, 15, true)
+	}
 	var scratch alphaHuffmanScratch
 	return huffmanCodeLengthsIntoScratch(lengths, counts, &scratch)
 }
@@ -1658,8 +1681,11 @@ func huffmanCodeLengthsIntoScratch(lengths []uint8, counts []uint32, scratch *al
 	if len(counts) > maxAlphaHuffmanSymbols || len(lengths) < len(counts) {
 		return false
 	}
-	nodes := scratch.nodes[:0]
-	active := scratch.active[:0]
+	return huffmanCodeLengthsIntoWorkspace(lengths, counts, scratch.nodes[:0], scratch.active[:0], 15, true)
+}
+
+func huffmanCodeLengthsIntoWorkspace(lengths []uint8, counts []uint32, nodes []huffmanNode, active []int, maxLength uint8, balancedFallback bool) bool {
+	clear(lengths[:len(counts)])
 	for symbol, count := range counts {
 		if count == 0 {
 			continue
@@ -1680,29 +1706,76 @@ func huffmanCodeLengthsIntoScratch(lengths []uint8, counts []uint32, scratch *al
 		return true
 	}
 
+	huffmanHeapInit(active, nodes)
 	for len(active) > 1 {
-		first, second := twoSmallestHuffmanNodes(nodes, active)
-		a, b := active[first], active[second]
-		if first < second {
-			active = append(active[:second], active[second+1:]...)
-			active = append(active[:first], active[first+1:]...)
-		} else {
-			active = append(active[:first], active[first+1:]...)
-			active = append(active[:second], active[second+1:]...)
-		}
+		var a, b int
+		a, active = huffmanHeapPop(active, nodes)
+		b, active = huffmanHeapPop(active, nodes)
 		nodes = append(nodes, huffmanNode{
 			freq:   nodes[a].freq + nodes[b].freq,
 			symbol: minInt(nodes[a].symbol, nodes[b].symbol),
 			left:   a,
 			right:  b,
 		})
-		active = append(active, len(nodes)-1)
+		active = huffmanHeapPush(active, len(nodes)-1, nodes)
 	}
 
-	if !assignHuffmanLengths(lengths[:], nodes, active[0], 0) {
+	if !assignHuffmanLengths(lengths[:], nodes, active[0], 0, maxLength) {
+		if !balancedFallback {
+			return false
+		}
 		return balancedHuffmanCodeLengthsInto(lengths, counts)
 	}
 	return true
+}
+
+func huffmanHeapInit(indices []int, nodes []huffmanNode) {
+	for i := len(indices)/2 - 1; i >= 0; i-- {
+		huffmanHeapDown(indices, i, nodes)
+	}
+}
+
+func huffmanHeapPop(indices []int, nodes []huffmanNode) (int, []int) {
+	root := indices[0]
+	last := len(indices) - 1
+	indices[0] = indices[last]
+	indices = indices[:last]
+	if len(indices) != 0 {
+		huffmanHeapDown(indices, 0, nodes)
+	}
+	return root, indices
+}
+
+func huffmanHeapPush(indices []int, index int, nodes []huffmanNode) []int {
+	indices = append(indices, index)
+	for child := len(indices) - 1; child > 0; {
+		parent := (child - 1) / 2
+		if !lessHuffmanNode(nodes[indices[child]], nodes[indices[parent]]) {
+			break
+		}
+		indices[parent], indices[child] = indices[child], indices[parent]
+		child = parent
+	}
+	return indices
+}
+
+func huffmanHeapDown(indices []int, parent int, nodes []huffmanNode) {
+	for {
+		left := parent*2 + 1
+		if left >= len(indices) {
+			return
+		}
+		child := left
+		right := left + 1
+		if right < len(indices) && lessHuffmanNode(nodes[indices[right]], nodes[indices[left]]) {
+			child = right
+		}
+		if !lessHuffmanNode(nodes[indices[child]], nodes[indices[parent]]) {
+			return
+		}
+		indices[parent], indices[child] = indices[child], indices[parent]
+		parent = child
+	}
 }
 
 func balancedHuffmanCodeLengths(counts [nLiteralCodes + nLengthCodes]uint32) ([nLiteralCodes + nLengthCodes]uint8, bool) {
@@ -1760,19 +1833,6 @@ func ceilLog2(n int) int {
 	return length
 }
 
-func twoSmallestHuffmanNodes(nodes []huffmanNode, active []int) (int, int) {
-	first, second := -1, -1
-	for i := range active {
-		if first < 0 || lessHuffmanNode(nodes[active[i]], nodes[active[first]]) {
-			second = first
-			first = i
-		} else if second < 0 || lessHuffmanNode(nodes[active[i]], nodes[active[second]]) {
-			second = i
-		}
-	}
-	return first, second
-}
-
 func lessHuffmanNode(a huffmanNode, b huffmanNode) bool {
 	if a.freq != b.freq {
 		return a.freq < b.freq
@@ -1787,21 +1847,21 @@ func minInt(a int, b int) int {
 	return b
 }
 
-func assignHuffmanLengths(lengths []uint8, nodes []huffmanNode, index int, depth uint8) bool {
+func assignHuffmanLengths(lengths []uint8, nodes []huffmanNode, index int, depth uint8, maxLength uint8) bool {
 	node := nodes[index]
 	if node.left < 0 && node.right < 0 {
-		if depth == 0 || depth > 15 {
+		if depth == 0 || depth > maxLength {
 			return false
 		}
 		lengths[node.symbol] = depth
 		return true
 	}
 	nextDepth := depth + 1
-	if nextDepth > 15 {
+	if nextDepth > maxLength {
 		return false
 	}
-	return assignHuffmanLengths(lengths, nodes, node.left, nextDepth) &&
-		assignHuffmanLengths(lengths, nodes, node.right, nextDepth)
+	return assignHuffmanLengths(lengths, nodes, node.left, nextDepth, maxLength) &&
+		assignHuffmanLengths(lengths, nodes, node.right, nextDepth, maxLength)
 }
 
 func canonicalCodes(lengths [nLiteralCodes + nLengthCodes]uint8) [nLiteralCodes + nLengthCodes]uint16 {
@@ -2164,8 +2224,8 @@ const (
 func newVP8EncodeBuffers(mbw int, mbh int) *vp8EncodeBuffers {
 	yStride := mbw * 16
 	cStride := mbw * 8
-	ySize := yStride * mbh * 16
-	cSize := cStride * mbh * 8
+	ySize := yStride * minInt(mbh*16, 32)
+	cSize := cStride * minInt(mbh*8, 16)
 	rec := make([]uint8, ySize+2*cSize)
 	work := &vp8EncodeBuffers{
 		recY:  rec[:ySize],
@@ -3214,12 +3274,16 @@ func chooseVP8Y4ModeWithProbs(target *[16]uint8, x int, y int, recY []uint8, str
 	bestNZ := uint8(0)
 	var bestRecon [16]uint8
 	neighbors := makeLuma4Neighbors(recY, stride, x, y)
+	targetTexture := int64(0)
+	if rd.textureLambda > 0 {
+		targetTexture = vp8WeightedHadamard(target)
+	}
 	for mode := uint8(0); mode < vp8NumPredModes; mode++ {
 		pred := predictLuma4WithNeighbors(&neighbors, mode)
 		residual := lumaResidualBlockFromTarget(target, pred)
 		coeff := quant.quantizeY1(residual, vp8PlaneY1SansY2, context)
 		recon := reconstructVP8Block(pred, coeff, quant.y1DC, quant.y1AC)
-		distortion := rd.lumaDistortion(target, recon)
+		distortion := rd.lumaDistortionWithTargetTexture(target, recon, targetTexture)
 		blockBitCost, blockNZ := vp8BlockBitCostAndNonZeroWithProbsPtr(tokenProbs, vp8PlaneY1SansY2, context, &coeff)
 		bitCost := vp8Y4ModeCost(topPred, leftPred, mode) + blockBitCost
 		score := rd.lumaScore(distortion, bitCost)
@@ -3322,10 +3386,16 @@ func chooseVP8Y16Mode(target *lumaTargetBlocks, mbx int, mby int, recY []uint8, 
 func chooseVP8Y16ModeWithProbs(target *lumaTargetBlocks, mbx int, mby int, recY []uint8, stride int, quant vp8Quant, rd vp8RDConfig, tokenProbs *vp8TokenProbs, left *[4]uint8, up *[4]uint8, leftY16 *uint8, upY16 *uint8) (uint8, int64) {
 	bestMode := vp8PredDC
 	bestScore := int64(1<<63 - 1)
+	var targetTexture [16]int64
+	if rd.textureLambda > 0 {
+		for i := range targetTexture {
+			targetTexture[i] = vp8WeightedHadamard(&(*target)[i])
+		}
+	}
 	modes, nModes := vp8CandidatePredModes(mbx, mby)
 	for i := 0; i < nModes; i++ {
 		mode := modes[i]
-		score := scoreLuma16RD(target, mbx, mby, recY, stride, quant, rd, tokenProbs, left, up, *leftY16+*upY16, mode)
+		score := scoreLuma16RD(target, &targetTexture, mbx, mby, recY, stride, quant, rd, tokenProbs, left, up, *leftY16+*upY16, mode)
 		if score < bestScore {
 			bestScore = score
 			bestMode = mode
@@ -3334,7 +3404,7 @@ func chooseVP8Y16ModeWithProbs(target *lumaTargetBlocks, mbx int, mby int, recY 
 	return bestMode, bestScore
 }
 
-func scoreLuma16RD(target *lumaTargetBlocks, mbx int, mby int, recY []uint8, stride int, quant vp8Quant, rd vp8RDConfig, tokenProbs *vp8TokenProbs, left *[4]uint8, up *[4]uint8, y16Context uint8, mode uint8) int64 {
+func scoreLuma16RD(target *lumaTargetBlocks, targetTexture *[16]int64, mbx int, mby int, recY []uint8, stride int, quant vp8Quant, rd vp8RDConfig, tokenProbs *vp8TokenProbs, left *[4]uint8, up *[4]uint8, y16Context uint8, mode uint8) int64 {
 	pred16 := predictLuma16(recY, stride, mbx, mby, mode)
 	var transformed [16][16]int
 	var y2Input [16]int
@@ -3365,7 +3435,7 @@ func scoreLuma16RD(target *lumaTargetBlocks, mbx int, mby int, recY []uint8, str
 			reconCoeff := dequantizeVP8Block(coeff, 0, quant.y1AC)
 			reconCoeff[0] = y2Recon[index]
 			recon := inverseDCT4(pred16[index], reconCoeff)
-			distortion += rd.lumaDistortion(&(*target)[index], recon)
+			distortion += rd.lumaDistortionWithTargetTexture(&(*target)[index], recon, targetTexture[index])
 			if blockNZ {
 				nz = 1
 				localUp[bx] = 1
@@ -3534,7 +3604,7 @@ func predictLuma16(rec []uint8, stride int, mbx int, mby int, mode uint8) luma16
 	var pred luma16PredBlocks
 	switch mode {
 	case vp8PredVE:
-		top := rec[(y0-1)*stride+x0:]
+		top := vp8ReconstructionRow(rec, stride, y0-1)[x0:]
 		for by := 0; by < 4; by++ {
 			for bx := 0; bx < 4; bx++ {
 				block := &pred[by*4+bx]
@@ -3548,7 +3618,7 @@ func predictLuma16(rec []uint8, stride int, mbx int, mby int, mode uint8) luma16
 			for bx := 0; bx < 4; bx++ {
 				block := &pred[by*4+bx]
 				for y := 0; y < 4; y++ {
-					v := rec[(y0+by*4+y)*stride+x0-1]
+					v := vp8ReconstructionAt(rec, stride, x0-1, y0+by*4+y)
 					for x := 0; x < 4; x++ {
 						block[y*4+x] = v
 					}
@@ -3556,14 +3626,14 @@ func predictLuma16(rec []uint8, stride int, mbx int, mby int, mode uint8) luma16
 			}
 		}
 	case vp8PredTM:
-		topLeft := int(rec[(y0-1)*stride+x0-1])
+		topLeft := int(vp8ReconstructionAt(rec, stride, x0-1, y0-1))
 		for by := 0; by < 4; by++ {
 			for bx := 0; bx < 4; bx++ {
 				block := &pred[by*4+bx]
 				for y := 0; y < 4; y++ {
-					left := int(rec[(y0+by*4+y)*stride+x0-1])
+					left := int(vp8ReconstructionAt(rec, stride, x0-1, y0+by*4+y))
 					for x := 0; x < 4; x++ {
-						top := int(rec[(y0-1)*stride+x0+bx*4+x])
+						top := int(vp8ReconstructionAt(rec, stride, x0+bx*4+x, y0-1))
 						block[y*4+x] = clipUint8(left + top - topLeft)
 					}
 				}
@@ -3586,7 +3656,7 @@ func predictChroma8(rec []uint8, stride int, mbx int, mby int, mode uint8) chrom
 	var pred chroma8PredBlocks
 	switch mode {
 	case vp8PredVE:
-		top := rec[(y0-1)*stride+x0:]
+		top := vp8ReconstructionRow(rec, stride, y0-1)[x0:]
 		for by := 0; by < 2; by++ {
 			for bx := 0; bx < 2; bx++ {
 				block := &pred[by*2+bx]
@@ -3600,7 +3670,7 @@ func predictChroma8(rec []uint8, stride int, mbx int, mby int, mode uint8) chrom
 			for bx := 0; bx < 2; bx++ {
 				block := &pred[by*2+bx]
 				for y := 0; y < 4; y++ {
-					v := rec[(y0+by*4+y)*stride+x0-1]
+					v := vp8ReconstructionAt(rec, stride, x0-1, y0+by*4+y)
 					for x := 0; x < 4; x++ {
 						block[y*4+x] = v
 					}
@@ -3608,14 +3678,14 @@ func predictChroma8(rec []uint8, stride int, mbx int, mby int, mode uint8) chrom
 			}
 		}
 	case vp8PredTM:
-		topLeft := int(rec[(y0-1)*stride+x0-1])
+		topLeft := int(vp8ReconstructionAt(rec, stride, x0-1, y0-1))
 		for by := 0; by < 2; by++ {
 			for bx := 0; bx < 2; bx++ {
 				block := &pred[by*2+bx]
 				for y := 0; y < 4; y++ {
-					left := int(rec[(y0+by*4+y)*stride+x0-1])
+					left := int(vp8ReconstructionAt(rec, stride, x0-1, y0+by*4+y))
 					for x := 0; x < 4; x++ {
-						top := int(rec[(y0-1)*stride+x0+bx*4+x])
+						top := int(vp8ReconstructionAt(rec, stride, x0+bx*4+x, y0-1))
 						block[y*4+x] = clipUint8(left + top - topLeft)
 					}
 				}
@@ -3639,22 +3709,22 @@ func dcPred16(rec []uint8, stride int, mbx int, mby int) uint8 {
 	case mbx == 0:
 		sum := 8
 		for x := 0; x < 16; x++ {
-			sum += int(rec[(y0-1)*stride+x0+x])
+			sum += int(vp8ReconstructionAt(rec, stride, x0+x, y0-1))
 		}
 		return uint8(sum / 16)
 	case mby == 0:
 		sum := 8
 		for y := 0; y < 16; y++ {
-			sum += int(rec[(y0+y)*stride+x0-1])
+			sum += int(vp8ReconstructionAt(rec, stride, x0-1, y0+y))
 		}
 		return uint8(sum / 16)
 	default:
 		sum := 16
 		for x := 0; x < 16; x++ {
-			sum += int(rec[(y0-1)*stride+x0+x])
+			sum += int(vp8ReconstructionAt(rec, stride, x0+x, y0-1))
 		}
 		for y := 0; y < 16; y++ {
-			sum += int(rec[(y0+y)*stride+x0-1])
+			sum += int(vp8ReconstructionAt(rec, stride, x0-1, y0+y))
 		}
 		return uint8(sum / 32)
 	}
@@ -3669,22 +3739,22 @@ func dcPred8(rec []uint8, stride int, mbx int, mby int) uint8 {
 	case mbx == 0:
 		sum := 4
 		for x := 0; x < 8; x++ {
-			sum += int(rec[(y0-1)*stride+x0+x])
+			sum += int(vp8ReconstructionAt(rec, stride, x0+x, y0-1))
 		}
 		return uint8(sum / 8)
 	case mby == 0:
 		sum := 4
 		for y := 0; y < 8; y++ {
-			sum += int(rec[(y0+y)*stride+x0-1])
+			sum += int(vp8ReconstructionAt(rec, stride, x0-1, y0+y))
 		}
 		return uint8(sum / 8)
 	default:
 		sum := 8
 		for x := 0; x < 8; x++ {
-			sum += int(rec[(y0-1)*stride+x0+x])
+			sum += int(vp8ReconstructionAt(rec, stride, x0+x, y0-1))
 		}
 		for y := 0; y < 8; y++ {
-			sum += int(rec[(y0+y)*stride+x0-1])
+			sum += int(vp8ReconstructionAt(rec, stride, x0-1, y0+y))
 		}
 		return uint8(sum / 16)
 	}
@@ -4352,14 +4422,14 @@ func luma4Top(rec []uint8, stride int, x int, y int, dx int) int {
 	if xx >= stride {
 		xx = stride - 1
 	}
-	return int(rec[(y-1)*stride+xx])
+	return int(vp8ReconstructionAt(rec, stride, xx, y-1))
 }
 
 func luma4Left(rec []uint8, stride int, x int, y int, dy int) int {
 	if x == 0 {
 		return 0x81
 	}
-	return int(rec[(y+dy)*stride+x-1])
+	return int(vp8ReconstructionAt(rec, stride, x-1, y+dy))
 }
 
 func luma4TopLeft(rec []uint8, stride int, x int, y int) int {
@@ -4369,7 +4439,7 @@ func luma4TopLeft(rec []uint8, stride int, x int, y int) int {
 	if x == 0 {
 		return 0x81
 	}
-	return int(rec[(y-1)*stride+x-1])
+	return int(vp8ReconstructionAt(rec, stride, x-1, y-1))
 }
 
 func avg2(a int, b int) uint8 {
@@ -4413,22 +4483,22 @@ func pred8DC(rec []uint8, stride int, mbx int, mby int, x int, y int) [16]uint8 
 	case mbx == 0:
 		sum := 4
 		for i := 0; i < 8; i++ {
-			sum += int(rec[(topY-1)*stride+leftX+i])
+			sum += int(vp8ReconstructionAt(rec, stride, leftX+i, topY-1))
 		}
 		return filledBlock4(uint8(sum / 8))
 	case mby == 0:
 		sum := 4
 		for j := 0; j < 8; j++ {
-			sum += int(rec[(topY+j)*stride+leftX-1])
+			sum += int(vp8ReconstructionAt(rec, stride, leftX-1, topY+j))
 		}
 		return filledBlock4(uint8(sum / 8))
 	default:
 		sum := 8
 		for i := 0; i < 8; i++ {
-			sum += int(rec[(topY-1)*stride+leftX+i])
+			sum += int(vp8ReconstructionAt(rec, stride, leftX+i, topY-1))
 		}
 		for j := 0; j < 8; j++ {
-			sum += int(rec[(topY+j)*stride+leftX-1])
+			sum += int(vp8ReconstructionAt(rec, stride, leftX-1, topY+j))
 		}
 		return filledBlock4(uint8(sum / 16))
 	}
@@ -4436,9 +4506,18 @@ func pred8DC(rec []uint8, stride int, mbx int, mby int, x int, y int) [16]uint8 
 
 func put4(dst []uint8, stride int, x int, y int, block [16]uint8) {
 	for yy := 0; yy < 4; yy++ {
-		row := dst[(y+yy)*stride+x:]
+		row := vp8ReconstructionRow(dst, stride, y+yy)[x:]
 		copy(row[:4], block[yy*4:yy*4+4])
 	}
+}
+
+func vp8ReconstructionAt(rec []uint8, stride int, x int, y int) uint8 {
+	return vp8ReconstructionRow(rec, stride, y)[x]
+}
+
+func vp8ReconstructionRow(rec []uint8, stride int, y int) []uint8 {
+	rows := len(rec) / stride
+	return rec[(y%rows)*stride:]
 }
 
 func quantizeVP8Block(residual [16]int, dcQ int, acQ int) vp8QuantizedBlock {

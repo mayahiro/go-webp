@@ -17,11 +17,19 @@ import (
 
 	webp "github.com/mayahiro/go-webp"
 	"github.com/mayahiro/go-webp/benchmarks/internal/benchmarkfixture"
+	"github.com/mayahiro/go-webp/internal/benchmarkcorpus"
 )
 
 type fixture struct {
 	name string
 	img  image.Image
+}
+
+type corpusConfiguration struct {
+	name           string
+	sha256         string
+	split          string
+	holdoutPercent int
 }
 
 type comparisonConfig struct {
@@ -54,6 +62,10 @@ func main() {
 	method := flag.Int("method", 4, "cwebp method from 0 to 6")
 	outDir := flag.String("out", "", "directory for generated PNG and WebP files")
 	keep := flag.Bool("keep", false, "keep generated files when out is empty")
+	corpusDir := flag.String("corpus", "", "private image corpus directory; empty uses generated fixtures")
+	corpusName := flag.String("corpus-name", "production", "anonymous private corpus name")
+	corpusSplit := flag.String("split", "holdout", "private corpus split: train, holdout, or all")
+	holdoutPercent := flag.Int("holdout", 20, "deterministic private corpus holdout percentage")
 	flag.Parse()
 	if *runs <= 0 {
 		fatal(errors.New("runs must be positive"))
@@ -88,6 +100,10 @@ func main() {
 	} else if err := os.MkdirAll(dir, 0o700); err != nil {
 		fatal(err)
 	}
+	fixtures, corpus, err := loadLosslessComparisonFixtures(*corpusDir, *corpusName, *corpusSplit, *holdoutPercent)
+	if err != nil {
+		fatal(err)
+	}
 
 	version, err := commandVersion("cwebp", "-version")
 	if err != nil {
@@ -95,8 +111,11 @@ func main() {
 	}
 	fmt.Printf("workdir=%s\n", dir)
 	fmt.Printf("mode=%s method=%d quality=%d cwebp=%s\n", cfg.name, *method, *quality, version)
+	fmt.Printf("corpus=%s split=%s holdout=%d sha256=%s\n", corpus.name, corpus.split, corpus.holdoutPercent, corpus.sha256)
 	fmt.Printf("%-14s %-10s %4s %12s %10s %10s %8s %11s\n", "fixture", "encoder", "runs", "encoded_B", "avg_ms", "rgb_mae", "rgb_max", "alpha_exact")
-	for _, f := range fixtures() {
+	var goBytes, libwebpBytes int64
+	var goTime, libwebpTime time.Duration
+	for _, f := range fixtures {
 		pngPath := filepath.Join(dir, f.name+".png")
 		if err := writePNG(pngPath, f.img); err != nil {
 			fatal(fmt.Errorf("%s: write png: %w", f.name, err))
@@ -122,7 +141,12 @@ func main() {
 				r.distortion.alphaExact,
 			)
 		}
+		goBytes += goResult.size
+		libwebpBytes += libwebpResult.size
+		goTime += goResult.avg
+		libwebpTime += libwebpResult.avg
 	}
+	fmt.Printf("aggregate go-webp_B=%d libwebp_B=%d go-webp_ms=%.3f libwebp_ms=%.3f\n", goBytes, libwebpBytes, float64(goTime.Microseconds())/1000, float64(libwebpTime.Microseconds())/1000)
 }
 
 func makeComparisonConfig(mode string, quality int, method int) (comparisonConfig, error) {
@@ -310,13 +334,32 @@ func commandVersion(name string, args ...string) (string, error) {
 	return strings.TrimSpace(string(output)), nil
 }
 
-func fixtures() []fixture {
-	shared := benchmarkfixture.Standard()
-	result := make([]fixture, len(shared))
-	for i, f := range shared {
-		result[i] = fixture{name: f.Name, img: f.Image}
+func loadLosslessComparisonFixtures(corpusDir string, corpusName string, split string, holdoutPercent int) ([]fixture, corpusConfiguration, error) {
+	if strings.TrimSpace(corpusDir) == "" {
+		shared := benchmarkfixture.Standard()
+		result := make([]fixture, len(shared))
+		for i, f := range shared {
+			result[i] = fixture{name: f.Name, img: f.Image}
+		}
+		return result, corpusConfiguration{name: "generated-standard", split: "all"}, nil
 	}
-	return result
+	report, samples, err := benchmarkcorpus.LoadSplit(corpusDir, corpusName, holdoutPercent, split)
+	if err != nil {
+		return nil, corpusConfiguration{}, err
+	}
+	if len(samples) == 0 {
+		return nil, corpusConfiguration{}, fmt.Errorf("corpus split %q contains no images", split)
+	}
+	result := make([]fixture, len(samples))
+	for i, sample := range samples {
+		result[i] = fixture{name: sample.Metadata.ID, img: sample.Pixels}
+	}
+	return result, corpusConfiguration{
+		name:           report.Corpus,
+		sha256:         report.CorpusSHA256,
+		split:          split,
+		holdoutPercent: report.HoldoutPercent,
+	}, nil
 }
 
 func fatal(err error) {

@@ -455,7 +455,7 @@ func estimateLossyWorkspaceForDimensions(width int, height int, quality int) los
 	yStride := mbw * 16
 	cStride := mbw * 8
 	qIndex := qualityToVP8QIndex(quality)
-	recBytes := yStride*mbh*16 + cStride*mbh*8*2
+	recBytes := yStride*minInt(mbh*16, 32) + cStride*minInt(mbh*8, 16)*2
 	modeBytes := mbw * mbh * int(unsafe.Sizeof(vp8MBMode{}))
 	residualBytes := 0
 	if vp8ResidualBufferFits(mbw, mbh) {
@@ -482,6 +482,7 @@ func estimateLosslessWorkspace(img image.Image) losslessWorkspaceMetrics {
 	metaPrefixBytes := prefixBlocks * (int(unsafe.Sizeof(uint16(0))) + int(unsafe.Sizeof(imageAnalysis{})))
 	metaPrefixBytes += vp8lMaxMetaPrefixGroups * (int(unsafe.Sizeof(imageAnalysis{})) + int(unsafe.Sizeof(int(0))))
 	colorCacheBytes := int(unsafe.Sizeof(vp8lColorCachePlan{})) + vp8lMaxColorCacheSize*int(unsafe.Sizeof(color.NRGBA{}))
+	colorCacheBytes += vp8lMaxColorCacheGreenCodes * (int(unsafe.Sizeof(uint32(0))) + int(unsafe.Sizeof(uint8(0))) + int(unsafe.Sizeof(uint16(0))))
 	planCandidateBytes := vp8lMaxEncodingPlanCandidates * int(unsafe.Sizeof(vp8lEncodingPlan{}))
 
 	return losslessWorkspaceMetrics{
@@ -498,7 +499,11 @@ func benchmarkImageInputBytes(img image.Image) int {
 	switch img := img.(type) {
 	case *image.NRGBA:
 		return len(img.Pix)
+	case *image.NRGBA64:
+		return len(img.Pix)
 	case *image.RGBA:
+		return len(img.Pix)
+	case *image.RGBA64:
 		return len(img.Pix)
 	case *image.Gray:
 		return len(img.Pix)
@@ -539,7 +544,7 @@ func lossyYUVPSNRProxy(m image.Image, quality int) (float64, float64) {
 	for y := 0; y < height; y++ {
 		for x := 0; x < width; x++ {
 			c := samplePixel(readPixel, bounds, x, y)
-			got := work.recY[y*yStride+x]
+			got := vp8ReconstructionAt(work.recY, yStride, x, y)
 			yErr += squareFloat(float64(int(rgbToLuma(c.R, c.G, c.B)) - int(got)))
 		}
 	}
@@ -551,8 +556,8 @@ func lossyYUVPSNRProxy(m image.Image, quality int) (float64, float64) {
 		for x := 0; x < chromaWidth; x++ {
 			wantCb := chromaSample(readChroma, bounds, x*2, y*2, true)
 			wantCr := chromaSample(readChroma, bounds, x*2, y*2, false)
-			gotCb := work.recCb[y*cStride+x]
-			gotCr := work.recCr[y*cStride+x]
+			gotCb := vp8ReconstructionAt(work.recCb, cStride, x, y)
+			gotCr := vp8ReconstructionAt(work.recCr, cStride, x, y)
 			uvErr += squareFloat(float64(int(wantCb) - int(gotCb)))
 			uvErr += squareFloat(float64(int(wantCr) - int(gotCr)))
 		}

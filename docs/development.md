@@ -62,10 +62,13 @@ corpus command anonymously indexes images under `.local/corpus/production`.
 make compare-lossless ARGS='-runs 3 -mode default -method 4'
 make compare-lossless ARGS='-runs 3 -mode best -method 6'
 make compare-lossless ARGS='-runs 3 -mode near-lossless -quality 75 -method 4'
+make compare-lossless ARGS='-runs 1 -mode best -method 6 -corpus ../.local/corpus/production -split holdout'
 ```
 
 The report includes decoded RGB error and alpha equality. Ordinary lossless
-profiles require exact pixels.
+profiles require exact pixels. Private corpus inputs use anonymous pixel-hash
+IDs and report only the corpus SHA-256; source names and paths are not printed.
+Paths passed through `ARGS` are resolved from the `benchmarks` directory.
 
 ## Local Lossy Rate-Distortion Comparison
 

@@ -3,7 +3,11 @@ package main
 import (
 	"image"
 	"image/color"
+	"image/jpeg"
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	webp "github.com/mayahiro/go-webp"
@@ -46,5 +50,41 @@ func TestMeasureImageReportsRGBAndAlphaError(t *testing.T) {
 	}
 	if metrics.rgbMAE != 1 || metrics.rgbMaxAbs != 2 || metrics.alphaExact || metrics.exact {
 		t.Fatalf("metrics = %#v", metrics)
+	}
+}
+
+func TestLoadLosslessComparisonFixturesUsesAnonymousCorpusIdentity(t *testing.T) {
+	root := t.TempDir()
+	const privateName = "private-customer-name.jpg"
+	file, err := os.Create(filepath.Join(root, privateName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	img := image.NewNRGBA(image.Rect(0, 0, 8, 6))
+	for y := 0; y < img.Rect.Dy(); y++ {
+		for x := 0; x < img.Rect.Dx(); x++ {
+			img.SetNRGBA(x, y, color.NRGBA{R: uint8(x * 23), G: uint8(y * 31), B: uint8(x*7 + y*11), A: 255})
+		}
+	}
+	if err := jpeg.Encode(file, img, &jpeg.Options{Quality: 90}); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	fixtures, corpus, err := loadLosslessComparisonFixtures(root, "production", "all", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fixtures) != 1 {
+		t.Fatalf("fixtures = %d, want 1", len(fixtures))
+	}
+	if strings.Contains(fixtures[0].name, "private") || len(fixtures[0].name) != 16 {
+		t.Fatalf("fixture name is not anonymous: %q", fixtures[0].name)
+	}
+	if corpus.name != "production" || len(corpus.sha256) != 64 || corpus.split != "all" {
+		t.Fatalf("corpus configuration = %#v", corpus)
 	}
 }

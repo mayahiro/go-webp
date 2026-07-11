@@ -56,10 +56,13 @@ corpus commandは `.local/corpus/production` 配下の画像を匿名化してin
 make compare-lossless ARGS='-runs 3 -mode default -method 4'
 make compare-lossless ARGS='-runs 3 -mode best -method 6'
 make compare-lossless ARGS='-runs 3 -mode near-lossless -quality 75 -method 4'
+make compare-lossless ARGS='-runs 1 -mode best -method 6 -corpus ../.local/corpus/production -split holdout'
 ```
 
 reportにはdecode後のRGB誤差とalpha一致を記録します
 通常のlossless profileではpixel完全一致を必須とします
+private corpusではpixel hash由来の匿名IDを使い、corpus SHA-256だけを表示してsource nameとpathは出力しません
+`ARGS` のpathは `benchmarks` directoryから解決されます
 
 ## ローカルLossy Rate-Distortion比較
 
