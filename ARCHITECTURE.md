@@ -50,6 +50,12 @@ source traversal, while selected plans retain their own immutable tokens.
 `BestCompression` can run an additional cache-aware optimal parse whose cost
 model compares literals, cache hits, and backward references together.
 
+The default profile evaluates one supplemental spatial-predictor path outside
+the main candidate reservoir and keeps the smaller complete plan. This keeps a
+useful structurally different candidate from displacing the baseline shortlist
+or being displaced by it. Standard image types can evaluate these two plans
+concurrently; custom image types keep sequential reads.
+
 The selected `vp8lEncodingPlan` is immutable during emission. The VP8L writer
 serializes transforms and image data from that plan; it does not repeat the
 candidate search. `Fast`, `Balanced`, `BestCompression`, and `LowMemory`

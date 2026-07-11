@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"image"
 	"image/color"
 	"image/jpeg"
@@ -11,6 +12,7 @@ import (
 	"testing"
 
 	webp "github.com/mayahiro/go-webp"
+	"github.com/mayahiro/go-webp/internal/benchmarkbitstream"
 )
 
 // These unit tests do not invoke the optional external cwebp and dwebp binaries
@@ -86,5 +88,76 @@ func TestLoadLosslessComparisonFixturesUsesAnonymousCorpusIdentity(t *testing.T)
 	}
 	if corpus.name != "production" || len(corpus.sha256) != 64 || corpus.split != "all" {
 		t.Fatalf("corpus configuration = %#v", corpus)
+	}
+	if fixtures[0].format != "jpeg" || fixtures[0].split == "" {
+		t.Fatalf("fixture metadata = %#v", fixtures[0])
+	}
+}
+
+func TestAggregateLosslessFixtures(t *testing.T) {
+	fixtures := []losslessFixtureReport{
+		{
+			GoWebP: losslessSample{EncodedBytes: 90, AverageEncodeNS: 10, Layout: benchmarkbitstream.LosslessLayout{LiteralBits: 11}},
+			CWebP:  losslessSample{EncodedBytes: 100, AverageEncodeNS: 4, Layout: benchmarkbitstream.LosslessLayout{LiteralBits: 7}},
+		},
+		{
+			GoWebP: losslessSample{EncodedBytes: 120, AverageEncodeNS: 20, Layout: benchmarkbitstream.LosslessLayout{CopyBits: 13}},
+			CWebP:  losslessSample{EncodedBytes: 100, AverageEncodeNS: 6, Layout: benchmarkbitstream.LosslessLayout{CopyBits: 5}},
+		},
+		{
+			GoWebP: losslessSample{EncodedBytes: 50, AverageEncodeNS: 30},
+			CWebP:  losslessSample{EncodedBytes: 50, AverageEncodeNS: 8},
+		},
+	}
+	got := aggregateLosslessFixtures(fixtures)
+	if got.Files != 3 || got.GoWebPBytes != 260 || got.CWebPBytes != 250 {
+		t.Fatalf("aggregate sizes = %#v", got)
+	}
+	if got.GoSizeDeltaBytes != 10 || got.GoSizeDeltaPct != 4 {
+		t.Fatalf("aggregate delta = %#v", got)
+	}
+	if got.GoAverageEncodeNS != 60 || got.CWebPAverageNS != 18 {
+		t.Fatalf("aggregate time = %#v", got)
+	}
+	if got.GoSmaller != 1 || got.CWebPSmaller != 1 || got.EqualSize != 1 {
+		t.Fatalf("aggregate wins = %#v", got)
+	}
+	if got.GoWebPLayout.LiteralBits != 11 || got.GoWebPLayout.CopyBits != 13 || got.CWebPLayout.LiteralBits != 7 || got.CWebPLayout.CopyBits != 5 {
+		t.Fatalf("aggregate layouts = %#v/%#v", got.GoWebPLayout, got.CWebPLayout)
+	}
+
+	zero := aggregateLosslessFixtures([]losslessFixtureReport{{}})
+	if zero.GoSizeDeltaPct != 0 {
+		t.Fatalf("zero cwebp delta = %v", zero.GoSizeDeltaPct)
+	}
+}
+
+func TestWriteLosslessReport(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nested", "report.json")
+	want := losslessComparisonReport{
+		SchemaVersion: 1,
+		Configuration: losslessReportConfiguration{Corpus: "generated-standard"},
+		Aggregate:     losslessAggregateReport{Files: 1},
+	}
+	if err := writeLosslessReport(path, want); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("report mode = %o, want 600", got)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got losslessComparisonReport
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.SchemaVersion != want.SchemaVersion || got.Configuration.Corpus != want.Configuration.Corpus || got.Aggregate.Files != 1 {
+		t.Fatalf("decoded report = %#v", got)
 	}
 }

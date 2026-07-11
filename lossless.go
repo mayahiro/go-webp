@@ -15,7 +15,7 @@ func encodeLossless(w io.Writer, source encoderSource, mode Mode) error {
 	readPixel := source.pixels()
 	cfg := vp8lEncodingConfigForMode(mode, source.image, readPixel, source.bounds, source.width, source.height)
 	readPixel, cfg, _ = vp8lPrepareEncodingSource(source.image, readPixel, source.bounds, source.width, source.height, cfg)
-	plan := chooseVP8LEncodingPlanForPreparedImage(source.image, readPixel, source.bounds, source.width, source.height, cfg)
+	plan := chooseVP8LEncodingPlanForPreparedImageMode(source.image, readPixel, source.bounds, source.width, source.height, mode, cfg)
 	return writeLosslessVP8L(w, source, readPixel, plan)
 }
 

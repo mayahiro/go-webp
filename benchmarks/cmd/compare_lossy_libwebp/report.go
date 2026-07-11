@@ -12,6 +12,7 @@ type comparisonReport struct {
 	SchemaVersion int                 `json:"schema_version"`
 	Configuration reportConfiguration `json:"configuration"`
 	Fixtures      []fixtureReport     `json:"fixtures"`
+	Aggregate     aggregateReport     `json:"aggregate"`
 }
 
 type reportConfiguration struct {
@@ -68,6 +69,103 @@ type pointMatch struct {
 	SizeDeltaPct   float64  `json:"size_delta_percent"`
 	RGBPSNRDeltaDB *float64 `json:"rgb_psnr_delta_db"`
 	YSSIMDeltaDB   *float64 `json:"y_ssim_delta_db"`
+}
+
+type aggregateReport struct {
+	NominalQuality []aggregatePoint `json:"nominal_quality"`
+	MatchedQuality []aggregatePoint `json:"matched_quality"`
+}
+
+type aggregatePoint struct {
+	GoQuality           int     `json:"go_quality"`
+	Fixtures            int     `json:"fixtures"`
+	GoBytes             int     `json:"go_bytes"`
+	CWebPBytes          int     `json:"cwebp_bytes"`
+	GoSizeDeltaBytes    int     `json:"go_size_delta_bytes"`
+	GoSizeDeltaPct      float64 `json:"go_size_delta_percent"`
+	GoEncodeTotalNS     int64   `json:"go_encode_total_ns"`
+	CWebPProcessTotalNS int64   `json:"cwebp_process_total_ns"`
+	GoSmaller           int     `json:"go_smaller"`
+	CWebPSmaller        int     `json:"cwebp_smaller"`
+	EqualSize           int     `json:"equal_size"`
+	MeanGoYSSIM         float64 `json:"mean_go_y_ssim"`
+	MeanCWebPYSSIM      float64 `json:"mean_cwebp_y_ssim"`
+	MeanYSSIMDelta      float64 `json:"mean_y_ssim_delta"`
+	MeanCWebPQuality    float64 `json:"mean_cwebp_quality"`
+	MinimumCWebPQuality int     `json:"minimum_cwebp_quality"`
+	MaximumCWebPQuality int     `json:"maximum_cwebp_quality"`
+}
+
+func aggregateComparison(fixtures []fixtureReport, qualities []int) aggregateReport {
+	result := aggregateReport{
+		NominalQuality: make([]aggregatePoint, 0, len(qualities)),
+		MatchedQuality: make([]aggregatePoint, 0, len(qualities)),
+	}
+	for _, quality := range qualities {
+		result.NominalQuality = append(result.NominalQuality, aggregateQuality(fixtures, quality, false))
+		result.MatchedQuality = append(result.MatchedQuality, aggregateQuality(fixtures, quality, true))
+	}
+	return result
+}
+
+func aggregateQuality(fixtures []fixtureReport, quality int, matchQuality bool) aggregatePoint {
+	result := aggregatePoint{GoQuality: quality, MinimumCWebPQuality: 101}
+	var cwebpQualityTotal int
+	for _, fixture := range fixtures {
+		goSample, ok := sampleAtQuality(fixture.GoWebP, quality)
+		if !ok {
+			continue
+		}
+		var cwebpSample sample
+		if matchQuality {
+			cwebpSample, ok = nearestQualitySample(goSample, fixture.CWebP)
+		} else {
+			cwebpSample, ok = sampleAtQuality(fixture.CWebP, quality)
+		}
+		if !ok {
+			continue
+		}
+		result.Fixtures++
+		result.GoBytes += goSample.EncodedBytes
+		result.CWebPBytes += cwebpSample.EncodedBytes
+		result.GoEncodeTotalNS += goSample.AverageEncodeNS
+		result.CWebPProcessTotalNS += cwebpSample.AverageEncodeNS
+		result.MeanGoYSSIM += goSample.Distortion.YSSIM
+		result.MeanCWebPYSSIM += cwebpSample.Distortion.YSSIM
+		cwebpQualityTotal += cwebpSample.Quality
+		result.MinimumCWebPQuality = min(result.MinimumCWebPQuality, cwebpSample.Quality)
+		result.MaximumCWebPQuality = max(result.MaximumCWebPQuality, cwebpSample.Quality)
+		switch {
+		case goSample.EncodedBytes < cwebpSample.EncodedBytes:
+			result.GoSmaller++
+		case goSample.EncodedBytes > cwebpSample.EncodedBytes:
+			result.CWebPSmaller++
+		default:
+			result.EqualSize++
+		}
+	}
+	result.GoSizeDeltaBytes = result.GoBytes - result.CWebPBytes
+	if result.CWebPBytes != 0 {
+		result.GoSizeDeltaPct = 100 * float64(result.GoSizeDeltaBytes) / float64(result.CWebPBytes)
+	}
+	if result.Fixtures == 0 {
+		result.MinimumCWebPQuality = 0
+		return result
+	}
+	result.MeanGoYSSIM /= float64(result.Fixtures)
+	result.MeanCWebPYSSIM /= float64(result.Fixtures)
+	result.MeanYSSIMDelta = result.MeanGoYSSIM - result.MeanCWebPYSSIM
+	result.MeanCWebPQuality = float64(cwebpQualityTotal) / float64(result.Fixtures)
+	return result
+}
+
+func sampleAtQuality(samples []sample, quality int) (sample, bool) {
+	for _, value := range samples {
+		if value.Quality == quality {
+			return value, true
+		}
+	}
+	return sample{}, false
 }
 
 func buildMatches(goSamples []sample, cwebpSamples []sample) ([]pointMatch, []pointMatch) {

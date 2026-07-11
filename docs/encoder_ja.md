@@ -97,6 +97,7 @@ lossless encoderはVP8L predictor、color、color indexing、subtract-green、pa
 - tile適応のpredictor modeとcross-color係数
 - 最大32 coding groupsのentropy-clustered meta-prefix histogram
 - cheapなshortlist後にoptimal LZ77、color cache、histogram候補の完全な出力costを比較する2段階planner
+- Default profileでbaselineとは独立して評価し、完全な出力が小さい場合だけ採用する補助spatial-predictor候補
 - finalist候補間で再利用するencode単位のtoken、hash、dynamic-programming workspace
 
 `ModeBestCompression` はcolor-cache hit costをmodelへ含めたoptimal LZ77 parsingを追加実行できます
@@ -146,12 +147,13 @@ encodingでは入力を複数回走査する場合があります
 - bufferを使うlossy profileは推定32 MiBまで量子化済みresidualを保持し、統計と最終codingで再利用できる
 - lossyの再構成pixelはfull-frame planeではなく2 macroblock rowsのringを使う
 - `ModeBestCompression` は独立したlossless候補を最大4 workersで解析でき、並行readの安全性が既知でないcustom画像実装には最大32 MiBの変換済みplaneを使う
+- 標準画像型ではDefault baselineと補助predictor searchを並列実行できる。各branchは独立した上限付きworkspaceを持つため、peak working memoryよりlatencyとencoded sizeを優先する
 - 標準画像型ではlossy frame planningとalpha解析を2 workersで実行できる
 - `ModeLowMemory` はfull-frame source plane、VP8 residual buffer、VP8L token stream、meta-prefix plan、color-cache planを保持しない
 
 buffer上限を超える入力では、上限付きの反復passまたは逐次pathへfallbackします
 標準画像型は可能な場合にdirect readerを使います
-小さい画像、custom画像実装、single-thread runtimeではlossy frameとalphaを逐次解析します
+小さい画像、custom画像実装、single-thread runtimeではlossless候補searchとlossy frame、alphaを逐次解析します
 
 ## 制約
 

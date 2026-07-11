@@ -76,7 +76,7 @@ Paths passed through `ARGS` are resolved from the `benchmarks` directory.
 make compare-lossy ARGS='-runs 3 -go-mode default'
 ```
 
-This command requires `cwebp` and `dwebp`. Its schema-version 3 JSON report
+This command requires `cwebp` and `dwebp`. Its schema-version 4 JSON report
 contains:
 
 - Quality sweeps for go-webp and cwebp
@@ -84,6 +84,7 @@ contains:
 - Encoded size and VP8 partition sizes
 - Encode timing
 - The nearest sampled cwebp points by encoded size and luma SSIM dB
+- Aggregate nominal-quality and quality-matched size and quality summaries
 
 A private local corpus can be selected with `-corpus` and `-split`. Source
 names and paths are omitted from the report. Keep private inputs and reports

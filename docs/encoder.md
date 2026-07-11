@@ -109,6 +109,8 @@ is lower. Its bounded search includes:
 - Entropy-clustered meta-prefix histograms with up to 32 coding groups
 - A two-stage planner that shortlists candidates cheaply before comparing the
   complete emitted cost of optimal LZ77, color-cache, and histogram variants
+- An independent supplemental spatial-predictor candidate for the default
+  profile, selected only when its complete output is smaller than the baseline
 - Encode-scoped token, hash, and dynamic-programming workspaces reused across
   finalist candidates
 
@@ -175,6 +177,9 @@ Encoding can scan the input more than once. Important resource bounds include:
 - `ModeBestCompression` can analyze independent lossless candidates with up
   to four workers; custom image implementations use a converted plane capped
   at 32 MiB when concurrent reads are not known to be safe
+- The default baseline and supplemental predictor search can run concurrently
+  for standard image types. Each branch keeps a separate bounded workspace,
+  so this favors latency and encoded size over peak working memory
 - Standard image types can run lossy frame planning and alpha analysis with
   two workers
 - `ModeLowMemory` avoids the full-frame source plane, VP8 residual buffer,
@@ -183,7 +188,7 @@ Encoding can scan the input more than once. Important resource bounds include:
 Inputs above a buffer limit fall back to a bounded repeated-pass or sequential
 path. Standard image types use direct readers where possible. Small images,
 custom image implementations, and single-threaded runtimes use sequential
-lossy frame and alpha analysis.
+lossless candidate search and sequential lossy frame and alpha analysis.
 
 ## Limits
 

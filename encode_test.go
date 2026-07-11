@@ -334,6 +334,36 @@ func TestVP8LEncodingConfigForMode(t *testing.T) {
 	}
 }
 
+func TestVP8LAddEncodingPlanCandidateReplacesWorstAfterCapacity(t *testing.T) {
+	img := newBenchmarkFixtureImage(lossyBenchmarkCase{kind: benchmarkImagePhotoLike, width: 32, height: 32})
+	readPixel := pixelReaderFor(img)
+	width, height := img.Rect.Dx(), img.Rect.Dy()
+	seed := vp8lEncodingPlan{analysis: analyzeImage(readPixel, img.Bounds())}
+	var candidates [vp8lMaxEncodingPlanCandidates]vp8lEncodingPlan
+	candidateCount := 0
+	literalBestIndex := 0
+	best := vp8lEncodingPlan{}
+	bestBits := ^uint64(0)
+	for range vp8lMaxEncodingPlanCandidates {
+		candidateCount, literalBestIndex, best, bestBits = vp8lAddEncodingPlanCandidate(
+			&candidates, candidateCount, literalBestIndex, seed, width, height, best, bestBits,
+		)
+	}
+	compact := vp8lEncodingPlan{analysis: emptyVP8LLiteralAnalysis()}
+	candidateCount, literalBestIndex, best, bestBits = vp8lAddEncodingPlanCandidate(
+		&candidates, candidateCount, literalBestIndex, compact, width, height, best, bestBits,
+	)
+	if candidateCount != vp8lMaxEncodingPlanCandidates {
+		t.Fatalf("candidate count = %d, want %d", candidateCount, vp8lMaxEncodingPlanCandidates)
+	}
+	if literalBestIndex == 0 || !candidates[literalBestIndex].analysis.allChannelsConstant() {
+		t.Fatalf("best candidate index = %d, want retained compact late candidate", literalBestIndex)
+	}
+	if got := vp8lPayloadBits(width, height, best); got != bestBits {
+		t.Fatalf("best bits = %d, want %d", got, bestBits)
+	}
+}
+
 func TestModeBestCompressionKeepsTransformedLZ77WhenWideColorCacheIsAvailable(t *testing.T) {
 	img := newBenchmarkFixtureImage(lossyBenchmarkCase{kind: benchmarkImagePhotoLike, width: 128, height: 128})
 	readPixel := pixelReaderFor(img)
@@ -384,6 +414,22 @@ func TestVP8LParallelTransformSearchMatchesSequential(t *testing.T) {
 		if !bytes.Equal(parallel.Bytes(), sequential.Bytes()) {
 			t.Fatalf("parallel output = %d bytes, want sequential output %d bytes", parallel.Len(), sequential.Len())
 		}
+	}
+}
+
+func TestVP8LParallelSupplementalSearchMatchesSequential(t *testing.T) {
+	img := newBenchmarkFixtureImage(lossyBenchmarkCase{kind: benchmarkImagePhotoLike, width: 64, height: 64})
+	wrapped := benchmarkImageWrapper{Image: img}
+	var parallel bytes.Buffer
+	if err := Encode(&parallel, img, &Options{Mode: ModeDefault}); err != nil {
+		t.Fatalf("parallel Encode failed: %v", err)
+	}
+	var sequential bytes.Buffer
+	if err := Encode(&sequential, wrapped, &Options{Mode: ModeDefault}); err != nil {
+		t.Fatalf("sequential Encode failed: %v", err)
+	}
+	if !bytes.Equal(parallel.Bytes(), sequential.Bytes()) {
+		t.Fatalf("parallel output = %d bytes, want sequential output %d bytes", parallel.Len(), sequential.Len())
 	}
 }
 
@@ -2459,6 +2505,19 @@ func TestEncodeLosslessUsesMetaPrefixWithColorCache(t *testing.T) {
 	if len(plan.metaPrefix.colorCacheGroups) == 0 {
 		t.Fatal("missing meta prefix color cache groups")
 	}
+	var payload bytes.Buffer
+	bw := bufio.NewWriter(&payload)
+	bits := newBitWriter(bw)
+	writeVP8L(bits, readPixel, img.Bounds(), img.Rect.Dx(), img.Rect.Dy(), plan)
+	if err := bits.flush(); err != nil {
+		t.Fatal(err)
+	}
+	if err := bw.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if want := int((vp8lPayloadBits(img.Rect.Dx(), img.Rect.Dy(), plan) + 7) / 8); payload.Len() != want {
+		t.Fatalf("payload bytes = %d, want %d", payload.Len(), want)
+	}
 
 	data := encodeLosslessPlanForTest(t, img, plan)
 	got, width, height, alpha, err := decodeEncoderOutput(data)
@@ -2478,6 +2537,323 @@ func TestEncodeLosslessUsesMetaPrefixWithColorCache(t *testing.T) {
 				t.Fatalf("pixel (%d,%d) = %#v, want %#v", x, y, got[y*width+x], want)
 			}
 		}
+	}
+}
+
+func TestEncodeLosslessUsesMetaPrefixWithLZ77ColorCache(t *testing.T) {
+	img := newLZ77ColorCacheFixture()
+	readPixel := pixelReaderFor(img)
+	bounds := img.Bounds()
+	width, height := bounds.Dx(), bounds.Dy()
+	base := vp8lEncodingPlan{analysis: analyzeImage(readPixel, bounds)}
+	cfg := vp8lDefaultEncodingConfig()
+	cfg.tryColorCache = false
+	cfg.tryLZ77MetaPrefix = false
+	cfg.tryLZ77TokenMetaPrefix = false
+	lz77Plan, ok := makeVP8LLZ77PlanConfig(readPixel, bounds, width, height, base, ^uint64(0), cfg)
+	if !ok || !lz77Plan.lz77 {
+		t.Fatal("missing VP8L LZ77 plan")
+	}
+	colorCachePlan, ok := makeVP8LLZ77ColorCachePlan(readPixel, bounds, width, width, height, lz77Plan, lz77Plan.lz77Tokens, ^uint64(0))
+	if !ok || colorCachePlan.colorCache == nil {
+		t.Fatal("missing VP8L LZ77 color cache plan")
+	}
+	prefixBits := uint8(vp8lMinMetaPrefixCandidateBits)
+	prefixWidth, prefixHeight := vp8lMetaPrefixImageDimensions(width, height, prefixBits)
+	groupImage := make([]uint16, prefixWidth*prefixHeight)
+	for x := prefixWidth / 2; x < prefixWidth; x++ {
+		groupImage[x] = 1
+	}
+	prefixBounds := image.Rect(0, 0, prefixWidth, prefixHeight)
+	metaPrefix := &vp8lMetaPrefixPlan{
+		prefixBits:    prefixBits,
+		width:         prefixWidth,
+		height:        prefixHeight,
+		image:         groupImage,
+		imageAnalysis: analyzeImage(vp8lMetaPrefixImageReader(groupImage, prefixWidth), prefixBounds),
+		groups:        make([]imageAnalysis, 2),
+	}
+	groups, groupTokens, ok := vp8lBuildMetaPrefixColorCacheGroups(metaPrefix, colorCachePlan.colorCache.tokens, width, width*height, colorCachePlan.analysis, colorCachePlan.colorCache.bits)
+	if !ok {
+		t.Fatal("failed to build VP8L meta-prefix LZ77 color cache groups")
+	}
+	metaPrefix.colorCacheGroups = groups
+	metaPrefix.groupTokens = groupTokens
+	plan := colorCachePlan
+	plan.metaPrefix = metaPrefix
+	hasCopyToken := false
+	hasCacheToken := false
+	for _, token := range plan.colorCache.tokens {
+		hasCopyToken = hasCopyToken || token.copyLength > 0
+		hasCacheToken = hasCacheToken || token.colorCache
+	}
+	if !hasCopyToken || !hasCacheToken {
+		t.Fatalf("mixed token stream: copy=%v cache=%v", hasCopyToken, hasCacheToken)
+	}
+
+	var payload bytes.Buffer
+	bw := bufio.NewWriter(&payload)
+	bits := newBitWriter(bw)
+	writeVP8L(bits, readPixel, bounds, width, height, plan)
+	if err := bits.flush(); err != nil {
+		t.Fatal(err)
+	}
+	if err := bw.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if want := int((vp8lPayloadBits(width, height, plan) + 7) / 8); payload.Len() != want {
+		t.Fatalf("payload bytes = %d, want %d", payload.Len(), want)
+	}
+
+	data := encodeLosslessPlanForTest(t, img, plan)
+	got, decodedWidth, decodedHeight, alpha, err := decodeEncoderOutput(data)
+	if err != nil {
+		t.Fatalf("decodeEncoderOutput failed: %v", err)
+	}
+	if decodedWidth != width || decodedHeight != height || alpha {
+		t.Fatalf("decoded header = %dx%d alpha=%v", decodedWidth, decodedHeight, alpha)
+	}
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			if want := img.NRGBAAt(x, y); got[y*width+x] != want {
+				t.Fatalf("pixel (%d,%d) = %#v, want %#v", x, y, got[y*width+x], want)
+			}
+		}
+	}
+}
+
+func TestVP8LMetaPrefixLZ77ColorCacheAssignsCopyToStartGroup(t *testing.T) {
+	const width = 32
+	img := image.NewNRGBA(image.Rect(0, 0, width, 1))
+	analysis := analyzeImage(pixelReaderFor(img), img.Bounds())
+	metaPrefix := &vp8lMetaPrefixPlan{
+		prefixBits: 4,
+		width:      2,
+		height:     1,
+		image:      []uint16{0, 1},
+		groups:     make([]imageAnalysis, 2),
+	}
+	tokens := make([]vp8lToken, 0, 14)
+	tokens = append(tokens, vp8lToken{pixel: color.NRGBA{A: 255}})
+	tokens = append(tokens, vp8lToken{copyLength: 20, distanceCode: 1})
+	tokens = append(tokens, vp8lToken{colorCache: true, cacheIndex: 0})
+	for range 10 {
+		tokens = append(tokens, vp8lToken{pixel: color.NRGBA{A: 255}})
+	}
+	groups, groupTokens, ok := vp8lBuildMetaPrefixColorCacheGroups(metaPrefix, tokens, width, width, analysis, 4)
+	if !ok {
+		t.Fatal("vp8lBuildMetaPrefixColorCacheGroups returned false")
+	}
+	lengthPrefix := vp8lPrefixCode(20)
+	distancePrefix := vp8lDistancePrefixCode(1)
+	if groups[0].counts[nLiteralCodes+lengthPrefix.code] != 1 || groups[0].distanceCounts[distancePrefix.code] != 1 {
+		t.Fatal("copy token was not assigned to its start group")
+	}
+	if groups[1].counts[nLiteralCodes+lengthPrefix.code] != 0 || groups[1].distanceCounts[distancePrefix.code] != 0 {
+		t.Fatal("copy token leaked into the crossed group")
+	}
+	if groupTokens[0] != 2 || groupTokens[1] != 11 {
+		t.Fatalf("group token counts = %v, want [2 11]", groupTokens)
+	}
+}
+
+func TestVP8LSplitMetaPrefixCopyTokensAtGroupBoundary(t *testing.T) {
+	metaPrefix := &vp8lMetaPrefixPlan{
+		prefixBits: 4,
+		width:      2,
+		height:     1,
+		image:      []uint16{0, 1},
+	}
+	tokens := make([]vp8lToken, 0, 9)
+	for range 4 {
+		tokens = append(tokens, vp8lToken{pixel: color.NRGBA{A: 255}})
+	}
+	tokens = append(tokens, vp8lToken{copyLength: 24, distanceCode: 1})
+	for range 4 {
+		tokens = append(tokens, vp8lToken{pixel: color.NRGBA{A: 255}})
+	}
+	got, ok := vp8lSplitMetaPrefixCopyTokens(tokens, 32, 32, metaPrefix)
+	if !ok {
+		t.Fatal("vp8lSplitMetaPrefixCopyTokens returned false")
+	}
+	if len(got) != len(tokens)+1 || got[4].copyLength != 12 || got[5].copyLength != 12 {
+		t.Fatalf("split tokens = %#v", got)
+	}
+}
+
+func TestVP8LSplitMetaPrefixCopyTokensRejectsShortBoundaryPart(t *testing.T) {
+	metaPrefix := &vp8lMetaPrefixPlan{
+		prefixBits: 4,
+		width:      2,
+		height:     1,
+		image:      []uint16{0, 1},
+	}
+	tokens := make([]vp8lToken, 0, 25)
+	for range 14 {
+		tokens = append(tokens, vp8lToken{pixel: color.NRGBA{A: 255}})
+	}
+	tokens = append(tokens, vp8lToken{copyLength: 8, distanceCode: 1})
+	for range 10 {
+		tokens = append(tokens, vp8lToken{pixel: color.NRGBA{A: 255}})
+	}
+	if _, ok := vp8lSplitMetaPrefixCopyTokens(tokens, 32, 32, metaPrefix); ok {
+		t.Fatal("short boundary part was accepted")
+	}
+}
+
+func TestVP8LMetaPrefixColorCacheTokenLimitKeepsCombinedStreamBounded(t *testing.T) {
+	pure := vp8lEncodingPlan{colorCache: &vp8lColorCachePlan{}}
+	combined := pure
+	combined.lz77 = true
+	if got := vp8lMetaPrefixColorCacheTokenLimit(pure); got != vp8lMaxMetaPrefixColorCacheTokens {
+		t.Fatalf("pure color-cache token limit = %d, want %d", got, vp8lMaxMetaPrefixColorCacheTokens)
+	}
+	if got := vp8lMetaPrefixColorCacheTokenLimit(combined); got != vp8lMaxMetaPrefixLZ77CacheTokens {
+		t.Fatalf("combined LZ77 color-cache token limit = %d, want %d", got, vp8lMaxMetaPrefixLZ77CacheTokens)
+	}
+}
+
+func TestVP8LRefineMetaPrefixColorCacheGroupsMergesLowerCostPair(t *testing.T) {
+	newGroup := func() vp8lColorCacheGroupPlan {
+		group := vp8lColorCacheGroupPlan{counts: make([]uint32, nLiteralCodes+nLengthCodes+2)}
+		group.counts[7] = 32
+		if !vp8lFinalizeColorCacheGroup(&group, imageAnalysis{
+			channels: [4]channelPlan{
+				newConstantChannelPlan(7),
+				newConstantChannelPlan(11),
+				newConstantChannelPlan(13),
+				newConstantChannelPlan(255),
+			},
+		}) {
+			t.Fatal("vp8lFinalizeColorCacheGroup returned false")
+		}
+		return group
+	}
+	groupImage := []uint16{0, 1}
+	metaPrefix := &vp8lMetaPrefixPlan{
+		prefixBits:       4,
+		width:            2,
+		height:           1,
+		image:            groupImage,
+		imageAnalysis:    analyzeImage(vp8lMetaPrefixImageReader(groupImage, 2), image.Rect(0, 0, 2, 1)),
+		groups:           make([]imageAnalysis, 2),
+		colorCacheGroups: []vp8lColorCacheGroupPlan{newGroup(), newGroup()},
+		groupTokens:      []int{32, 32},
+		groupPixels:      []int{32, 32},
+	}
+	before := vp8lImageDataBits(metaPrefix.width, metaPrefix.height, metaPrefix.imageAnalysis, false) + vp8lColorCacheGroupsBits(metaPrefix.colorCacheGroups, false)
+	vp8lRefineMetaPrefixColorCacheGroups(metaPrefix, false)
+	after := vp8lImageDataBits(metaPrefix.width, metaPrefix.height, metaPrefix.imageAnalysis, false) + vp8lColorCacheGroupsBits(metaPrefix.colorCacheGroups, false)
+	if len(metaPrefix.colorCacheGroups) != 1 || after >= before {
+		t.Fatalf("refined groups=%d cost=%d, want one group below %d", len(metaPrefix.colorCacheGroups), after, before)
+	}
+	if got := metaPrefix.image; !slices.Equal(got, []uint16{0, 0}) {
+		t.Fatalf("refined group image = %v", got)
+	}
+}
+
+func TestVP8LMergeColorCacheGroupsPreservesLiteralChannelCount(t *testing.T) {
+	constant := vp8lColorCacheGroupPlan{counts: make([]uint32, nLiteralCodes+nLengthCodes+2)}
+	constant.counts[7] = 32
+	if !vp8lFinalizeColorCacheGroup(&constant, imageAnalysis{
+		channels: [4]channelPlan{
+			newConstantChannelPlan(7),
+			newConstantChannelPlan(11),
+			newConstantChannelPlan(13),
+			newConstantChannelPlan(255),
+		},
+	}) {
+		t.Fatal("finalizing constant group failed")
+	}
+	var variedAnalysis imageAnalysis
+	first := true
+	for i := range 32 {
+		observeVP8LLiteral(&variedAnalysis, &first, color.NRGBA{R: uint8(i & 1), G: 9, B: 17, A: 255})
+	}
+	variedAnalysis.finalizeChannels()
+	varied := vp8lColorCacheGroupPlan{counts: make([]uint32, len(constant.counts))}
+	varied.counts[9] = 32
+	if !vp8lFinalizeColorCacheGroup(&varied, variedAnalysis) {
+		t.Fatal("finalizing varied group failed")
+	}
+	merged, ok := vp8lMergeColorCacheGroups(constant, varied)
+	if !ok {
+		t.Fatal("vp8lMergeColorCacheGroups returned false")
+	}
+	if got := merged.literalAnalysis.channels[1].total; got != 64 {
+		t.Fatalf("merged red token count = %d, want 64", got)
+	}
+}
+
+func TestVP8LColorCacheMergeCostScratchMatchesMaterializedMerge(t *testing.T) {
+	newGroup := func(green uint8, redBase uint8, literals int, copies int) vp8lColorCacheGroupPlan {
+		group := vp8lColorCacheGroupPlan{counts: make([]uint32, nLiteralCodes+nLengthCodes+4)}
+		var analysis imageAnalysis
+		first := true
+		for i := range literals {
+			pixel := color.NRGBA{R: redBase + uint8(i%3), G: green, B: uint8(i % 5), A: 255}
+			observeVP8LLiteral(&analysis, &first, pixel)
+			group.counts[pixel.G]++
+		}
+		analysis.finalizeChannels()
+		if copies > 0 {
+			lengthPrefix := vp8lPrefixCode(8)
+			distancePrefix := vp8lDistancePrefixCode(1)
+			group.counts[nLiteralCodes+lengthPrefix.code] = uint32(copies)
+			group.distanceCounts[distancePrefix.code] = uint32(copies)
+		}
+		if !vp8lFinalizeColorCacheGroup(&group, analysis) {
+			t.Fatal("vp8lFinalizeColorCacheGroup returned false")
+		}
+		return group
+	}
+	a := newGroup(7, 11, 32, 3)
+	b := newGroup(9, 19, 24, 2)
+	scratch := newVP8LColorCacheMergeCostScratch(len(a.counts))
+	got, ok := scratch.mergedGroupBits(a, b, true)
+	if !ok {
+		t.Fatal("mergedGroupBits returned false")
+	}
+	merged, ok := vp8lMergeColorCacheGroups(a, b)
+	if !ok {
+		t.Fatal("vp8lMergeColorCacheGroups returned false")
+	}
+	want := vp8lColorCacheGroupTreeAndDataBits(merged, len(merged.counts), true)
+	if got != want {
+		t.Fatalf("merged group bits = %d, want %d", got, want)
+	}
+}
+
+func TestVP8LMetaPrefixGroupCountCostMatchesImageAnalysis(t *testing.T) {
+	groupImage := []uint16{0, 1, 2, 1, 0, 2, 2, 1}
+	scratch := newVP8LColorCacheMergeCostScratch(nLiteralCodes + nLengthCodes + 2)
+	counts := vp8lMetaPrefixGroupCounts(groupImage, 3)
+	got := scratch.metaPrefixImageBits(counts)
+	want := vp8lImageDataBits(4, 2, analyzeImage(vp8lMetaPrefixImageReader(groupImage, 4), image.Rect(0, 0, 4, 2)), false)
+	if got != want {
+		t.Fatalf("meta-prefix image bits = %d, want %d", got, want)
+	}
+	got = scratch.mergedMetaPrefixImageBits(counts, 0, 2)
+	mergedImage := vp8lMergedHistogramImage(groupImage, 0, 2)
+	want = vp8lImageDataBits(4, 2, analyzeImage(vp8lMetaPrefixImageReader(mergedImage, 4), image.Rect(0, 0, 4, 2)), false)
+	if got != want {
+		t.Fatalf("merged meta-prefix image bits = %d, want %d", got, want)
+	}
+}
+
+func TestVP8LImageAnalysisMergeCostScratchMatchesMaterializedMerge(t *testing.T) {
+	bounds := image.Rect(0, 0, 16, 16)
+	a := analyzeImage(func(x int, y int) color.NRGBA {
+		return color.NRGBA{R: uint8(x*11 + y), G: uint8(x + y*7), B: uint8(x*3 + y*5), A: 255}
+	}, bounds)
+	b := analyzeImage(func(x int, y int) color.NRGBA {
+		return color.NRGBA{R: uint8(x*5 + y*9), G: uint8(x*13 + y), B: uint8(x + y*3), A: uint8(128 + (x+y)%128)}
+	}, bounds)
+	var scratch vp8lImageAnalysisMergeCostScratch
+	got := scratch.mergedTreeAndDataBits(a, b)
+	want := imageAnalysisTreeAndDataBits(a.merge(b), bounds.Dx()*bounds.Dy()*2)
+	if got != want {
+		t.Fatalf("merged analysis bits = %d, want %d", got, want)
 	}
 }
 
@@ -3122,8 +3498,14 @@ func TestEncodeLosslessUsesLZ77AfterCombinedTransforms(t *testing.T) {
 	if !plan.predictor || !plan.subtractGreen || !plan.lz77 {
 		t.Fatalf("plan predictor=%v subtractGreen=%v lz77=%v, want predictor+subtractGreen+LZ77", plan.predictor, plan.subtractGreen, plan.lz77)
 	}
+	if plan.colorCache == nil {
+		t.Fatal("missing color cache after combined transforms and LZ77")
+	}
 	withoutLZ77 := plan
 	withoutLZ77.lz77 = false
+	withoutLZ77.lz77Tokens = nil
+	withoutLZ77.colorCache = nil
+	withoutLZ77.metaPrefix = nil
 	if got, wantMax := vp8lPayloadBits(img.Rect.Dx(), img.Rect.Dy(), plan), vp8lPayloadBits(img.Rect.Dx(), img.Rect.Dy(), withoutLZ77); got >= wantMax {
 		t.Fatalf("combined-transform LZ77 bits = %d, want less than non-LZ77 bits %d", got, wantMax)
 	}
@@ -4609,7 +4991,7 @@ func TestVP8LShouldTryTransformedLZ77ColorCache(t *testing.T) {
 			},
 			lz77Bits: 900,
 			maxBits:  1000,
-			want:     false,
+			want:     true,
 		},
 		{
 			name: "subtract green only",
@@ -4665,25 +5047,6 @@ func TestVP8LShouldTryLZ77ColorCacheSkipsHugeTransformedTokenStream(t *testing.T
 	}
 	if !vp8lShouldTryTransformedLZ77ColorCache(plan, breakdown, vp8lMinTransformedLZ77CacheBits, vp8lMinTransformedLZ77CacheBits) {
 		t.Fatal("test setup no longer satisfies transformed LZ77 color cache cost guard")
-	}
-}
-
-func TestVP8LTransformedLZ77ColorCacheMinSavings(t *testing.T) {
-	tests := []struct {
-		name     string
-		lz77Bits uint64
-		want     uint64
-	}{
-		{name: "fixed floor", lz77Bits: 8192, want: 1024},
-		{name: "relative floor", lz77Bits: 20000, want: 2000},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := vp8lTransformedLZ77ColorCacheMinSavings(tt.lz77Bits); got != tt.want {
-				t.Fatalf("vp8lTransformedLZ77ColorCacheMinSavings = %d, want %d", got, tt.want)
-			}
-		})
 	}
 }
 

@@ -121,6 +121,66 @@ func TestBuildMatchesUsesNearestSizeAndQuality(t *testing.T) {
 	}
 }
 
+func TestAggregateComparisonReportsNominalAndMatchedQuality(t *testing.T) {
+	fixtures := []fixtureReport{
+		{
+			GoWebP: []sample{{
+				Quality:         50,
+				EncodedBytes:    100,
+				AverageEncodeNS: 10,
+				Distortion:      distortionMetrics{YSSIM: 0.9, YSSIMDB: float64Pointer(10)},
+			}},
+			CWebP: []sample{
+				{Quality: 50, EncodedBytes: 90, AverageEncodeNS: 4, Distortion: distortionMetrics{YSSIM: 0.88, YSSIMDB: float64Pointer(9)}},
+				{Quality: 60, EncodedBytes: 110, AverageEncodeNS: 5, Distortion: distortionMetrics{YSSIM: 0.901, YSSIMDB: float64Pointer(10.01)}},
+			},
+		},
+		{
+			GoWebP: []sample{{
+				Quality:         50,
+				EncodedBytes:    200,
+				AverageEncodeNS: 20,
+				Distortion:      distortionMetrics{YSSIM: 0.8, YSSIMDB: float64Pointer(7)},
+			}},
+			CWebP: []sample{
+				{Quality: 40, EncodedBytes: 180, AverageEncodeNS: 6, Distortion: distortionMetrics{YSSIM: 0.799, YSSIMDB: float64Pointer(6.99)}},
+				{Quality: 50, EncodedBytes: 210, AverageEncodeNS: 7, Distortion: distortionMetrics{YSSIM: 0.81, YSSIMDB: float64Pointer(7.2)}},
+			},
+		},
+	}
+
+	got := aggregateComparison(fixtures, []int{50, 75})
+	if len(got.NominalQuality) != 2 || len(got.MatchedQuality) != 2 {
+		t.Fatalf("aggregate lengths = %d/%d", len(got.NominalQuality), len(got.MatchedQuality))
+	}
+	nominal := got.NominalQuality[0]
+	if nominal.Fixtures != 2 || nominal.GoBytes != 300 || nominal.CWebPBytes != 300 || nominal.GoSizeDeltaBytes != 0 {
+		t.Fatalf("nominal aggregate = %#v", nominal)
+	}
+	if nominal.GoSmaller != 1 || nominal.CWebPSmaller != 1 || nominal.GoEncodeTotalNS != 30 || nominal.CWebPProcessTotalNS != 11 {
+		t.Fatalf("nominal counters = %#v", nominal)
+	}
+
+	matched := got.MatchedQuality[0]
+	if matched.CWebPBytes != 290 || matched.GoSizeDeltaBytes != 10 {
+		t.Fatalf("matched sizes = %#v", matched)
+	}
+	if math.Abs(matched.GoSizeDeltaPct-1000.0/290.0) > 1e-12 {
+		t.Fatalf("matched size delta = %v", matched.GoSizeDeltaPct)
+	}
+	if matched.MinimumCWebPQuality != 40 || matched.MaximumCWebPQuality != 60 || matched.MeanCWebPQuality != 50 {
+		t.Fatalf("matched qualities = %#v", matched)
+	}
+	if math.Abs(matched.MeanYSSIMDelta) > 1e-12 {
+		t.Fatalf("matched mean Y SSIM delta = %v", matched.MeanYSSIMDelta)
+	}
+
+	empty := got.MatchedQuality[1]
+	if empty.Fixtures != 0 || empty.MinimumCWebPQuality != 0 || empty.GoSizeDeltaPct != 0 {
+		t.Fatalf("empty aggregate = %#v", empty)
+	}
+}
+
 func TestLoadComparisonFixturesUsesAnonymousCorpusIdentity(t *testing.T) {
 	root := t.TempDir()
 	const privateName = "private-customer-name.jpg"

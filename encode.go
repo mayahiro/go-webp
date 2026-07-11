@@ -20,28 +20,30 @@ const (
 	nLengthCodes   = 24
 	nDistanceCodes = 40
 
-	vp8lMinBackwardRefLength          = 4
-	vp8lMaxBackwardRefLength          = 4096
-	vp8lHashBits                      = 12
-	vp8lHashSize                      = 1 << vp8lHashBits
-	vp8lMinHashCandidates             = 4
-	vp8lMidHashCandidates             = 6
-	vp8lMaxHashCandidates             = 8
-	vp8lLazyMatchMinGain              = 2
-	vp8lMaxDistanceCode               = 1048576
-	vp8lMinColorCacheBits             = 1
-	vp8lMaxColorCacheBits             = 11
-	vp8lMaxColorCacheSize             = 1 << vp8lMaxColorCacheBits
-	vp8lColorCacheSampleSize          = 2048
-	vp8lMinMetaPrefixBits             = 2
-	vp8lMaxMetaPrefixBits             = 9
-	vp8lMinMetaPrefixCandidateBits    = 4
-	vp8lMaxMetaPrefixGroups           = 32
-	vp8lMaxMetaPrefixBlocks           = 4096
-	vp8lMaxMetaPrefixColorCacheTokens = 1 << 18
-	vp8lMaxChannelSmallSymbols        = 16
-	vp8lMaxMaterializedIndexPixels    = 1 << 16
-	vp8lMaxColorCacheGreenCodes       = nLiteralCodes + nLengthCodes + vp8lMaxColorCacheSize
+	vp8lMinBackwardRefLength                = 4
+	vp8lMaxBackwardRefLength                = 4096
+	vp8lHashBits                            = 12
+	vp8lHashSize                            = 1 << vp8lHashBits
+	vp8lMinHashCandidates                   = 4
+	vp8lMidHashCandidates                   = 6
+	vp8lMaxHashCandidates                   = 8
+	vp8lLazyMatchMinGain                    = 2
+	vp8lMaxDistanceCode                     = 1048576
+	vp8lMinColorCacheBits                   = 1
+	vp8lMaxColorCacheBits                   = 11
+	vp8lMaxColorCacheSize                   = 1 << vp8lMaxColorCacheBits
+	vp8lColorCacheSampleSize                = 2048
+	vp8lMinMetaPrefixBits                   = 2
+	vp8lMaxMetaPrefixBits                   = 9
+	vp8lMinMetaPrefixCandidateBits          = 4
+	vp8lMaxMetaPrefixGroups                 = 32
+	vp8lMaxMetaPrefixBlocks                 = 4096
+	vp8lMaxMetaPrefixColorCacheTokens       = 1 << 19
+	vp8lMaxMetaPrefixLZ77CacheTokens        = 1 << 19
+	vp8lMaxUnsplitMetaPrefixLZ77CacheTokens = 1 << 18
+	vp8lMaxChannelSmallSymbols              = 16
+	vp8lMaxMaterializedIndexPixels          = 1 << 16
+	vp8lMaxColorCacheGreenCodes             = nLiteralCodes + nLengthCodes + vp8lMaxColorCacheSize
 )
 
 // Compression selects the WebP bitstream written by Encode.
@@ -308,6 +310,12 @@ type vp8lColorCacheGroupPlan struct {
 	counts          []uint32
 	lengths         []uint8
 	codes           []uint16
+	distanceCounts  [nDistanceCodes]uint32
+	distanceN       int
+	distanceSymbols [2]uint8
+	distanceLengths [nDistanceCodes]uint8
+	distanceCodes   [nDistanceCodes]uint16
+	distanceNormal  bool
 }
 
 type vp8lLZ77GroupPlan struct {
@@ -592,12 +600,30 @@ func chooseVP8LEncodingPlanForImageConfig(m image.Image, readPixel pixelReader, 
 }
 
 func chooseVP8LEncodingPlanForImageMode(m image.Image, readPixel pixelReader, bounds image.Rectangle, width int, height int, mode Mode) vp8lEncodingPlan {
-	return chooseVP8LEncodingPlanForImageWithConfig(m, readPixel, bounds, width, height, vp8lEncodingConfigForMode(mode, m, readPixel, bounds, width, height))
+	cfg := vp8lEncodingConfigForMode(mode, m, readPixel, bounds, width, height)
+	readPixel, cfg, _ = vp8lPrepareEncodingSource(m, readPixel, bounds, width, height, cfg)
+	return chooseVP8LEncodingPlanForPreparedImageMode(m, readPixel, bounds, width, height, mode, cfg)
 }
 
 func chooseVP8LEncodingPlanForImageWithConfig(m image.Image, readPixel pixelReader, bounds image.Rectangle, width int, height int, cfg vp8lEncodingConfig) vp8lEncodingPlan {
 	readPixel, cfg, _ = vp8lPrepareEncodingSource(m, readPixel, bounds, width, height, cfg)
 	return chooseVP8LEncodingPlanForPreparedImage(m, readPixel, bounds, width, height, cfg)
+}
+
+func chooseVP8LEncodingPlanForPreparedImageMode(m image.Image, readPixel pixelReader, bounds image.Rectangle, width int, height int, mode Mode, cfg vp8lEncodingConfig) vp8lEncodingPlan {
+	if mode == ModeDefault {
+		return vp8lChooseDefaultEncodingPlan(m, readPixel, bounds, width, height, cfg)
+	}
+	plan := chooseVP8LEncodingPlanForPreparedImage(m, readPixel, bounds, width, height, cfg)
+	if mode != ModeBestCompression {
+		return plan
+	}
+	defaultConfig := vp8lDefaultEncodingConfig()
+	defaultPlan := vp8lChooseDefaultEncodingPlan(m, readPixel, bounds, width, height, defaultConfig)
+	if vp8lPayloadBits(width, height, defaultPlan) < vp8lPayloadBits(width, height, plan) {
+		return defaultPlan
+	}
+	return plan
 }
 
 func chooseVP8LEncodingPlanForPreparedImage(m image.Image, readPixel pixelReader, bounds image.Rectangle, width int, height int, cfg vp8lEncodingConfig) vp8lEncodingPlan {
@@ -778,6 +804,7 @@ func vp8lDefaultEncodingConfig() vp8lEncodingConfig {
 		useLZ77MatchGraph:               true,
 		finalLZ77Candidates:             3,
 		finalLiteralCandidates:          2,
+		tryFinalColorCacheMetaPrefix:    true,
 	}
 }
 
@@ -1006,19 +1033,40 @@ func vp8lFinalizeEncodingPlan(readPixel pixelReader, bounds image.Rectangle, wid
 }
 
 func vp8lAddEncodingPlanCandidate(candidates *[vp8lMaxEncodingPlanCandidates]vp8lEncodingPlan, candidateCount int, literalBestIndex int, candidate vp8lEncodingPlan, width int, height int, best vp8lEncodingPlan, bestBits uint64) (int, int, vp8lEncodingPlan, uint64) {
-	if candidateCount >= len(candidates) {
-		return candidateCount, literalBestIndex, best, bestBits
-	}
-	candidateIndex := candidateCount
-	candidates[candidateIndex] = candidate
-	candidateCount++
 	candidateBits := vp8lPayloadBits(width, height, candidate)
+	candidateIndex := candidateCount
+	if candidateCount >= len(candidates) {
+		candidateIndex = vp8lWorstReplaceableCandidate(candidates, literalBestIndex, width, height)
+		if candidateIndex < 0 || candidateBits >= vp8lPayloadBits(width, height, candidates[candidateIndex]) {
+			return candidateCount, literalBestIndex, best, bestBits
+		}
+	} else {
+		candidateCount++
+	}
+	candidates[candidateIndex] = candidate
 	if candidateBits < bestBits {
 		best = candidate
 		bestBits = candidateBits
 		literalBestIndex = candidateIndex
 	}
 	return candidateCount, literalBestIndex, best, bestBits
+}
+
+func vp8lWorstReplaceableCandidate(candidates *[vp8lMaxEncodingPlanCandidates]vp8lEncodingPlan, literalBestIndex int, width int, height int) int {
+	worstIndex := -1
+	var worstBits uint64
+	for i := range candidates {
+		candidate := candidates[i]
+		if i == 0 || i == literalBestIndex || candidate.colorIndexing || candidate.baselineCandidate {
+			continue
+		}
+		candidateBits := vp8lPayloadBits(width, height, candidate)
+		if worstIndex < 0 || candidateBits > worstBits {
+			worstIndex = i
+			worstBits = candidateBits
+		}
+	}
+	return worstIndex
 }
 
 func vp8lShouldTryCombinedTransform(candidateBits uint64, bestBits uint64) bool {
@@ -1803,18 +1851,63 @@ func vp8lMetaPrefixColorCacheImageDataBits(plan vp8lEncodingPlan) uint64 {
 	bits += 1 + 3 // meta prefix image present, prefix bits
 	bits += vp8lImageDataBits(metaPrefix.width, metaPrefix.height, metaPrefix.imageAnalysis, false)
 	for _, group := range metaPrefix.colorCacheGroups {
-		bits += alphaNormalTreeBits(group.lengths[:greenLimit])
-		literalCount := int(vp8lColorCacheGroupLiteralTokenCount(group))
-		bits += channelTreeAndDataBits(group.literalAnalysis.channels[1], nLiteralCodes, literalCount)
-		bits += channelTreeAndDataBits(group.literalAnalysis.channels[2], nLiteralCodes, literalCount)
-		bits += channelTreeAndDataBits(group.literalAnalysis.channels[3], nLiteralCodes, literalCount)
+		bits += vp8lColorCacheGroupTreeAndDataBits(group, greenLimit, plan.lz77)
+	}
+	return bits
+}
+
+func vp8lColorCacheGroupTreeAndDataBits(group vp8lColorCacheGroupPlan, greenLimit int, lz77 bool) uint64 {
+	bits := alphaNormalTreeBits(group.lengths[:greenLimit])
+	literalCount := int(vp8lColorCacheGroupLiteralTokenCount(group))
+	bits += channelTreeAndDataBits(group.literalAnalysis.channels[1], nLiteralCodes, literalCount)
+	bits += channelTreeAndDataBits(group.literalAnalysis.channels[2], nLiteralCodes, literalCount)
+	bits += channelTreeAndDataBits(group.literalAnalysis.channels[3], nLiteralCodes, literalCount)
+	if lz77 {
+		bits += vp8lColorCacheGroupDistanceTreeBits(group)
+	} else {
 		bits += simpleTreeBits(0)
-		for symbol, count := range group.counts[:greenLimit] {
-			if count == 0 {
-				continue
-			}
-			bits += uint64(count) * uint64(group.lengths[symbol])
+	}
+	for symbol, count := range group.counts[:greenLimit] {
+		if count == 0 {
+			continue
 		}
+		bits += uint64(count) * uint64(group.lengths[symbol])
+		if symbol >= nLiteralCodes && symbol < nLiteralCodes+nLengthCodes {
+			bits += uint64(count) * uint64(vp8lLengthPrefixExtraBits(symbol-nLiteralCodes))
+		}
+	}
+	if lz77 {
+		bits += vp8lColorCacheGroupDistanceDataBits(group)
+	}
+	return bits
+}
+
+func vp8lColorCacheGroupDistanceTreeBits(group vp8lColorCacheGroupPlan) uint64 {
+	if group.distanceNormal {
+		return alphaNormalTreeBits(group.distanceLengths[:])
+	}
+	switch group.distanceN {
+	case 1:
+		return simpleTreeBits(group.distanceSymbols[0])
+	case 2:
+		return alphaTwoSymbolTreeBits(group.distanceSymbols[0])
+	default:
+		return simpleTreeBits(0)
+	}
+}
+
+func vp8lColorCacheGroupDistanceDataBits(group vp8lColorCacheGroupPlan) uint64 {
+	var bits uint64
+	for symbol, count := range group.distanceCounts {
+		if count == 0 {
+			continue
+		}
+		if group.distanceNormal {
+			bits += uint64(count) * uint64(group.distanceLengths[symbol])
+		} else if group.distanceN == 2 {
+			bits += uint64(count)
+		}
+		bits += uint64(count) * uint64(vp8lPrefixExtraBits(symbol))
 	}
 	return bits
 }
@@ -2849,7 +2942,7 @@ func vp8lTokenMetaPrefixCandidateBits(width int, height int) (uint8, bool) {
 }
 
 func makeVP8LMetaPrefixColorCachePlan(readPixel pixelReader, bounds image.Rectangle, width int, height int, base vp8lEncodingPlan, tokens []vp8lToken, maxBits uint64) (vp8lEncodingPlan, bool) {
-	if base.colorCache == nil || base.lz77 || base.colorIndexing || len(tokens) == 0 || len(tokens) > vp8lMaxMetaPrefixColorCacheTokens {
+	if base.colorCache == nil || base.colorIndexing || len(tokens) == 0 || len(tokens) > vp8lMetaPrefixColorCacheTokenLimit(base) {
 		return vp8lEncodingPlan{}, false
 	}
 	bestBits := maxBits
@@ -2871,6 +2964,13 @@ func makeVP8LMetaPrefixColorCachePlan(readPixel pixelReader, bounds image.Rectan
 	return best, found
 }
 
+func vp8lMetaPrefixColorCacheTokenLimit(plan vp8lEncodingPlan) int {
+	if plan.lz77 {
+		return vp8lMaxMetaPrefixLZ77CacheTokens
+	}
+	return vp8lMaxMetaPrefixColorCacheTokens
+}
+
 func makeVP8LMetaPrefixPlanForBits(readPixel pixelReader, bounds image.Rectangle, width int, height int, base vp8lEncodingPlan, prefixBits uint8) (vp8lEncodingPlan, bool) {
 	prefixWidth, prefixHeight := vp8lMetaPrefixImageDimensions(width, height, prefixBits)
 	prefixBlocks := prefixWidth * prefixHeight
@@ -2881,6 +2981,7 @@ func makeVP8LMetaPrefixPlanForBits(readPixel pixelReader, bounds image.Rectangle
 	groupImage := make([]uint16, prefixBlocks)
 	groups := make([]imageAnalysis, 0, minInt(prefixBlocks, vp8lMaxMetaPrefixGroups))
 	groupPixels := make([]int, 0, minInt(prefixBlocks, vp8lMaxMetaPrefixGroups))
+	var mergeCostScratch vp8lImageAnalysisMergeCostScratch
 	for by := 0; by < prefixHeight; by++ {
 		for bx := 0; bx < prefixWidth; bx++ {
 			analysis := analyzeVP8LMetaPrefixBlock(readPixel, bounds, width, height, prefixBits, bx, by)
@@ -2894,7 +2995,7 @@ func makeVP8LMetaPrefixPlanForBits(readPixel pixelReader, bounds image.Rectangle
 			}
 			if groupIndex >= 0 {
 				groupPixels[groupIndex] += blockPixels
-			} else if mergeIndex, merged, mergeDelta, ok := vp8lBestMetaPrefixGroupMerge(groups, groupPixels, analysis, blockPixels); ok && (mergeDelta <= 0 || len(groups) >= vp8lMaxMetaPrefixGroups) {
+			} else if mergeIndex, merged, mergeDelta, ok := vp8lBestMetaPrefixGroupMerge(groups, groupPixels, analysis, blockPixels, &mergeCostScratch); ok && (mergeDelta <= 0 || len(groups) >= vp8lMaxMetaPrefixGroups) {
 				groupIndex = mergeIndex
 				groups[groupIndex] = merged
 				groupPixels[groupIndex] += blockPixels
@@ -2936,13 +3037,80 @@ func makeVP8LMetaPrefixColorCachePlanForBits(readPixel pixelReader, bounds image
 	if !ok {
 		return vp8lEncodingPlan{}, false
 	}
+	if base.lz77 && len(tokens) > vp8lMaxUnsplitMetaPrefixLZ77CacheTokens {
+		tokens, ok = vp8lSplitMetaPrefixCopyTokens(tokens, width, width*height, candidate.metaPrefix)
+		if !ok {
+			return vp8lEncodingPlan{}, false
+		}
+		colorCache := *candidate.colorCache
+		colorCache.tokens = tokens
+		candidate.colorCache = &colorCache
+	}
 	colorCacheGroups, groupTokens, ok := vp8lBuildMetaPrefixColorCacheGroups(candidate.metaPrefix, tokens, width, width*height, base.analysis, base.colorCache.bits)
 	if !ok {
 		return vp8lEncodingPlan{}, false
 	}
 	candidate.metaPrefix.colorCacheGroups = colorCacheGroups
 	candidate.metaPrefix.groupTokens = groupTokens
+	vp8lRefineMetaPrefixColorCacheGroups(candidate.metaPrefix, base.lz77)
 	return candidate, true
+}
+
+func vp8lSplitMetaPrefixCopyTokens(tokens []vp8lToken, width int, total int, metaPrefix *vp8lMetaPrefixPlan) ([]vp8lToken, bool) {
+	if width <= 0 || total <= 0 || metaPrefix == nil {
+		return nil, false
+	}
+	result := make([]vp8lToken, 0, len(tokens))
+	blockSize := 1 << metaPrefix.prefixBits
+	pos := 0
+	for _, token := range tokens {
+		if pos >= total {
+			return nil, false
+		}
+		if token.copyLength == 0 {
+			result = append(result, token)
+			pos++
+			continue
+		}
+		if token.copyLength < vp8lMinBackwardRefLength || pos+token.copyLength > total {
+			return nil, false
+		}
+		segmentStart := pos
+		end := pos + token.copyLength
+		cursor := pos
+		for cursor < end {
+			x := cursor % width
+			toBlockBoundary := blockSize - x&(blockSize-1)
+			toRowBoundary := width - x
+			step := minInt(toBlockBoundary, toRowBoundary)
+			boundary := cursor + step
+			if boundary >= end {
+				break
+			}
+			beforeGroup := vp8lMetaPrefixGroupAt(metaPrefix, (boundary-1)%width, (boundary-1)/width)
+			afterGroup := vp8lMetaPrefixGroupAt(metaPrefix, boundary%width, boundary/width)
+			if beforeGroup != afterGroup {
+				segmentLength := boundary - segmentStart
+				remaining := end - boundary
+				if segmentLength < vp8lMinBackwardRefLength || remaining < vp8lMinBackwardRefLength {
+					return nil, false
+				}
+				part := token
+				part.copyLength = segmentLength
+				result = append(result, part)
+				segmentStart = boundary
+			}
+			cursor = boundary
+		}
+		part := token
+		part.copyLength = end - segmentStart
+		result = append(result, part)
+		pos = end
+	}
+	if pos != total {
+		return nil, false
+	}
+	return result, true
 }
 
 func vp8lBuildMetaPrefixColorCacheGroups(metaPrefix *vp8lMetaPrefixPlan, tokens []vp8lToken, width int, total int, baseAnalysis imageAnalysis, bits uint8) ([]vp8lColorCacheGroupPlan, []int, bool) {
@@ -2956,7 +3124,7 @@ func vp8lBuildMetaPrefixColorCacheGroups(metaPrefix *vp8lMetaPrefixPlan, tokens 
 	}
 	pos := 0
 	for _, token := range tokens {
-		if pos >= total || token.copyLength > 0 {
+		if pos >= total {
 			return nil, nil, false
 		}
 		groupIndex := vp8lMetaPrefixGroupAt(metaPrefix, pos%width, pos/width)
@@ -2965,6 +3133,17 @@ func vp8lBuildMetaPrefixColorCacheGroups(metaPrefix *vp8lMetaPrefixPlan, tokens 
 		}
 		group := &colorCacheGroups[groupIndex]
 		groupTokens[groupIndex]++
+		if token.copyLength > 0 {
+			if token.copyLength < vp8lMinBackwardRefLength || pos+token.copyLength > total {
+				return nil, nil, false
+			}
+			lengthPrefix := vp8lPrefixCode(token.copyLength)
+			distancePrefix := vp8lDistancePrefixCode(token.distanceCode)
+			group.counts[nLiteralCodes+lengthPrefix.code]++
+			group.distanceCounts[distancePrefix.code]++
+			pos += token.copyLength
+			continue
+		}
 		if token.colorCache {
 			group.counts[nLiteralCodes+nLengthCodes+token.cacheIndex]++
 			pos++
@@ -2988,6 +3167,15 @@ func vp8lBuildMetaPrefixColorCacheGroups(metaPrefix *vp8lMetaPrefixPlan, tokens 
 		colorCacheGroups[i].literalAnalysis = observers[i].result()
 		colorCacheGroups[i].lengths = greenLengths
 		colorCacheGroups[i].codes = canonicalColorCacheCodes(greenLengths)
+		distanceN, distanceSymbols, distanceLengths, distanceCodes, distanceNormal, ok := vp8lDistanceCodeFor(colorCacheGroups[i].distanceCounts)
+		if !ok && !vp8lDistanceCountsEmpty(colorCacheGroups[i].distanceCounts) {
+			return nil, nil, false
+		}
+		colorCacheGroups[i].distanceN = distanceN
+		colorCacheGroups[i].distanceSymbols = distanceSymbols
+		colorCacheGroups[i].distanceLengths = distanceLengths
+		colorCacheGroups[i].distanceCodes = distanceCodes
+		colorCacheGroups[i].distanceNormal = distanceNormal
 	}
 	return colorCacheGroups, groupTokens, true
 }
@@ -3117,29 +3305,27 @@ func vp8lMetaPrefixBlockPixelCount(width int, height int, prefixBits uint8, bx i
 	return (x1 - x0) * (y1 - y0)
 }
 
-func vp8lBestMetaPrefixGroupMerge(groups []imageAnalysis, groupPixels []int, block imageAnalysis, blockPixels int) (int, imageAnalysis, int64, bool) {
+func vp8lBestMetaPrefixGroupMerge(groups []imageAnalysis, groupPixels []int, block imageAnalysis, blockPixels int, scratch *vp8lImageAnalysisMergeCostScratch) (int, imageAnalysis, int64, bool) {
 	bestIndex := -1
 	bestDelta := int64(0)
-	var bestMerged imageAnalysis
 	for i, group := range groups {
-		merged := group.merge(block)
-		delta := vp8lMetaPrefixGroupMergeDelta(group, groupPixels[i], block, blockPixels, merged)
+		before := vp8lMetaPrefixGroupBits(group, groupPixels[i]) + vp8lMetaPrefixGroupBits(block, blockPixels)
+		after := scratch.mergedTreeAndDataBits(group, block)
+		var delta int64
+		if after < before {
+			delta = -int64(before - after)
+		} else {
+			delta = int64(after - before)
+		}
 		if bestIndex < 0 || delta < bestDelta {
 			bestIndex = i
 			bestDelta = delta
-			bestMerged = merged
 		}
 	}
-	return bestIndex, bestMerged, bestDelta, bestIndex >= 0
-}
-
-func vp8lMetaPrefixGroupMergeDelta(group imageAnalysis, groupPixels int, block imageAnalysis, blockPixels int, merged imageAnalysis) int64 {
-	before := vp8lMetaPrefixGroupBits(group, groupPixels) + vp8lMetaPrefixGroupBits(block, blockPixels)
-	after := vp8lMetaPrefixGroupBits(merged, groupPixels+blockPixels)
-	if after >= before {
-		return int64(after - before)
+	if bestIndex < 0 {
+		return -1, imageAnalysis{}, 0, false
 	}
-	return -int64(before - after)
+	return bestIndex, groups[bestIndex].merge(block), bestDelta, true
 }
 
 func vp8lMetaPrefixGroupBits(analysis imageAnalysis, pixels int) uint64 {
@@ -3396,15 +3582,7 @@ func makeVP8LLZ77PlanConfigCandidateCountPrepared(source vp8lLZ77Source, width i
 		found = true
 	}
 	if cfg.tryColorCache && vp8lShouldTryLZ77ColorCacheConfig(base, width, height, lz77Bits, maxBits, tokenCount, cfg) {
-		colorCacheMaxBits := bestBits
-		if vp8lPlanUsesTransform(base) {
-			minSavings := vp8lTransformedLZ77ColorCacheMinSavings(bestBits)
-			if colorCacheMaxBits <= minSavings {
-				return best, bestBits, found
-			}
-			colorCacheMaxBits -= minSavings
-		}
-		if colorCachePlan, ok := makeVP8LLZ77ColorCachePlan(read, mainBounds, mainWidth, width, height, base, lz77Tokens, colorCacheMaxBits); ok {
+		if colorCachePlan, ok := makeVP8LLZ77ColorCachePlan(read, mainBounds, mainWidth, width, height, base, lz77Tokens, bestBits); ok {
 			if cfg.tryOptimalLZ77ColorCache && total <= cfg.maxOptimalLZ77Pixels && candidateCount == vp8lOptimalLZ77CandidateCount(total) {
 				if optimized, improved := vp8lOptimizeLZ77ColorCachePlan(source, width, height, literalBase, colorCachePlan, candidateCount, cfg.optimalLZ77Passes, workspace, cfg.optimalLZ77Passes); improved {
 					colorCachePlan = optimized
@@ -3413,6 +3591,12 @@ func makeVP8LLZ77PlanConfigCandidateCountPrepared(source vp8lLZ77Source, width i
 			best = colorCachePlan
 			bestBits = vp8lPayloadBits(width, height, best)
 			found = true
+			if cfg.tryLZ77MetaPrefix && len(colorCachePlan.colorCache.tokens) <= vp8lMetaPrefixColorCacheTokenLimit(colorCachePlan) {
+				if metaPrefixPlan, metaOK := makeVP8LMetaPrefixColorCachePlan(read, mainBounds, mainWidth, mainHeight, colorCachePlan, colorCachePlan.colorCache.tokens, bestBits); metaOK {
+					best = metaPrefixPlan
+					bestBits = vp8lPayloadBits(width, height, best)
+				}
+			}
 		}
 	}
 	if cfg.tryLZ77MetaPrefix && lz77Bits < maxBits && tokenCount <= cfg.maxMetaPrefixLZ77Tokens {
@@ -3467,13 +3651,13 @@ func vp8lShouldTryLZ77ColorCacheConfig(base vp8lEncodingPlan, width int, height 
 }
 
 func vp8lShouldTryTransformedLZ77ColorCache(base vp8lEncodingPlan, breakdown vp8lPayloadBitBreakdown, lz77Bits uint64, maxBits uint64) bool {
-	if vp8lPlanTransformCount(base) != 1 {
+	if !vp8lPlanUsesTransform(base) || base.colorIndexing {
 		return false
 	}
 	if !base.predictor && !base.colorTransform {
 		return false
 	}
-	if base.colorTransform && !vp8lColorTransformResidualLikelyHelpsLZ77ColorCache(base.analysis) {
+	if base.colorTransform && !base.predictor && !vp8lColorTransformResidualLikelyHelpsLZ77ColorCache(base.analysis) {
 		return false
 	}
 	if lz77Bits > maxBits {
@@ -3502,15 +3686,6 @@ func vp8lCheapColorResidualChannel(ch channelPlan) bool {
 
 func vp8lTransformedLZ77ColorCacheTrialSlack(maxBits uint64) uint64 {
 	return maxBits/8 + 4096
-}
-
-func vp8lTransformedLZ77ColorCacheMinSavings(lz77Bits uint64) uint64 {
-	const minBits = 1024
-	relativeBits := lz77Bits / 10
-	if relativeBits > minBits {
-		return relativeBits
-	}
-	return minBits
 }
 
 func vp8lShouldTryLZ77(readPixel pixelReader, bounds image.Rectangle, width int) bool {
@@ -4430,7 +4605,11 @@ func writeVP8LMetaPrefixColorCacheImageData(bits *bitWriter, width int, plan vp8
 		writeChannelTree(bits, group.literalAnalysis.channels[1], nLiteralCodes)
 		writeChannelTree(bits, group.literalAnalysis.channels[2], nLiteralCodes)
 		writeChannelTree(bits, group.literalAnalysis.channels[3], nLiteralCodes)
-		writeSimpleTree(bits, 0)
+		if plan.lz77 {
+			writeVP8LColorCacheGroupDistanceTree(bits, group)
+		} else {
+			writeSimpleTree(bits, 0)
+		}
 	}
 
 	groupUseNormal := make([][4]bool, len(metaPrefix.colorCacheGroups))
@@ -4442,18 +4621,60 @@ func writeVP8LMetaPrefixColorCacheImageData(bits *bitWriter, width int, plan vp8
 			channelUseNormal(group.literalAnalysis.channels[3], nLiteralCodes),
 		}
 	}
-	for pos, token := range colorCache.tokens {
+	pos := 0
+	for _, token := range colorCache.tokens {
 		groupIndex := vp8lMetaPrefixGroupAt(metaPrefix, pos%width, pos/width)
 		group := metaPrefix.colorCacheGroups[groupIndex]
 		useNormal := groupUseNormal[groupIndex]
+		if token.copyLength > 0 {
+			prefix := vp8lPrefixCode(token.copyLength)
+			distancePrefix := vp8lDistancePrefixCode(token.distanceCode)
+			writeVP8LHuffmanSymbol(bits, group.codes[:greenLimit], group.lengths[:greenLimit], nLiteralCodes+prefix.code)
+			bits.writeBits(prefix.extra, prefix.extraBits)
+			writeVP8LColorCacheGroupDistanceSymbol(bits, group, distancePrefix.code)
+			bits.writeBits(distancePrefix.extra, distancePrefix.extraBits)
+			pos += token.copyLength
+			continue
+		}
 		if token.colorCache {
 			writeVP8LHuffmanSymbol(bits, group.codes[:greenLimit], group.lengths[:greenLimit], nLiteralCodes+nLengthCodes+token.cacheIndex)
+			pos++
 			continue
 		}
 		writeVP8LHuffmanSymbol(bits, group.codes[:greenLimit], group.lengths[:greenLimit], int(token.pixel.G))
 		writeChannelSymbolSelected(bits, group.literalAnalysis.channels[1], useNormal[1], token.pixel.R)
 		writeChannelSymbolSelected(bits, group.literalAnalysis.channels[2], useNormal[2], token.pixel.B)
 		writeChannelSymbolSelected(bits, group.literalAnalysis.channels[3], useNormal[3], token.pixel.A)
+		pos++
+	}
+}
+
+func writeVP8LColorCacheGroupDistanceTree(bits *bitWriter, group vp8lColorCacheGroupPlan) {
+	if group.distanceNormal {
+		writeAlphaNormalTree(bits, group.distanceLengths[:])
+		return
+	}
+	switch group.distanceN {
+	case 1:
+		writeSimpleTree(bits, group.distanceSymbols[0])
+	case 2:
+		writeTwoSymbolTree(bits, group.distanceSymbols[0], group.distanceSymbols[1])
+	default:
+		writeSimpleTree(bits, 0)
+	}
+}
+
+func writeVP8LColorCacheGroupDistanceSymbol(bits *bitWriter, group vp8lColorCacheGroupPlan, symbol int) {
+	if group.distanceNormal {
+		writeVP8LHuffmanSymbol(bits, group.distanceCodes[:], group.distanceLengths[:], symbol)
+		return
+	}
+	if group.distanceN == 2 {
+		if symbol == int(group.distanceSymbols[0]) {
+			bits.writeBits(0, 1)
+		} else {
+			bits.writeBits(1, 1)
+		}
 	}
 }
 

@@ -91,7 +91,7 @@ func run() error {
 	}
 
 	report := comparisonReport{
-		SchemaVersion: 3,
+		SchemaVersion: 4,
 		Configuration: reportConfiguration{
 			Runs:               *runs,
 			Qualities:          qualities,
@@ -146,6 +146,7 @@ func run() error {
 		fixtureResult.MatchedSize, fixtureResult.MatchedQuality = buildMatches(fixtureResult.GoWebP, fixtureResult.CWebP)
 		report.Fixtures = append(report.Fixtures, fixtureResult)
 	}
+	report.Aggregate = aggregateComparison(report.Fixtures, qualities)
 	return writeReport(*jsonPath, report)
 }
 

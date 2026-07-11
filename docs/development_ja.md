@@ -71,13 +71,14 @@ make compare-lossy ARGS='-runs 3 -go-mode default'
 ```
 
 このコマンドには `cwebp` と `dwebp` が必要です
-schema version 3のJSON reportには次を記録します
+schema version 4のJSON reportには次を記録します
 
 - go-webpとcwebpのquality sweep
 - decode後のRGB、YUV、alpha、7x7 weighted luma SSIM
 - encoded sizeとVP8 partition size
 - encode時間
 - encoded sizeとluma SSIM dBが最も近いcwebp sample
+- nominal qualityおよびquality-matchedのaggregate size、quality summary
 
 `-corpus` と `-split` で非公開のlocal corpusを選択できます
 reportにはsourceのnameとpathを記録しません
