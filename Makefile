@@ -53,7 +53,7 @@ bench-lossless:
 	$(GO) -C benchmarks test ./encode -run '^$$' -bench '^BenchmarkEncodeLosslessFixtures$$' -benchmem -benchtime=3x -count=3 $(BENCH_ARGS)
 
 verify-external:
-	$(GO) run ./scripts/verify_lossless_external $(ARGS)
+	$(GO) -C benchmarks run ./cmd/verify_lossless_external $(ARGS)
 
 compare-lossy:
 	$(GO) -C benchmarks run ./cmd/compare_lossy_libwebp $(ARGS)

@@ -80,9 +80,10 @@ and does not depend on libwebp or cgo at runtime.
 
 The repository root is the published encoder module. The nested `benchmarks`
 module contains the public-API performance suite, generated comparison
-fixtures, corpus tooling, and optional libwebp comparison commands. Its local
-`replace` directive always benchmarks the current root checkout without adding
-development dependencies to the published module graph.
+fixtures, corpus tooling, external decoder verification, and optional libwebp
+comparison commands. Its local `replace` directive always targets the
+current root checkout without adding development dependencies to the published
+module graph.
 
 White-box benchmarks and ablation tests that require unexported encoder
 configuration remain in the root package. This keeps implementation-specific

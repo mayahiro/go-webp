@@ -1,3 +1,4 @@
+// Command verify_lossless_external validates go-webp output with an independent decoder
 package main
 
 import (
