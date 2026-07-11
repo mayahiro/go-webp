@@ -32,7 +32,8 @@ func buildVP8LMatchGraph(pixels []uint32, width int, budget vp8lBudget) vp8lMatc
 }
 
 func buildVP8LMatchGraphWorkspace(pixels []uint32, width int, budget vp8lBudget, workspace *vp8lSearchWorkspace) vp8lMatchGraph {
-	head, previous, starts, edges := workspace.resetMatchGraph(len(pixels))
+	hashBits := vp8lMatchHashBits(len(pixels), budget)
+	head, previous, starts, edges := workspace.resetMatchGraph(len(pixels), 1<<hashBits)
 	graph := vp8lMatchGraph{starts: starts, edges: edges}
 	if len(pixels) < vp8lMinBackwardRefLength || budget.matchEdges == 0 || budget.matchChainDepth == 0 {
 		return graph
@@ -45,17 +46,20 @@ func buildVP8LMatchGraphWorkspace(pixels []uint32, width int, budget vp8lBudget,
 		previous[i] = -1
 	}
 	for position := 0; position+2 < len(pixels); position++ {
-		hash := vp8lHashPixels(pixels, position)
+		hash := vp8lHashPixels(pixels, position) >> (vp8lHashBits - hashBits)
 		previous[position] = head[hash]
 		head[hash] = int32(position)
 	}
 
 	states := vp8lNewSpecialMatchStates(width)
 	matches := make([]vp8lMatch, 0, budget.matchEdges)
+	chainProbes := 0
 	for position := len(pixels) - 1; position >= 0; position-- {
 		matches = matches[:0]
 		matches, best := vp8lSpecialMatchesAt(pixels, width, position, states, matches, budget.matchEdges)
-		matches, best = vp8lSearchHashChainAt(pixels, width, position, previous, states, matches, best, budget)
+		var probes int
+		matches, best, probes = vp8lSearchHashChainAt(pixels, width, position, previous, states, matches, best, budget)
+		chainProbes += probes
 		graph.starts[position] = uint32(len(graph.edges))
 		graph.edges = append(graph.edges, matches...)
 
@@ -73,7 +77,19 @@ func buildVP8LMatchGraphWorkspace(pixels []uint32, width int, budget vp8lBudget,
 		}
 	}
 	workspace.keepMatchEdges(graph.edges)
+	budget.counters.recordMatchGraph(chainProbes, len(graph.edges))
 	return graph
+}
+
+func vp8lMatchHashBits(total int, budget vp8lBudget) int {
+	if budget.matchHashBits != 0 {
+		return budget.matchHashBits
+	}
+	hashBits := 8
+	for hashBits < vp8lHashBits && 1<<hashBits < total {
+		hashBits++
+	}
+	return hashBits
 }
 
 func (g vp8lMatchGraph) at(position int) []vp8lMatch {
@@ -134,16 +150,18 @@ func vp8lSpecialMatchesAt(pixels []uint32, width int, position int, states []vp8
 	return matches, best
 }
 
-func vp8lSearchHashChainAt(pixels []uint32, width int, position int, previous []int32, states []vp8lSpecialMatchState, matches []vp8lMatch, best vp8lPositionMatch, budget vp8lBudget) ([]vp8lMatch, vp8lPositionMatch) {
+func vp8lSearchHashChainAt(pixels []uint32, width int, position int, previous []int32, states []vp8lSpecialMatchState, matches []vp8lMatch, best vp8lPositionMatch, budget vp8lBudget) ([]vp8lMatch, vp8lPositionMatch, int) {
 	if position+2 >= len(pixels) {
-		return matches, best
+		return matches, best, 0
 	}
 	maxLength := minInt(vp8lMaxBackwardRefLength, len(pixels)-position)
 	if int(best.match.length) == maxLength {
-		return matches, best
+		return matches, best, 0
 	}
 	candidate := int(previous[position])
+	probes := 0
 	for iteration := 0; candidate >= 0 && iteration < budget.matchChainDepth; iteration++ {
+		probes++
 		distance := position - candidate
 		if distance > vp8lMaxDistanceCode-120 {
 			break
@@ -174,7 +192,7 @@ func vp8lSearchHashChainAt(pixels []uint32, width int, position int, previous []
 		}
 		candidate = int(previous[candidate])
 	}
-	return matches, best
+	return matches, best, probes
 }
 
 func vp8lCanExtendMatchLeft(pixels []uint32, position int, match vp8lPositionMatch) bool {

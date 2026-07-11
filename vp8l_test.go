@@ -86,6 +86,13 @@ func TestVP8LScreeningLiteralBitsMatchSerializedPlan(t *testing.T) {
 			if rematerialized := candidate.materialize(); !vp8lUint32SlicesEqual(rematerialized, candidate.pixels) {
 				t.Fatalf("candidate %d changed when rematerialized", i)
 			}
+			if candidate.materializeWorkspace == nil {
+				t.Fatalf("candidate %d has no workspace materializer", i)
+			}
+			workspace := &vp8lTransformWorkspace{}
+			if rematerialized := candidate.materializeWorkspace(workspace, 0); !vp8lUint32SlicesEqual(rematerialized, candidate.pixels) {
+				t.Fatalf("candidate %d changed when rematerialized in workspace", i)
+			}
 		}
 		score := vp8lScoreCandidate(source.width, source.height, alpha, candidate)
 		plan := vp8lPlan{
@@ -103,6 +110,209 @@ func TestVP8LScreeningLiteralBitsMatchSerializedPlan(t *testing.T) {
 	}
 }
 
+func TestVP8LPaletteCandidatesIncludeUniformPredictor(t *testing.T) {
+	img := newBenchmarkLimitedPalettedFixtureImage(32, 24)
+	source := newEncoderSource(img)
+	pixels, _, err := newVP8LSource(source, source.pixels()).materialize(vp8lMaxSourceBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	vp8lForEachPaletteCandidate(pixels, source.width, source.height, vp8lBudgetForMode(ModeDefault), nil, func(candidate vp8lTransformCandidate) {
+		if len(candidate.transforms) != 2 || candidate.transforms[1].kind != vp8lTransformPredictor || candidate.transforms[1].sizeBits != 9 {
+			return
+		}
+		found = true
+		if rematerialized := candidate.materialize(); !vp8lUint32SlicesEqual(rematerialized, candidate.pixels) {
+			t.Fatal("uniform palette predictor changed when rematerialized")
+		}
+	})
+	if !found {
+		t.Fatal("no uniform palette predictor candidate")
+	}
+}
+
+func TestVP8LSearchCountersDescribePipelineWork(t *testing.T) {
+	img := newLosslessBenchmarkFixtureImage(losslessBenchmarkCase{kind: benchmarkImageUI, width: 64, height: 64})
+	source := newEncoderSource(img)
+	counters := &vp8lSearchCounters{}
+	budget := vp8lBudgetForMode(ModeDefault)
+	budget.counters = counters
+	budget.maxWorkers = 1
+	if _, err := searchVP8L(newVP8LSource(source, source.pixels()), budget); err != nil {
+		t.Fatal(err)
+	}
+
+	got := counters.snapshot()
+	if got.generatedCandidates == 0 {
+		t.Fatal("generated candidate count is zero")
+	}
+	if got.sampledCandidates != got.generatedCandidates || got.fullScoredCandidates != got.sampledCandidates {
+		t.Fatalf("candidate stages = generated %d sampled %d full %d", got.generatedCandidates, got.sampledCandidates, got.fullScoredCandidates)
+	}
+	if got.exactFinalists == 0 || got.exactFinalists > uint64(budget.exactCandidates+1) {
+		t.Fatalf("exact finalists = %d, budget %d", got.exactFinalists, budget.exactCandidates)
+	}
+	if got.materializedPlanes == 0 || got.transformedPixels == 0 {
+		t.Fatalf("transform work = planes %d rematerialized bytes %d pixels %d", got.materializedPlanes, got.rematerializedBytes, got.transformedPixels)
+	}
+	if got.rematerializedBytes != 0 {
+		t.Fatalf("rematerialized bytes = %d, want zero", got.rematerializedBytes)
+	}
+	if got.huffmanCostBuilds == 0 || got.huffmanEmissionBuilds == 0 || got.matchEdges == 0 || got.dpRelaxations == 0 {
+		t.Fatalf("exact work = huffman cost %d emission %d match edges %d DP relaxations %d", got.huffmanCostBuilds, got.huffmanEmissionBuilds, got.matchEdges, got.dpRelaxations)
+	}
+	if got.cacheFullScans == 0 {
+		t.Fatal("cache full scan count is zero")
+	}
+	if got.workerCount != 1 {
+		t.Fatalf("worker count = %d, want 1", got.workerCount)
+	}
+}
+
+func TestVP8LUniformEarlyExitMatchesFullSearch(t *testing.T) {
+	img := newLosslessBenchmarkFixtureImage(losslessBenchmarkCase{kind: benchmarkImageFlat, width: 64, height: 64})
+	source := newEncoderSource(img)
+	newSource := func() vp8lSource {
+		return newVP8LSource(source, source.pixels())
+	}
+
+	fullBudget := vp8lBudgetForMode(ModeDefault)
+	fullBudget.earlyExitUniform = false
+	full, err := searchVP8L(newSource(), fullBudget)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	counters := &vp8lSearchCounters{}
+	earlyBudget := vp8lBudgetForMode(ModeDefault)
+	earlyBudget.counters = counters
+	early, err := searchVP8L(newSource(), earlyBudget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if early.payloadBitLen() != full.payloadBitLen() {
+		t.Fatalf("uniform early search bits = %d, full search %d", early.payloadBitLen(), full.payloadBitLen())
+	}
+	got := counters.snapshot()
+	if got.generatedCandidates > 5 || got.exactFinalists > 5 {
+		t.Fatalf("uniform early search = generated %d exact %d", got.generatedCandidates, got.exactFinalists)
+	}
+}
+
+func TestVP8LSearchBudgetAdaptsToSimplePixels(t *testing.T) {
+	budget := vp8lBudgetForMode(ModeDefault)
+	uniform := make([]uint32, 64)
+	for i := range uniform {
+		uniform[i] = 0xff102030
+	}
+	if got := vp8lAdaptBudgetForPixels(budget, uniform); got.matchEdges != 1 || got.stagedCombined {
+		t.Fatalf("uniform budget = edges %d staged combined %t", got.matchEdges, got.stagedCombined)
+	}
+	lowColor := make([]uint32, 64)
+	for i := range lowColor {
+		lowColor[i] = 0xff000000 | uint32(i%16)
+	}
+	if got := vp8lAdaptBudgetForPixels(budget, lowColor); got.matchEdges != 4 {
+		t.Fatalf("low-color match edges = %d, want 4", got.matchEdges)
+	}
+	manyColors := make([]uint32, 64)
+	for i := range manyColors {
+		manyColors[i] = 0xff000000 | uint32(i)
+	}
+	if got := vp8lAdaptBudgetForPixels(budget, manyColors); got.matchEdges != 2 {
+		t.Fatalf("many-color match edges = %d, want 2", got.matchEdges)
+	}
+}
+
+func TestVP8LMatchHashBits(t *testing.T) {
+	defaultBudget := vp8lBudgetForMode(ModeDefault)
+	bestBudget := vp8lBudgetForMode(ModeBestCompression)
+	tests := []struct {
+		name   string
+		total  int
+		budget vp8lBudget
+		want   int
+	}{
+		{name: "tiny default", total: 64, budget: defaultBudget, want: 8},
+		{name: "128 square default", total: 128 * 128, budget: defaultBudget, want: 14},
+		{name: "256 square default", total: 256 * 256, budget: defaultBudget, want: 16},
+		{name: "large default", total: 1024 * 1024, budget: defaultBudget, want: 16},
+		{name: "small best", total: 64, budget: bestBudget, want: 16},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := vp8lMatchHashBits(test.total, test.budget); got != test.want {
+				t.Fatalf("vp8lMatchHashBits(%d) = %d, want %d", test.total, got, test.want)
+			}
+		})
+	}
+}
+
+func TestVP8LPaletteEarlyExitDoesNotWorsenFullSearch(t *testing.T) {
+	img := newBenchmarkLimitedPalettedFixtureImage(64, 64)
+	source := newEncoderSource(img)
+	newSource := func() vp8lSource {
+		return newVP8LSource(source, source.pixels())
+	}
+
+	fullBudget := vp8lBudgetForMode(ModeDefault)
+	fullBudget.earlyExitPalette = false
+	full, err := searchVP8L(newSource(), fullBudget)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	counters := &vp8lSearchCounters{}
+	earlyBudget := vp8lBudgetForMode(ModeDefault)
+	earlyBudget.counters = counters
+	early, err := searchVP8L(newSource(), earlyBudget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if early.payloadBitLen() > full.payloadBitLen() {
+		t.Fatalf("palette early search bits = %d, full search %d", early.payloadBitLen(), full.payloadBitLen())
+	}
+	got := counters.snapshot()
+	if got.generatedCandidates > 15 {
+		t.Fatalf("palette early search generated %d candidates", got.generatedCandidates)
+	}
+}
+
+func TestVP8LStagedExactSelectionMatchesExhaustiveFinalists(t *testing.T) {
+	cases := []losslessBenchmarkCase{
+		{name: "alpha", kind: benchmarkImageAlpha, width: 128, height: 128},
+		{name: "palette", width: 256, height: 256, format: benchmarkFixturePaletted},
+		{name: "photo", kind: benchmarkImagePhotoLike, width: 512, height: 512},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			img := newLosslessBenchmarkFixtureImage(tc)
+			source := newEncoderSource(img)
+			newSource := func() vp8lSource {
+				return newVP8LSource(source, source.pixels())
+			}
+
+			exhaustiveBudget := vp8lBudgetForMode(ModeDefault)
+			exhaustiveBudget.shallowCandidates = 6
+			exhaustiveBudget.exactCandidates = 6
+			exhaustiveBudget.cacheCandidates = 6
+			exhaustiveBudget.metaCandidates = 6
+			exhaustive, err := searchVP8L(newSource(), exhaustiveBudget)
+			if err != nil {
+				t.Fatal(err)
+			}
+			staged, err := searchVP8L(newSource(), vp8lBudgetForMode(ModeDefault))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if staged.payloadBitLen() != exhaustive.payloadBitLen() {
+				t.Fatalf("staged bits = %d, exhaustive finalists %d", staged.payloadBitLen(), exhaustive.payloadBitLen())
+			}
+		})
+	}
+}
+
 func TestVP8LLiteralPlanIsDeterministic(t *testing.T) {
 	img := newBenchmarkFixtureImage(lossyBenchmarkCase{kind: benchmarkImagePhotoLike, width: 32, height: 24})
 	first := encodeLosslessForTest(t, img, ModeDefault)
@@ -113,7 +323,7 @@ func TestVP8LLiteralPlanIsDeterministic(t *testing.T) {
 }
 
 func TestVP8LParallelFinalistsMatchSequentialOutput(t *testing.T) {
-	img := newBenchmarkFixtureImage(lossyBenchmarkCase{kind: benchmarkImageUI, width: 96, height: 64})
+	img := newBenchmarkFixtureImage(lossyBenchmarkCase{kind: benchmarkImageUI, width: 256, height: 256})
 	source := newEncoderSource(img)
 	newSource := func() vp8lSource {
 		return newVP8LSource(source, source.pixels())
@@ -127,6 +337,9 @@ func TestVP8LParallelFinalistsMatchSequentialOutput(t *testing.T) {
 	parallelBudget := vp8lBudgetForMode(ModeDefault)
 	parallelBudget.maxWorkers = 4
 	parallelBudget.maxParallelBytes = 1 << 30
+	if workers := vp8lFinalistWorkerCount(source.width*source.height, parallelBudget.exactCandidates, parallelBudget); workers < 2 {
+		t.Fatalf("parallel worker count = %d, want at least 2", workers)
+	}
 	parallel, err := searchVP8L(newSource(), parallelBudget)
 	if err != nil {
 		t.Fatal(err)
@@ -443,6 +656,57 @@ func TestVP8LCacheAppliedSeedBitsMatchPlan(t *testing.T) {
 	if got, want := counter.bitLen+dataBits, plan.bitLen(true); got != want {
 		t.Fatalf("cache-applied seed bits = %d, serialized plan bits %d", got, want)
 	}
+}
+
+func TestVP8LColorCacheScreenMatchesIndependentScans(t *testing.T) {
+	const width, height = 64, 16
+	pixels := make([]uint32, width*height)
+	state := uint32(17)
+	for i := range pixels {
+		if i >= width && i%7 != 0 {
+			pixels[i] = pixels[i-width]
+			continue
+		}
+		state = state*1664525 + 1013904223
+		value := state >> 27
+		pixels[i] = 0xff000000 | value<<16 | (value*5&0xff)<<8 | value*11&0xff
+	}
+	budget := vp8lBudgetForMode(ModeDefault)
+	seed := vp8lGreedyTokens(pixels, buildVP8LMatchGraph(pixels, width, budget))
+	cacheBits := []uint8{1, 5, 7, 11}
+	results := vp8lAnalyzeColorCacheCandidates(pixels, seed, cacheBits, &vp8lSearchWorkspace{})
+	for i, result := range results {
+		hits := vp8lColorCacheHits(pixels, cacheBits[i])
+		hitCount := 0
+		for _, hit := range hits {
+			if hit >= 0 {
+				hitCount++
+			}
+		}
+		if result.hitCount != hitCount {
+			t.Fatalf("cache bits %d hit count = %d, independent scan %d", cacheBits[i], result.hitCount, hitCount)
+		}
+		if hitCount < 8 {
+			continue
+		}
+		cachedGroup, cachedDataBits := vp8lCacheAppliedGroupAndDataBits(seed, hits, cacheBits[i])
+		literalGroup, literalDataBits := vp8lLiteralCacheGroupAndDataBits(pixels, hits, cacheBits[i])
+		if got, want := result.cachedBits, vp8lCacheSeedBits(cacheBits[i], &cachedGroup, cachedDataBits); got != want {
+			t.Fatalf("cache bits %d cached screen = %d, independent scan %d", cacheBits[i], got, want)
+		}
+		if got, want := result.literalBits, vp8lCacheSeedBits(cacheBits[i], &literalGroup, literalDataBits); got != want {
+			t.Fatalf("cache bits %d literal screen = %d, independent scan %d", cacheBits[i], got, want)
+		}
+	}
+}
+
+func vp8lCacheSeedBits(cacheBits uint8, group *vp8lCodeGroup, dataBits uint64) uint64 {
+	counter := vp8lBitCounter()
+	counter.writeBits(1, 1)
+	counter.writeBits(uint32(cacheBits), 4)
+	counter.writeBits(0, 1)
+	group.writeHeaders(counter)
+	return counter.bitLen + dataBits
 }
 
 func TestVP8LTokenUsesCompactRepresentation(t *testing.T) {

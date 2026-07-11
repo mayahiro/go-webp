@@ -3,7 +3,6 @@ package webp
 import (
 	"image"
 	"image/color"
-	"sort"
 )
 
 const (
@@ -58,14 +57,8 @@ func vp8lAutoLosslessProfile(m image.Image, readPixel pixelReader, bounds image.
 }
 
 func vp8lAutoPalettePlanBits(source vp8lSource, alpha bool, table []uint32) uint64 {
-	tables := [][]uint32{table}
-	sorted := append([]uint32(nil), table...)
-	sort.Slice(sorted, func(i int, j int) bool { return sorted[i] < sorted[j] })
-	if !vp8lUint32SlicesEqual(table, sorted) {
-		tables = append(tables, sorted)
-	}
 	best := ^uint64(0)
-	for _, candidateTable := range tables {
+	for _, candidateTable := range vp8lPaletteOrders(table) {
 		transform := vp8lStreamingPaletteTransform(candidateTable)
 		stream, indexedWidth := vp8lPalettePixelStream(source, candidateTable)
 		bits := vp8lStreamingLiteralPlanBits(source, alpha, []vp8lTransform{transform}, stream, indexedWidth)

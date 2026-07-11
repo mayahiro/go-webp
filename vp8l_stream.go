@@ -2,7 +2,6 @@ package webp
 
 import (
 	"fmt"
-	"sort"
 )
 
 type vp8lPixelStream func(visit func(uint32))
@@ -84,13 +83,7 @@ func searchVP8LStreaming(source vp8lSource, mode Mode) (*vp8lStreamingPlan, erro
 	}
 
 	if paletteOK {
-		tables := [][]uint32{table}
-		sorted := append([]uint32(nil), table...)
-		sort.Slice(sorted, func(i int, j int) bool { return sorted[i] < sorted[j] })
-		if !vp8lUint32SlicesEqual(table, sorted) {
-			tables = append(tables, sorted)
-		}
-		for _, candidateTable := range tables {
+		for _, candidateTable := range vp8lPaletteOrders(table) {
 			transform := vp8lStreamingPaletteTransform(candidateTable)
 			stream, indexedWidth := vp8lPalettePixelStream(source, candidateTable)
 			consider([]vp8lTransform{transform}, stream, indexedWidth)

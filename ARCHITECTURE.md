@@ -32,46 +32,61 @@ Default and balanced profiles first check a 96 MiB estimated workspace gate.
 Eligible inputs are materialized into one packed ARGB plane capped at 32 MiB;
 inputs outside either limit fall back to streaming. `ModeBestCompression`
 widens transform, match, parse, and entropy budgets and raises the estimated
-workspace gate to 192 MiB.
+workspace gate to 192 MiB. Uniform inputs and `image.Paletted` inputs with at
+most 16 colors use dedicated bounded searches that avoid the general transform
+graph.
 
 `ModeAuto` examines a bounded pixel sample. It selects the streaming fast path
 only when a verified low-color palette plan is sufficiently small, selects
 the low-memory path for very large inputs, and otherwise uses the balanced
 profile.
 
-`ModeBestCompression` keeps the complete default plan as an incumbent and
-uses the expanded-search plan only when its exact payload is smaller. This
-makes the profile monotonic with respect to the default encoded size.
+`ModeBestCompression` first establishes the complete default plan, then
+expands the budget in the same search session. The materialized source,
+palette analysis, candidate scores, and default winner remain reusable. The
+expanded plan replaces the incumbent only when its exact payload is smaller,
+making the profile monotonic with respect to the default encoded size.
 
 ### Transform Graph and Screening
 
 The buffered search constructs a bounded graph of direct, subtract-green,
 predictor, cross-color, palette, and selected combined transforms. Predictor
-modes can vary by tile. `BestCompression` can additionally evaluate
-block-adaptive cross-color coefficients.
+modes can vary by tile. Default search expands combined transforms only from
+parents retained by the first screening stage. `BestCompression` can
+additionally evaluate block-adaptive cross-color coefficients.
 
 Transform screening uses exact literal coding cost together with sampled local
-and distant match potential. A family-aware reservoir keeps structurally
-different candidates instead of retaining only candidates with the lowest
-literal entropy. Screening stores rematerializable descriptors, so every
-transform candidate does not remain as an owned full-image plane.
+and distant match potential. Screening builds cost-only Huffman data and
+defers canonical codes and emission metadata. A family-aware reservoir keeps
+structurally different candidates instead of retaining only candidates with
+the lowest literal entropy.
+
+Default search narrows candidates in bounded stages: cost screening, shallow
+greedy parsing, exact match and dynamic-programming parsing, color-cache
+selection for the leading candidates, and spatial entropy refinement for the
+incumbent. Candidate descriptors remain rematerializable without retaining an
+owned full-image plane for every transform.
 
 ### Match, Parse, Cache, and Entropy Optimization
 
 Exact finalists use a reverse-built match graph. Repeated runs and previous-row
 matches propagate their lengths instead of rescanning the same interval, and a
-bounded hash chain supplies more distant alternatives. Each compact match edge
-stores its distance prefix information and occupies eight bytes.
+bounded hash chain supplies more distant alternatives. Default matcher tables
+adapt from 8 to 16 hash bits with transformed image size, while
+`BestCompression` retains the full 16-bit table. Each compact match edge stores
+its distance prefix information and occupies eight bytes.
 
 A dynamic-programming parser compares literals, color-cache references, and
 backward references using current Huffman costs. The selected stream may be
 reparsed for a bounded number of iterations. Color-cache sizes from 1 through
-11 bits are compared only when enabled by the profile.
+11 bits are screened together in one source traversal and fully emitted only
+for a bounded shortlist.
 
 Spatial entropy optimization builds sparse tile histograms, clusters them into
-at most 16 code groups, and compares the complete meta-prefix cost. The
-candidate retains the lowest exact emitted bit count, including side images,
-tree headers, symbols, and extra bits.
+at most 16 code groups, and compares the complete meta-prefix cost. Default
+search applies the full optimization only to its incumbent. The candidate
+retains the lowest exact emitted bit count, including side images, tree
+headers, symbols, and extra bits.
 
 ### Count and Write Kernel
 
@@ -86,8 +101,9 @@ by the writer.
 
 ### Determinism and Parallelism
 
-Finalists may be evaluated by a bounded worker pool: at most two workers for
-default search and four for `BestCompression`, further limited by
+Finalists may be evaluated by a bounded worker pool: inputs below 256x256 use
+one worker, while larger inputs can use at most two workers for default search
+and four for `BestCompression`. Worker count is further limited by
 `GOMAXPROCS` and the parallel workspace budget. Results are written to their
 original candidate slots and reduced in stable order, so worker scheduling
 does not change the selected bitstream.
@@ -124,8 +140,11 @@ encoder pool, and concurrent calls do not share plans or scratch buffers.
 
 VP8L source, worker, parallel, and total-search estimates are explicit fields
 of `vp8lBudget`. The estimates gate expensive buffered search; cumulative heap
-allocation can be higher because finalists may be rematerialized sequentially.
-Streaming modes retain only row state and immutable transform metadata.
+allocation can still be higher than peak live memory because sequential
+candidate metadata, tokens, and coding structures contribute to `B/op`.
+Transform chains alternate between encode-scoped scratch buffers when exact
+finalists are materialized. Streaming modes retain only row state and
+immutable transform metadata.
 
 The project remains pure Go and has no runtime dependency on libwebp, cgo, or
 architecture-specific assembly.

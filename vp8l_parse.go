@@ -21,27 +21,31 @@ func buildVP8LImagePlan(pixels []uint32, width int, height int, budget vp8lBudge
 }
 
 func buildVP8LImagePlanWorkspace(pixels []uint32, width int, height int, budget vp8lBudget, workspace *vp8lSearchWorkspace) vp8lImagePlan {
-	literal := buildVP8LLiteralImagePlan(pixels, width, height)
+	budget.counters.recordHuffmanEmissionBuilds(5)
+	literalGroup, literalDataBits := vp8lLiteralCodeGroupAndDataBits(pixels)
+	literalCounter := vp8lBitCounter()
+	literalCounter.writeBits(0, 1)
+	literalCounter.writeBits(0, 1)
+	literalGroup.writeHeaders(literalCounter)
+	literalBits := literalCounter.bitLen + literalDataBits
 	graph := buildVP8LMatchGraphWorkspace(pixels, width, budget, workspace)
 	if len(graph.edges) == 0 {
-		return literal
+		return vp8lLiteralImagePlanWithGroup(pixels, width, height, literalGroup)
 	}
 
-	best := literal
 	greedyTokens := vp8lGreedyTokens(pixels, graph)
-	greedy := vp8lImagePlan{
+	budget.counters.recordHuffmanEmissionBuilds(5)
+	best := vp8lImagePlan{
 		width:  width,
 		height: height,
 		tokens: greedyTokens,
 		group:  buildVP8LCodeGroup(greedyTokens, 0),
 	}
-	if greedy.bitLen(true) < best.bitLen(true) {
-		best = greedy
-	}
 
-	seed := greedy
+	seed := best
 	for range budget.optimalPasses {
 		tokens := vp8lOptimalTokensWorkspace(pixels, graph, seed.group, nil, workspace)
+		budget.counters.recordHuffmanEmissionBuilds(5)
 		candidate := vp8lImagePlan{
 			width:  width,
 			height: height,
@@ -53,10 +57,21 @@ func buildVP8LImagePlanWorkspace(pixels []uint32, width int, height int, budget 
 		}
 		seed = candidate
 	}
+	if literalBits <= best.bitLen(true) {
+		best = vp8lLiteralImagePlanWithGroup(pixels, width, height, literalGroup)
+	}
 	if budget.tryColorCache {
 		best = vp8lChooseColorCachePlan(pixels, graph, best, budget, workspace)
 	}
+	return vp8lRefineEntropyPlanWorkspace(pixels, graph, best, budget, workspace)
+}
+
+func vp8lRefineEntropyPlanWorkspace(pixels []uint32, graph vp8lMatchGraph, best vp8lImagePlan, budget vp8lBudget, workspace *vp8lSearchWorkspace) vp8lImagePlan {
 	best = vp8lChooseEntropyPlanWorkspace(best, budget, workspace)
+	return vp8lReparseEntropyPlanWorkspace(pixels, graph, best, budget, workspace)
+}
+
+func vp8lReparseEntropyPlanWorkspace(pixels []uint32, graph vp8lMatchGraph, best vp8lImagePlan, budget vp8lBudget, workspace *vp8lSearchWorkspace) vp8lImagePlan {
 	for range budget.entropyIterations {
 		if best.meta == nil {
 			break
@@ -67,12 +82,13 @@ func buildVP8LImagePlanWorkspace(pixels []uint32, width int, height int, budget 
 		}
 		tokens := vp8lOptimalTokensForImageWorkspace(pixels, graph, best, cacheHits, workspace)
 		candidate := vp8lImagePlan{
-			width:     width,
-			height:    height,
+			width:     best.width,
+			height:    best.height,
 			cacheBits: best.cacheBits,
 			tokens:    tokens,
 			group:     buildVP8LCodeGroup(tokens, best.cacheBits),
 		}
+		budget.counters.recordHuffmanEmissionBuilds(5)
 		candidate = vp8lChooseEntropyPlanWorkspace(candidate, budget, workspace)
 		if candidate.bitLen(true) < best.bitLen(true) {
 			best = candidate
@@ -86,7 +102,7 @@ func buildVP8LImagePlanWorkspace(pixels []uint32, width int, height int, budget 
 func vp8lChooseColorCachePlan(pixels []uint32, graph vp8lMatchGraph, best vp8lImagePlan, budget vp8lBudget, workspace *vp8lSearchWorkspace) vp8lImagePlan {
 	seedTokens := best.tokens
 	type cacheCandidate struct {
-		plan        vp8lImagePlan
+		cacheBits   uint8
 		bits        uint64
 		literalSeed bool
 	}
@@ -104,53 +120,28 @@ func vp8lChooseColorCachePlan(pixels []uint32, graph vp8lMatchGraph, best vp8lIm
 			shortlist = shortlist[:2]
 		}
 	}
-	for cacheBits := uint8(1); cacheBits <= vp8lMaxColorCacheBits; cacheBits++ {
-		hits := vp8lColorCacheHitsWorkspace(pixels, cacheBits, workspace)
-		hitCount := 0
-		for _, hit := range hits {
-			if hit >= 0 {
-				hitCount++
-			}
-		}
-		if hitCount < 8 {
+	for _, screened := range vp8lAnalyzeColorCacheCandidates(pixels, seedTokens, budget.colorCacheBits, workspace) {
+		if screened.hitCount < 8 {
 			continue
 		}
-		cachedGroup, cachedDataBits := vp8lCacheAppliedGroupAndDataBits(seedTokens, hits, cacheBits)
+		addShortlist(cacheCandidate{cacheBits: screened.cacheBits, bits: screened.cachedBits})
+		addShortlist(cacheCandidate{cacheBits: screened.cacheBits, bits: screened.literalBits, literalSeed: true})
+	}
+	for _, shortlisted := range shortlist {
+		hits := vp8lColorCacheHitsWorkspace(pixels, shortlisted.cacheBits, workspace)
 		candidate := vp8lImagePlan{
 			width:     best.width,
 			height:    best.height,
-			cacheBits: cacheBits,
-			group:     cachedGroup,
+			cacheBits: shortlisted.cacheBits,
 		}
-		counter := vp8lBitCounter()
-		counter.writeBits(1, 1)
-		counter.writeBits(uint32(cacheBits), 4)
-		counter.writeBits(0, 1)
-		cachedGroup.writeHeaders(counter)
-		addShortlist(cacheCandidate{plan: candidate, bits: counter.bitLen + cachedDataBits})
-
-		literalGroup, literalDataBits := vp8lLiteralCacheGroupAndDataBits(pixels, hits, cacheBits)
-		literalPlan := vp8lImagePlan{
-			width:     best.width,
-			height:    best.height,
-			cacheBits: cacheBits,
-			group:     literalGroup,
-		}
-		counter = vp8lBitCounter()
-		counter.writeBits(1, 1)
-		counter.writeBits(uint32(cacheBits), 4)
-		counter.writeBits(0, 1)
-		literalGroup.writeHeaders(counter)
-		addShortlist(cacheCandidate{plan: literalPlan, bits: counter.bitLen + literalDataBits, literalSeed: true})
-	}
-	for _, shortlisted := range shortlist {
-		candidate := shortlisted.plan
-		hits := vp8lColorCacheHitsWorkspace(pixels, candidate.cacheBits, workspace)
 		if shortlisted.literalSeed {
+			candidate.group, _ = vp8lLiteralCacheGroupAndDataBits(pixels, hits, candidate.cacheBits)
 			candidate.tokens = vp8lLiteralCacheTokens(pixels, hits)
 		} else {
+			candidate.group, _ = vp8lCacheAppliedGroupAndDataBits(seedTokens, hits, candidate.cacheBits)
 			candidate.tokens = vp8lApplyCacheToTokens(seedTokens, hits)
 		}
+		budget.counters.recordHuffmanEmissionBuilds(5)
 		incumbent := candidate
 		for range maxInt(1, budget.optimalPasses) {
 			optimized := vp8lOptimalTokensWorkspace(pixels, graph, candidate.group, hits, workspace)
@@ -161,6 +152,7 @@ func vp8lChooseColorCachePlan(pixels []uint32, graph vp8lMatchGraph, best vp8lIm
 				tokens:    optimized,
 				group:     buildVP8LCodeGroup(optimized, candidate.cacheBits),
 			}
+			budget.counters.recordHuffmanEmissionBuilds(5)
 			if candidate.bitLen(true) < incumbent.bitLen(true) {
 				incumbent = candidate
 			}
@@ -267,6 +259,9 @@ func vp8lColorCacheHits(pixels []uint32, bits uint8) []int32 {
 }
 
 func vp8lColorCacheHitsWorkspace(pixels []uint32, bits uint8, workspace *vp8lSearchWorkspace) []int32 {
+	if workspace != nil {
+		workspace.counters.recordCacheFullScan()
+	}
 	size := 1 << bits
 	values, valid, hits := workspace.resetColorCache(len(pixels), size)
 	clear(valid)
@@ -314,24 +309,44 @@ func (image *vp8lImagePlan) bitLen(allowMetaPrefix bool) uint64 {
 }
 
 func vp8lGreedyTokens(pixels []uint32, graph vp8lMatchGraph) []vp8lToken {
-	tokens := make([]vp8lToken, 0, len(pixels))
+	tokenCount := 0
 	for position := 0; position < len(pixels); {
-		matches := graph.at(position)
-		if len(matches) == 0 {
-			tokens = append(tokens, vp8lLiteralToken(pixels[position]))
+		match, ok := vp8lGreedyMatchAt(graph, position)
+		tokenCount++
+		if !ok {
 			position++
-			continue
+		} else {
+			position += int(match.length)
 		}
-		best := matches[0]
-		for _, match := range matches[1:] {
-			if match.length > best.length || match.length == best.length && vp8lMatchScore(match) > vp8lMatchScore(best) {
-				best = match
-			}
+	}
+	tokens := make([]vp8lToken, tokenCount)
+	tokenIndex := 0
+	for position := 0; position < len(pixels); {
+		match, ok := vp8lGreedyMatchAt(graph, position)
+		if !ok {
+			tokens[tokenIndex] = vp8lLiteralToken(pixels[position])
+			position++
+		} else {
+			tokens[tokenIndex] = vp8lCopyToken(int(match.length), int(match.distanceCode))
+			position += int(match.length)
 		}
-		tokens = append(tokens, vp8lCopyToken(int(best.length), int(best.distanceCode)))
-		position += int(best.length)
+		tokenIndex++
 	}
 	return tokens
+}
+
+func vp8lGreedyMatchAt(graph vp8lMatchGraph, position int) (vp8lMatch, bool) {
+	matches := graph.at(position)
+	if len(matches) == 0 {
+		return vp8lMatch{}, false
+	}
+	best := matches[0]
+	for _, match := range matches[1:] {
+		if match.length > best.length || match.length == best.length && vp8lMatchScore(match) > vp8lMatchScore(best) {
+			best = match
+		}
+	}
+	return best, true
 }
 
 func vp8lOptimalTokens(pixels []uint32, graph vp8lMatchGraph, group vp8lCodeGroup, cacheHits []int32) []vp8lToken {
@@ -351,55 +366,62 @@ func vp8lOptimalTokensForImageWorkspace(pixels []uint32, graph vp8lMatchGraph, i
 }
 
 func vp8lOptimalTokensWithGroups(pixels []uint32, graph vp8lMatchGraph, cacheHits []int32, groupAt func(int) *vp8lCodeGroup, workspace *vp8lSearchWorkspace) []vp8lToken {
-	costs, previous, selected := workspace.resetDP(len(pixels))
+	costs, selected := workspace.resetDP(len(pixels))
 	costs[0] = 0
-	previous[0] = 0
 	for i := 1; i < len(costs); i++ {
 		costs[i] = vp8lInfiniteCost
-		previous[i] = -1
 	}
+	relaxations := 0
 	for position, pixel := range pixels {
 		if costs[position] == vp8lInfiniteCost {
 			continue
 		}
 		group := groupAt(position)
 		literal := vp8lLiteralToken(pixel)
-		vp8lRelaxToken(costs, previous, selected, position, position+1, costs[position]+group.literalCost(pixel), literal)
+		relaxations++
+		vp8lRelaxToken(costs, selected, position+1, costs[position]+group.literalCost(pixel), literal)
 		if len(cacheHits) != 0 && cacheHits[position] >= 0 {
 			cache := vp8lCacheToken(int(cacheHits[position]))
 			cacheCost := group.green.symbolCost(nLiteralCodes+nLengthCodes+int(cacheHits[position]), 12)
-			vp8lRelaxToken(costs, previous, selected, position, position+1, costs[position]+cacheCost, cache)
+			relaxations++
+			vp8lRelaxToken(costs, selected, position+1, costs[position]+cacheCost, cache)
 		}
 		for _, match := range graph.at(position) {
 			var lengths [32]uint16
 			lengthCount := vp8lCandidateMatchLengths(int(match.length), &lengths)
+			relaxations += lengthCount
 			for _, rawLength := range lengths[:lengthCount] {
 				length := int(rawLength)
 				end := position + length
 				copyCost := group.copyCost(length, match)
-				vp8lRelaxToken(costs, previous, selected, position, end, costs[position]+copyCost, vp8lCopyToken(length, int(match.distanceCode)))
+				vp8lRelaxToken(costs, selected, end, costs[position]+copyCost, vp8lCopyToken(length, int(match.distanceCode)))
 			}
 		}
 	}
-	if previous[len(pixels)] < 0 {
+	if workspace != nil {
+		workspace.counters.recordDPRelaxations(relaxations)
+	}
+	if costs[len(pixels)] == vp8lInfiniteCost {
 		return vp8lGreedyTokens(pixels, graph)
 	}
-	tokens := make([]vp8lToken, 0, len(pixels))
-	for position := len(pixels); position > 0; position = int(previous[position]) {
-		tokens = append(tokens, selected[position])
+	tokenCount := 0
+	for position := len(pixels); position > 0; position -= vp8lTokenPixelLength(selected[position]) {
+		tokenCount++
 	}
-	for left, right := 0, len(tokens)-1; left < right; left, right = left+1, right-1 {
-		tokens[left], tokens[right] = tokens[right], tokens[left]
+	tokens := make([]vp8lToken, tokenCount)
+	tokenIndex := tokenCount - 1
+	for position := len(pixels); position > 0; position -= vp8lTokenPixelLength(selected[position]) {
+		tokens[tokenIndex] = selected[position]
+		tokenIndex--
 	}
 	return tokens
 }
 
-func vp8lRelaxToken(costs []uint64, previous []int32, selected []vp8lToken, start int, end int, cost uint64, token vp8lToken) {
+func vp8lRelaxToken(costs []uint64, selected []vp8lToken, end int, cost uint64, token vp8lToken) {
 	if end >= len(costs) || cost >= costs[end] {
 		return
 	}
 	costs[end] = cost
-	previous[end] = int32(start)
 	selected[end] = token
 }
 

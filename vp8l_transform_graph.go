@@ -7,11 +7,13 @@ func vp8lForEachPredictorCandidate(
 	budget vp8lBudget,
 	prefix []vp8lTransform,
 	materializeSource func() []uint32,
+	materializeSourceWorkspace func(*vp8lTransformWorkspace, int) []uint32,
 	workspace *vp8lTransformWorkspace,
 	predictorSlot int,
 	combinedSlot int,
 	visit func(vp8lTransformCandidate),
 ) {
+	counters := budget.counters
 	for _, mode := range budget.predictorModes {
 		modes, transformWidth, transformHeight := vp8lUniformPredictorImage(width, height, 9, mode)
 		pixels := vp8lApplyPredictorWorkspace(source, width, height, 9, modes, transformWidth, workspace, predictorSlot)
@@ -23,7 +25,13 @@ func vp8lForEachPredictorCandidate(
 			pixels:     pixels,
 			transforms: transforms,
 			materialize: func() []uint32 {
+				counters.recordRematerialization(len(source))
 				return vp8lApplyPredictor(materializeSource(), width, height, 9, modes, transformWidth)
+			},
+			materializeWorkspace: func(workspace *vp8lTransformWorkspace, slot int) []uint32 {
+				source := materializeSourceWorkspace(workspace, vp8lAlternateTransformSlot(slot))
+				counters.recordWorkspaceMaterialization(len(source))
+				return vp8lApplyPredictorWorkspace(source, width, height, 9, modes, transformWidth, workspace, slot)
 			},
 		}
 		visit(candidate)
@@ -44,7 +52,13 @@ func vp8lForEachPredictorCandidate(
 			pixels:     pixels,
 			transforms: transforms,
 			materialize: func() []uint32 {
+				counters.recordRematerialization(len(source))
 				return vp8lApplyPredictor(materializeSource(), width, height, sizeBits, modes, transformWidth)
+			},
+			materializeWorkspace: func(workspace *vp8lTransformWorkspace, slot int) []uint32 {
+				source := materializeSourceWorkspace(workspace, vp8lAlternateTransformSlot(slot))
+				counters.recordWorkspaceMaterialization(len(source))
+				return vp8lApplyPredictorWorkspace(source, width, height, sizeBits, modes, transformWidth, workspace, slot)
 			},
 		}
 		visit(candidate)

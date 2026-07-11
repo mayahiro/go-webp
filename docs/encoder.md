@@ -92,19 +92,22 @@ indexed payloads.
 ## Lossless Encoding
 
 The lossless encoder compares complete VP8L plans rather than selecting each
-feature independently. Buffered profiles use a two-stage bounded search:
+feature independently. Buffered profiles use a staged bounded search:
 
 - A transform graph covering direct, subtract-green, predictor, cross-color,
   palette, and selected combined transforms
 - Tile-adaptive predictor modes and, in `ModeBestCompression`, optional
   block-adaptive cross-color coefficients
-- Family-aware screening that combines exact literal bits with sampled local
-  and distant match potential
+- Family-aware, cost-only Huffman screening that combines exact literal bits
+  with sampled local and distant match potential
+- Shallow parsing before exact match and dynamic-programming parsing for a
+  smaller finalist set
 - A compact reverse-built match graph with bounded hash chains and propagated
   run and previous-row matches
-- Cost-based dynamic-programming parsing across literals, backward references,
-  and 1- to 11-bit color-cache references
+- Cost-based dynamic-programming parsing across literals and backward
+  references, followed by one-pass screening of 1- to 11-bit color caches
 - Sparse spatial histograms and entropy clustering with up to 16 coding groups
+  for a bounded incumbent set
 - Exact size comparison using the same bit-writing logic used for emission
 - Encode-scoped transform, match, Huffman, cache, entropy, and parser
   workspaces reused across finalists
@@ -114,9 +117,10 @@ transforms and greedy matches. Buffered modes also fall back to streaming when
 the source or estimated search workspace exceeds its configured limit.
 
 `ModeBestCompression` retains the complete default plan as an incumbent and
-selects its expanded-search result only when the exact payload is smaller.
-It therefore does not produce a larger lossless payload than `ModeDefault` for
-the same input.
+expands the budget in the same search session. Source pixels, palette analysis,
+candidate scores, and the default winner remain reusable. The expanded result
+is selected only when its exact payload is smaller, so it does not produce a
+larger lossless payload than `ModeDefault` for the same input.
 
 The matcher does not use unbounded hash chains, and every profile limits
 candidate counts, edges, parse iterations, entropy groups, workers, and
@@ -174,8 +178,8 @@ Encoding can scan the input more than once. Important resource bounds include:
   finalist workers
 - Inputs outside a buffered lossless gate fall back to row-streaming encoding
 - Lossless screening retains rematerializable transform descriptors; exact
-  finalist workspaces are encode-scoped and reused sequentially or by a
-  bounded worker pool
+  finalist transform chains alternate between encode-scoped scratch buffers
+  reused sequentially or by a bounded worker pool
 - Buffered lossy profiles can retain quantized residuals up to an estimated
   32 MiB and reuse them for statistics and final coding
 - Lossy reconstructed pixels use a two-macroblock-row ring rather than a
@@ -186,9 +190,9 @@ Encoding can scan the input more than once. Important resource bounds include:
   VP8L token stream, meta-prefix plan, and color-cache plan
 
 `B/op` from Go benchmarks measures cumulative allocation, not peak live memory.
-Candidate rematerialization can make cumulative allocation exceed the search
-workspace estimate while simultaneously retained state remains bounded.
-Standard image types use direct readers where possible.
+Sequential candidate metadata, tokens, and coding structures can make
+cumulative allocation exceed simultaneously retained state. Standard image
+types use direct readers where possible.
 
 Encoded bytes are not a stable serialization contract. Encoder versions may
 select different valid VP8L or VP8 plans while preserving the documented pixel

@@ -7,6 +7,7 @@ type vp8lTransformWorkspace struct {
 type vp8lSearchWorkspace struct {
 	transform vp8lTransformWorkspace
 	huffman   vp8lHuffmanWorkspace
+	counters  *vp8lSearchCounters
 
 	matchHead     []int32
 	matchPrevious []int32
@@ -14,12 +15,14 @@ type vp8lSearchWorkspace struct {
 	matchEdges    []vp8lMatch
 
 	dpCosts    []uint64
-	dpPrevious []int32
 	dpSelected []vp8lToken
 
-	cacheValues []uint32
-	cacheValid  []bool
-	cacheHits   []int32
+	cacheValues        []uint32
+	cacheValid         []bool
+	cacheHits          []int32
+	cacheScreenValues  []uint32
+	cacheScreenValid   []bool
+	cacheScreenResults []vp8lCacheScreenResult
 
 	entropyEntryCounts []int
 	entropyOffsets     []int
@@ -69,14 +72,18 @@ func (w *vp8lTransformWorkspace) pixels(slot int, length int) []uint32 {
 	return buffer
 }
 
-func (w *vp8lSearchWorkspace) resetMatchGraph(total int) ([]int32, []int32, []uint32, []vp8lMatch) {
+func vp8lAlternateTransformSlot(slot int) int {
+	return slot ^ 1
+}
+
+func (w *vp8lSearchWorkspace) resetMatchGraph(total int, hashSize int) ([]int32, []int32, []uint32, []vp8lMatch) {
 	if w == nil {
-		return make([]int32, vp8lHashSize), make([]int32, total), make([]uint32, total), make([]vp8lMatch, 0, total)
+		return make([]int32, hashSize), make([]int32, total), make([]uint32, total), make([]vp8lMatch, 0, total)
 	}
-	if cap(w.matchHead) < vp8lHashSize {
-		w.matchHead = make([]int32, vp8lHashSize)
+	if cap(w.matchHead) < hashSize {
+		w.matchHead = make([]int32, hashSize)
 	} else {
-		w.matchHead = w.matchHead[:vp8lHashSize]
+		w.matchHead = w.matchHead[:hashSize]
 	}
 	w.matchPrevious = vp8lResizeInt32s(w.matchPrevious, total)
 	w.matchStarts = vp8lResizeUint32s(w.matchStarts, total)
@@ -94,14 +101,13 @@ func (w *vp8lSearchWorkspace) keepMatchEdges(edges []vp8lMatch) {
 	}
 }
 
-func (w *vp8lSearchWorkspace) resetDP(total int) ([]uint64, []int32, []vp8lToken) {
+func (w *vp8lSearchWorkspace) resetDP(total int) ([]uint64, []vp8lToken) {
 	if w == nil {
-		return make([]uint64, total+1), make([]int32, total+1), make([]vp8lToken, total+1)
+		return make([]uint64, total+1), make([]vp8lToken, total+1)
 	}
 	w.dpCosts = vp8lResizeUint64s(w.dpCosts, total+1)
-	w.dpPrevious = vp8lResizeInt32s(w.dpPrevious, total+1)
 	w.dpSelected = vp8lResizeTokens(w.dpSelected, total+1)
-	return w.dpCosts, w.dpPrevious, w.dpSelected
+	return w.dpCosts, w.dpSelected
 }
 
 func (w *vp8lSearchWorkspace) resetColorCache(pixelCount int, cacheSize int) ([]uint32, []bool, []int32) {
@@ -112,6 +118,16 @@ func (w *vp8lSearchWorkspace) resetColorCache(pixelCount int, cacheSize int) ([]
 	w.cacheValid = vp8lResizeBools(w.cacheValid, cacheSize)
 	w.cacheHits = vp8lResizeInt32s(w.cacheHits, pixelCount)
 	return w.cacheValues, w.cacheValid, w.cacheHits
+}
+
+func (w *vp8lSearchWorkspace) resetColorCacheScreen(totalEntries int) ([]uint32, []bool) {
+	if w == nil {
+		return make([]uint32, totalEntries), make([]bool, totalEntries)
+	}
+	w.cacheScreenValues = vp8lResizeUint32s(w.cacheScreenValues, totalEntries)
+	w.cacheScreenValid = vp8lResizeBools(w.cacheScreenValid, totalEntries)
+	clear(w.cacheScreenValid)
+	return w.cacheScreenValues, w.cacheScreenValid
 }
 
 func vp8lResizeUint32s(values []uint32, length int) []uint32 {

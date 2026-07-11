@@ -2,7 +2,6 @@ package webp
 
 import (
 	"math"
-	"sort"
 )
 
 type vp8lTransformKind uint8
@@ -22,11 +21,13 @@ type vp8lTransform struct {
 }
 
 type vp8lTransformCandidate struct {
-	width       int
-	height      int
-	pixels      []uint32
-	transforms  []vp8lTransform
-	materialize func() []uint32
+	width                int
+	height               int
+	pixels               []uint32
+	transforms           []vp8lTransform
+	materialize          func() []uint32
+	materializeWorkspace func(*vp8lTransformWorkspace, int) []uint32
+	forceCache           bool
 }
 
 type vp8lColorTransformElement struct {
@@ -54,26 +55,36 @@ func vp8lForEachTransformCandidate(source []uint32, width int, height int, budge
 }
 
 func vp8lForEachTransformCandidateWorkspace(source []uint32, width int, height int, budget vp8lBudget, workspace *vp8lTransformWorkspace, visit func(vp8lTransformCandidate)) {
+	counters := budget.counters
 	if budget.trySubtractGreen {
 		pixels := vp8lSubtractGreenPlaneWorkspace(source, workspace, 0)
-		materializeSubtract := func() []uint32 { return vp8lSubtractGreenPlane(source) }
+		materializeSubtract := func() []uint32 {
+			counters.recordRematerialization(len(source))
+			return vp8lSubtractGreenPlane(source)
+		}
+		materializeSubtractWorkspace := func(workspace *vp8lTransformWorkspace, slot int) []uint32 {
+			counters.recordWorkspaceMaterialization(len(source))
+			return vp8lSubtractGreenPlaneWorkspace(source, workspace, slot)
+		}
 		transform := vp8lTransform{kind: vp8lTransformSubtractGreen}
 		visit(vp8lTransformCandidate{
-			width:       width,
-			height:      height,
-			pixels:      pixels,
-			transforms:  []vp8lTransform{transform},
-			materialize: materializeSubtract,
+			width:                width,
+			height:               height,
+			pixels:               pixels,
+			transforms:           []vp8lTransform{transform},
+			materialize:          materializeSubtract,
+			materializeWorkspace: materializeSubtractWorkspace,
 		})
 		if budget.tryCombined {
-			vp8lForEachPredictorCandidate(pixels, width, height, budget, []vp8lTransform{transform}, materializeSubtract, workspace, 1, 2, visit)
+			vp8lForEachPredictorCandidate(pixels, width, height, budget, []vp8lTransform{transform}, materializeSubtract, materializeSubtractWorkspace, workspace, 1, 2, visit)
 		}
 	}
 
-	vp8lForEachPredictorCandidate(source, width, height, budget, nil, func() []uint32 { return source }, workspace, 0, 1, visit)
+	materializeSourceWorkspace := func(*vp8lTransformWorkspace, int) []uint32 { return source }
+	vp8lForEachPredictorCandidate(source, width, height, budget, nil, func() []uint32 { return source }, materializeSourceWorkspace, workspace, 0, 1, visit)
 
 	if budget.tryColor {
-		vp8lForEachColorTransformCandidate(source, width, height, budget, nil, func() []uint32 { return source }, workspace, 0, visit)
+		vp8lForEachColorTransformCandidate(source, width, height, budget, nil, func() []uint32 { return source }, materializeSourceWorkspace, workspace, 0, visit)
 	}
 	if budget.tryPalette {
 		vp8lForEachPaletteCandidate(source, width, height, budget, workspace, visit)
@@ -85,20 +96,28 @@ func vp8lVisitCombinedTransformCandidates(candidate vp8lTransformCandidate, budg
 		return
 	}
 	if budget.trySubtractGreen && !vp8lTransformsContain(candidate.transforms, vp8lTransformSubtractGreen) {
+		counters := budget.counters
 		transforms := append(append([]vp8lTransform(nil), candidate.transforms...), vp8lTransform{kind: vp8lTransformSubtractGreen})
 		materialize := candidate.materialize
+		materializeWorkspace := candidate.materializeWorkspace
 		visit(vp8lTransformCandidate{
 			width:      candidate.width,
 			height:     candidate.height,
 			pixels:     vp8lSubtractGreenPlaneWorkspace(candidate.pixels, workspace, slot),
 			transforms: transforms,
 			materialize: func() []uint32 {
+				counters.recordRematerialization(len(candidate.pixels))
 				return vp8lSubtractGreenPlane(materialize())
+			},
+			materializeWorkspace: func(workspace *vp8lTransformWorkspace, slot int) []uint32 {
+				source := materializeWorkspace(workspace, vp8lAlternateTransformSlot(slot))
+				counters.recordWorkspaceMaterialization(len(source))
+				return vp8lSubtractGreenPlaneWorkspace(source, workspace, slot)
 			},
 		})
 	}
 	if budget.tryColor {
-		vp8lForEachColorTransformCandidate(candidate.pixels, candidate.width, candidate.height, budget, candidate.transforms, candidate.materialize, workspace, slot, visit)
+		vp8lForEachColorTransformCandidate(candidate.pixels, candidate.width, candidate.height, budget, candidate.transforms, candidate.materialize, candidate.materializeWorkspace, workspace, slot, visit)
 	}
 }
 
@@ -264,7 +283,8 @@ func vp8lSubPixels(a uint32, b uint32) uint32 {
 		uint32(uint8(a)-uint8(b))
 }
 
-func vp8lForEachColorTransformCandidate(source []uint32, width int, height int, budget vp8lBudget, prefix []vp8lTransform, materializeSource func() []uint32, workspace *vp8lTransformWorkspace, slot int, visit func(vp8lTransformCandidate)) {
+func vp8lForEachColorTransformCandidate(source []uint32, width int, height int, budget vp8lBudget, prefix []vp8lTransform, materializeSource func() []uint32, materializeSourceWorkspace func(*vp8lTransformWorkspace, int) []uint32, workspace *vp8lTransformWorkspace, slot int, visit func(vp8lTransformCandidate)) {
+	counters := budget.counters
 	for _, element := range vp8lColorTransformCandidates(source, budget) {
 		pixels := vp8lApplyColorTransformWorkspace(source, element, workspace, slot)
 		transformWidth, transformHeight := vp8lTransformDimensions(width, height, 9)
@@ -280,6 +300,7 @@ func vp8lForEachColorTransformCandidate(source []uint32, width int, height int, 
 		}
 		transforms := append(append([]vp8lTransform(nil), prefix...), transform)
 		materializeColor := func() []uint32 {
+			counters.recordRematerialization(len(source))
 			return vp8lApplyColorTransform(materializeSource(), element)
 		}
 		visit(vp8lTransformCandidate{
@@ -288,6 +309,11 @@ func vp8lForEachColorTransformCandidate(source []uint32, width int, height int, 
 			pixels:      pixels,
 			transforms:  transforms,
 			materialize: materializeColor,
+			materializeWorkspace: func(workspace *vp8lTransformWorkspace, slot int) []uint32 {
+				source := materializeSourceWorkspace(workspace, vp8lAlternateTransformSlot(slot))
+				counters.recordWorkspaceMaterialization(len(source))
+				return vp8lApplyColorTransformWorkspace(source, element, workspace, slot)
+			},
 		})
 	}
 }
@@ -304,7 +330,7 @@ func vp8lColorTransformCandidates(source []uint32, budget vp8lBudget) []vp8lColo
 		{redToBlue: 32},
 		{greenToRed: 32, greenToBlue: 32},
 	}
-	if len(budget.predictorModes) == 14 {
+	if budget.colorSearchSamples >= 256 {
 		for _, delta := range []int{-16, 16} {
 			values = append(values, vp8lColorTransformElement{
 				greenToRed:  uint8(int8(int(int8(estimate.greenToRed)) + delta)),
@@ -408,13 +434,12 @@ func vp8lForEachPaletteCandidate(source []uint32, width int, height int, budget 
 	if !ok {
 		return
 	}
-	tables := [][]uint32{table}
-	sorted := append([]uint32(nil), table...)
-	sort.Slice(sorted, func(i int, j int) bool { return sorted[i] < sorted[j] })
-	if !vp8lUint32SlicesEqual(table, sorted) {
-		tables = append(tables, sorted)
-	}
-	for _, candidateTable := range tables {
+	vp8lForEachPaletteCandidateWithTable(source, width, height, table, budget, workspace, visit)
+}
+
+func vp8lForEachPaletteCandidateWithTable(source []uint32, width int, height int, table []uint32, budget vp8lBudget, workspace *vp8lTransformWorkspace, visit func(vp8lTransformCandidate)) {
+	counters := budget.counters
+	for _, candidateTable := range vp8lPaletteOrders(table) {
 		indexed, indexedWidth := vp8lApplyPaletteWorkspace(source, width, height, candidateTable, workspace, 0)
 		deltas := make([]uint32, len(candidateTable))
 		for i, pixel := range candidateTable {
@@ -435,26 +460,59 @@ func vp8lForEachPaletteCandidate(source []uint32, width int, height int, budget 
 			pixels:     indexed,
 			transforms: []vp8lTransform{paletteTransform},
 			materialize: func() []uint32 {
+				counters.recordRematerialization(len(indexed))
 				pixels, _ := vp8lApplyPalette(source, width, height, candidateTable)
+				return pixels
+			},
+			materializeWorkspace: func(workspace *vp8lTransformWorkspace, slot int) []uint32 {
+				counters.recordWorkspaceMaterialization(len(indexed))
+				pixels, _ := vp8lApplyPaletteWorkspace(source, width, height, candidateTable, workspace, slot)
 				return pixels
 			},
 		}
 		visit(candidate)
-		if !budget.tryCombined || indexedWidth*height < 4 {
+		if !budget.tryPalettePredictor || indexedWidth*height < 4 {
 			continue
 		}
-		modes, transformWidth, transformHeight := vp8lChooseBlockPredictors(indexed, indexedWidth, height, 4, budget.predictorModes)
-		if len(modes) > 1 && !vp8lAllBytesEqual(modes) {
-			pixels := vp8lApplyPredictorWorkspace(indexed, indexedWidth, height, 4, modes, transformWidth, workspace, 1)
-			transforms := []vp8lTransform{paletteTransform, vp8lPredictorTransform(4, modes, transformWidth, transformHeight)}
-			materialize := candidate.materialize
+		materialize := candidate.materialize
+		materializeWorkspace := candidate.materializeWorkspace
+		for _, mode := range budget.predictorModes {
+			modes, transformWidth, transformHeight := vp8lUniformPredictorImage(indexedWidth, height, 9, mode)
+			pixels := vp8lApplyPredictorWorkspace(indexed, indexedWidth, height, 9, modes, transformWidth, workspace, 1)
+			transforms := []vp8lTransform{paletteTransform, vp8lPredictorTransform(9, modes, transformWidth, transformHeight)}
 			visit(vp8lTransformCandidate{
 				width:      indexedWidth,
 				height:     height,
 				pixels:     pixels,
 				transforms: transforms,
 				materialize: func() []uint32 {
+					counters.recordRematerialization(len(indexed))
+					return vp8lApplyPredictor(materialize(), indexedWidth, height, 9, modes, transformWidth)
+				},
+				materializeWorkspace: func(workspace *vp8lTransformWorkspace, slot int) []uint32 {
+					source := materializeWorkspace(workspace, vp8lAlternateTransformSlot(slot))
+					counters.recordWorkspaceMaterialization(len(source))
+					return vp8lApplyPredictorWorkspace(source, indexedWidth, height, 9, modes, transformWidth, workspace, slot)
+				},
+			})
+		}
+		modes, transformWidth, transformHeight := vp8lChooseBlockPredictors(indexed, indexedWidth, height, 4, budget.predictorModes)
+		if len(modes) > 1 && !vp8lAllBytesEqual(modes) {
+			pixels := vp8lApplyPredictorWorkspace(indexed, indexedWidth, height, 4, modes, transformWidth, workspace, 1)
+			transforms := []vp8lTransform{paletteTransform, vp8lPredictorTransform(4, modes, transformWidth, transformHeight)}
+			visit(vp8lTransformCandidate{
+				width:      indexedWidth,
+				height:     height,
+				pixels:     pixels,
+				transforms: transforms,
+				materialize: func() []uint32 {
+					counters.recordRematerialization(len(indexed))
 					return vp8lApplyPredictor(materialize(), indexedWidth, height, 4, modes, transformWidth)
+				},
+				materializeWorkspace: func(workspace *vp8lTransformWorkspace, slot int) []uint32 {
+					source := materializeWorkspace(workspace, vp8lAlternateTransformSlot(slot))
+					counters.recordWorkspaceMaterialization(len(source))
+					return vp8lApplyPredictorWorkspace(source, indexedWidth, height, 4, modes, transformWidth, workspace, slot)
 				},
 			})
 		}

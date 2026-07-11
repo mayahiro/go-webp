@@ -7,10 +7,12 @@ func vp8lVisitBlockColorCandidates(
 	budget vp8lBudget,
 	prefix []vp8lTransform,
 	materializeSource func() []uint32,
+	materializeSourceWorkspace func(*vp8lTransformWorkspace, int) []uint32,
 	workspace *vp8lTransformWorkspace,
 	slot int,
 	visit func(vp8lTransformCandidate),
 ) {
+	counters := budget.counters
 	for _, sizeBits := range budget.colorSizeBits {
 		elements, transformWidth, transformHeight := vp8lChooseBlockColorElements(source, width, height, sizeBits, budget.colorSearchSamples)
 		if len(elements) == 0 || vp8lAllColorElementsEqual(elements) {
@@ -20,6 +22,7 @@ func vp8lVisitBlockColorCandidates(
 		transform := vp8lBlockColorTransform(sizeBits, elements, transformWidth, transformHeight)
 		transforms := append(append([]vp8lTransform(nil), prefix...), transform)
 		materializeColor := func() []uint32 {
+			counters.recordRematerialization(len(source))
 			return vp8lApplyBlockColorTransform(materializeSource(), width, height, sizeBits, elements, transformWidth)
 		}
 		visit(vp8lTransformCandidate{
@@ -28,6 +31,11 @@ func vp8lVisitBlockColorCandidates(
 			pixels:      pixels,
 			transforms:  transforms,
 			materialize: materializeColor,
+			materializeWorkspace: func(workspace *vp8lTransformWorkspace, slot int) []uint32 {
+				source := materializeSourceWorkspace(workspace, vp8lAlternateTransformSlot(slot))
+				counters.recordWorkspaceMaterialization(len(source))
+				return vp8lApplyBlockColorTransformWorkspace(source, width, height, sizeBits, elements, transformWidth, workspace, slot)
+			},
 		})
 	}
 }

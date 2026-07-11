@@ -2,6 +2,7 @@ package webp
 
 import (
 	"runtime"
+	"sort"
 	"sync"
 )
 
@@ -114,12 +115,19 @@ type vp8lBudget struct {
 	trySubtractGreen    bool
 	tryColor            bool
 	tryPalette          bool
+	tryPalettePredictor bool
 	tryCombined         bool
+	stagedCombined      bool
 	matchChainDepth     int
 	matchEdges          int
+	lowColorMatchEdges  int
+	matchHashBits       int
 	optimalPasses       int
 	tryColorCache       bool
+	colorCacheBits      []uint8
+	cacheCandidates     int
 	screenCandidates    int
+	shallowCandidates   int
 	exactCandidates     int
 	tryMetaPrefix       bool
 	metaPrefixBits      []uint8
@@ -129,34 +137,47 @@ type vp8lBudget struct {
 	maxWorkers          int
 	maxParallelBytes    uint64
 	maxWorkspaceBytes   uint64
+	earlyExitUniform    bool
+	earlyExitPalette    bool
+	metaCandidates      int
+	counters            *vp8lSearchCounters
 }
 
 func vp8lBudgetForMode(mode Mode) vp8lBudget {
 	budget := vp8lBudget{
 		maxSourceBytes:      vp8lMaxSourceBytes,
-		predictorModes:      []uint8{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13},
-		predictorSizeBits:   []uint8{4, 5, 6, 7, 8, 9},
+		predictorModes:      []uint8{1, 2, 12, 3, 7},
+		predictorSizeBits:   []uint8{4, 6, 8},
 		colorSizeBits:       []uint8{5},
 		colorBaseCandidates: 0,
 		colorSearchSamples:  256,
 		trySubtractGreen:    true,
 		tryColor:            true,
 		tryPalette:          true,
+		tryPalettePredictor: true,
 		tryCombined:         true,
+		stagedCombined:      true,
 		matchChainDepth:     128,
-		matchEdges:          4,
+		matchEdges:          2,
+		lowColorMatchEdges:  4,
 		optimalPasses:       1,
 		tryColorCache:       true,
-		screenCandidates:    24,
-		exactCandidates:     6,
+		colorCacheBits:      []uint8{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11},
+		cacheCandidates:     2,
+		screenCandidates:    12,
+		shallowCandidates:   6,
+		exactCandidates:     3,
 		tryMetaPrefix:       true,
-		metaPrefixBits:      []uint8{4, 5, 6, 7},
+		metaPrefixBits:      []uint8{5, 6},
 		maxEntropyGroups:    16,
 		entropyIterations:   1,
 		entropyRefinements:  0,
 		maxWorkers:          2,
 		maxParallelBytes:    64 << 20,
 		maxWorkspaceBytes:   96 << 20,
+		earlyExitUniform:    true,
+		earlyExitPalette:    true,
+		metaCandidates:      1,
 	}
 	switch mode {
 	case ModeFast:
@@ -166,11 +187,15 @@ func vp8lBudgetForMode(mode Mode) vp8lBudget {
 		budget.colorSizeBits = nil
 		budget.colorBaseCandidates = 0
 		budget.tryCombined = false
+		budget.tryPalettePredictor = false
 		budget.matchChainDepth = 8
 		budget.matchEdges = 1
 		budget.optimalPasses = 0
 		budget.tryColorCache = false
+		budget.colorCacheBits = nil
+		budget.cacheCandidates = 0
 		budget.screenCandidates = 4
+		budget.shallowCandidates = 2
 		budget.exactCandidates = 2
 		budget.tryMetaPrefix = false
 		budget.maxWorkers = 1
@@ -181,24 +206,33 @@ func vp8lBudgetForMode(mode Mode) vp8lBudget {
 		budget.colorSizeBits = nil
 		budget.colorBaseCandidates = 0
 		budget.tryCombined = false
+		budget.tryPalettePredictor = false
 		budget.matchChainDepth = 8
 		budget.matchEdges = 1
 		budget.optimalPasses = 0
 		budget.tryColorCache = false
+		budget.colorCacheBits = nil
+		budget.cacheCandidates = 0
 		budget.screenCandidates = 6
+		budget.shallowCandidates = 3
 		budget.exactCandidates = 3
 		budget.tryMetaPrefix = false
 		budget.maxWorkers = 1
 	case ModeBestCompression:
 		budget.maxSourceBytes = vp8lMaxSourceBytes
 		budget.predictorModes = []uint8{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13}
+		budget.predictorSizeBits = []uint8{4, 5, 6, 7, 8, 9}
 		budget.colorSizeBits = []uint8{4, 5, 6}
 		budget.colorBaseCandidates = 2
 		budget.colorSearchSamples = 1024
 		budget.matchChainDepth = 128
 		budget.matchEdges = 8
+		budget.lowColorMatchEdges = 0
+		budget.matchHashBits = vp8lHashBits
 		budget.optimalPasses = 2
+		budget.cacheCandidates = 10
 		budget.screenCandidates = 32
+		budget.shallowCandidates = 10
 		budget.exactCandidates = 10
 		budget.metaPrefixBits = []uint8{3, 4, 5, 6, 7, 8}
 		budget.maxEntropyGroups = 16
@@ -207,62 +241,120 @@ func vp8lBudgetForMode(mode Mode) vp8lBudget {
 		budget.maxWorkers = 4
 		budget.maxParallelBytes = 128 << 20
 		budget.maxWorkspaceBytes = 192 << 20
+		budget.earlyExitUniform = false
+		budget.earlyExitPalette = false
+		budget.metaCandidates = 10
+		budget.stagedCombined = false
 	}
 	return budget
 }
 
-func searchVP8L(source vp8lSource, budget vp8lBudget) (*vp8lPlan, error) {
-	pixelCount := uint64(source.width) * uint64(source.height)
-	if vp8lBufferedSearchBytes(pixelCount, budget) > budget.maxWorkspaceBytes {
-		return nil, errVP8LSourceLimit
+func vp8lUniformSearchBudget(budget vp8lBudget) vp8lBudget {
+	budget.predictorModes = []uint8{1, 2, 12}
+	budget.predictorSizeBits = nil
+	budget.tryColor = false
+	budget.colorSizeBits = nil
+	budget.colorBaseCandidates = 0
+	budget.tryPalette = false
+	budget.tryCombined = false
+	budget.stagedCombined = false
+	budget.matchChainDepth = 8
+	budget.matchEdges = 1
+	budget.tryColorCache = false
+	budget.screenCandidates = 5
+	budget.shallowCandidates = 5
+	budget.exactCandidates = 5
+	budget.tryMetaPrefix = false
+	budget.maxWorkers = 1
+	return budget
+}
+
+func vp8lAdaptBudgetForPixels(budget vp8lBudget, pixels []uint32) vp8lBudget {
+	if budget.earlyExitUniform && vp8lPixelsAreUniform(pixels) {
+		return vp8lUniformSearchBudget(budget)
 	}
-	pixels, alpha, err := source.materialize(budget.maxSourceBytes)
-	if err != nil {
-		return nil, err
+	if budget.lowColorMatchEdges > budget.matchEdges && vp8lHasAtMostUniquePixels(pixels, 16) {
+		budget.matchEdges = budget.lowColorMatchEdges
 	}
-	direct := vp8lTransformCandidate{
-		width:       source.width,
-		height:      source.height,
-		pixels:      pixels,
-		materialize: func() []uint32 { return pixels },
-	}
-	reservoir := newVP8LCandidateReservoir(source.width, source.height, alpha, budget.screenCandidates)
-	reservoir.add(direct)
-	workspace := &vp8lSearchWorkspace{}
-	vp8lForEachTransformCandidateWorkspace(pixels, source.width, source.height, budget, &workspace.transform, func(candidate vp8lTransformCandidate) {
-		reservoir.add(candidate)
-	})
-	for _, base := range reservoir.blockColorBases(budget.colorBaseCandidates) {
-		basePixels := base.materialize()
-		vp8lVisitBlockColorCandidates(
-			basePixels,
-			source.width,
-			source.height,
-			budget,
-			base.transforms,
-			base.materialize,
-			&workspace.transform,
-			0,
-			reservoir.add,
-		)
-	}
-	finalists := reservoir.finalists(budget.exactCandidates)
-	plans := vp8lBuildFinalistPlans(source.width, source.height, alpha, finalists, budget, workspace)
-	var best *vp8lPlan
-	for _, plan := range plans {
-		if best == nil || plan.payloadBitLen() < best.payloadBitLen() {
-			best = plan
+	return budget
+}
+
+func vp8lHasAtMostUniquePixels(pixels []uint32, limit int) bool {
+	seen := make(map[uint32]struct{}, limit+1)
+	for _, pixel := range pixels {
+		seen[pixel] = struct{}{}
+		if len(seen) > limit {
+			return false
 		}
 	}
-	return best, nil
+	return true
+}
+
+func vp8lSelectExactFinalists(width int, height int, alpha bool, candidates []vp8lTransformCandidate, budget vp8lBudget, workspace *vp8lSearchWorkspace) []vp8lTransformCandidate {
+	if len(candidates) <= budget.exactCandidates {
+		return candidates
+	}
+	shallowBudget := budget
+	shallowBudget.matchChainDepth = minInt(shallowBudget.matchChainDepth, 8)
+	shallowBudget.matchEdges = minInt(shallowBudget.matchEdges, 1)
+	shallowBudget.optimalPasses = 0
+	shallowBudget.tryColorCache = false
+	shallowBudget.tryMetaPrefix = false
+	shallowBudget.entropyIterations = 0
+	plans := vp8lBuildFinalistPlans(width, height, alpha, candidates, shallowBudget, workspace)
+	type rankedCandidate struct {
+		index int
+		bits  uint64
+	}
+	ranked := make([]rankedCandidate, len(candidates))
+	for i, plan := range plans {
+		ranked[i] = rankedCandidate{index: i, bits: plan.payloadBitLen()}
+	}
+	sort.SliceStable(ranked, func(i int, j int) bool {
+		return ranked[i].bits < ranked[j].bits
+	})
+	selected := make([]vp8lTransformCandidate, 0, budget.exactCandidates+1)
+	selectedIndices := make(map[int]int, budget.exactCandidates+1)
+	for _, candidate := range ranked[:budget.exactCandidates] {
+		selectedIndices[candidate.index] = len(selected)
+		selected = append(selected, candidates[candidate.index])
+	}
+	for _, candidate := range ranked {
+		if vp8lTransformFamily(candidates[candidate.index].transforms) != vp8lTransformKindsFamily(vp8lTransformPredictor) {
+			continue
+		}
+		if selectedIndex, ok := selectedIndices[candidate.index]; ok {
+			selected[selectedIndex].forceCache = true
+		} else if vp8lScreenColorCacheCandidate(width, height, alpha, candidates[candidate.index], 7, budget, workspace) < ranked[budget.exactCandidates-1].bits {
+			protected := candidates[candidate.index]
+			protected.forceCache = true
+			selected = append(selected, protected)
+		}
+		break
+	}
+	return selected
+}
+
+func vp8lPixelsAreUniform(pixels []uint32) bool {
+	if len(pixels) == 0 {
+		return false
+	}
+	first := pixels[0]
+	for _, pixel := range pixels[1:] {
+		if pixel != first {
+			return false
+		}
+	}
+	return true
 }
 
 func vp8lBuildFinalistPlans(width int, height int, alpha bool, finalists []vp8lTransformCandidate, budget vp8lBudget, firstWorkspace *vp8lSearchWorkspace) []*vp8lPlan {
 	plans := make([]*vp8lPlan, len(finalists))
 	workerCount := vp8lFinalistWorkerCount(width*height, len(finalists), budget)
+	budget.counters.recordWorkers(workerCount)
 	if workerCount == 1 {
 		for i, candidate := range finalists {
-			plans[i] = vp8lBuildCandidatePlan(width, height, alpha, candidate, budget, firstWorkspace)
+			plans[i] = vp8lBuildCandidatePlan(width, height, alpha, candidate, vp8lBudgetForFinalist(budget, finalists, i), firstWorkspace)
 		}
 		return plans
 	}
@@ -270,7 +362,7 @@ func vp8lBuildFinalistPlans(width int, height int, alpha bool, finalists []vp8lT
 	workspaces := make([]*vp8lSearchWorkspace, workerCount)
 	workspaces[0] = firstWorkspace
 	for i := 1; i < workerCount; i++ {
-		workspaces[i] = &vp8lSearchWorkspace{}
+		workspaces[i] = &vp8lSearchWorkspace{counters: budget.counters}
 	}
 	jobs := make(chan int, len(finalists))
 	var wait sync.WaitGroup
@@ -279,7 +371,7 @@ func vp8lBuildFinalistPlans(width int, height int, alpha bool, finalists []vp8lT
 		go func(workspace *vp8lSearchWorkspace) {
 			defer wait.Done()
 			for index := range jobs {
-				plans[index] = vp8lBuildCandidatePlan(width, height, alpha, finalists[index], budget, workspace)
+				plans[index] = vp8lBuildCandidatePlan(width, height, alpha, finalists[index], vp8lBudgetForFinalist(budget, finalists, index), workspace)
 			}
 		}(workspaces[worker])
 	}
@@ -291,16 +383,36 @@ func vp8lBuildFinalistPlans(width int, height int, alpha bool, finalists []vp8lT
 	return plans
 }
 
+func vp8lBudgetForFinalist(budget vp8lBudget, finalists []vp8lTransformCandidate, index int) vp8lBudget {
+	if index < budget.cacheCandidates || finalists[index].forceCache {
+		return budget
+	}
+	budget.tryColorCache = false
+	return budget
+}
+
 func vp8lBuildCandidatePlan(width int, height int, alpha bool, candidate vp8lTransformCandidate, budget vp8lBudget, workspace *vp8lSearchWorkspace) *vp8lPlan {
 	pixels := candidate.pixels
-	if candidate.materialize != nil {
+	if workspace != nil && candidate.materializeWorkspace != nil {
+		pixels = candidate.materializeWorkspace(&workspace.transform, 0)
+	} else if candidate.materialize != nil {
 		pixels = candidate.materialize()
 	}
 	return newVP8LPlanWorkspace(width, height, alpha, candidate.transforms, pixels, candidate.width, candidate.height, budget, workspace)
 }
 
+func vp8lMaterializeCandidateWorkspace(candidate vp8lTransformCandidate, workspace *vp8lTransformWorkspace, slot int) []uint32 {
+	if candidate.materializeWorkspace != nil {
+		return candidate.materializeWorkspace(workspace, slot)
+	}
+	if candidate.materialize != nil {
+		return candidate.materialize()
+	}
+	return candidate.pixels
+}
+
 func vp8lFinalistWorkerCount(pixelCount int, finalistCount int, budget vp8lBudget) int {
-	if finalistCount < 2 || pixelCount < 64*64 || budget.maxWorkers < 2 {
+	if finalistCount < 2 || pixelCount < 256*256 || budget.maxWorkers < 2 {
 		return 1
 	}
 	workers := minInt(finalistCount, minInt(budget.maxWorkers, runtime.GOMAXPROCS(0)))
@@ -329,12 +441,22 @@ func newVP8LPlan(width int, height int, alpha bool, transforms []vp8lTransform, 
 }
 
 func newVP8LPlanWorkspace(width int, height int, alpha bool, transforms []vp8lTransform, pixels []uint32, imageWidth int, imageHeight int, budget vp8lBudget, workspace *vp8lSearchWorkspace) *vp8lPlan {
+	if workspace == nil && budget.counters != nil {
+		workspace = &vp8lSearchWorkspace{}
+	}
+	if workspace != nil {
+		workspace.counters = budget.counters
+	}
+	return newVP8LPlanForImage(width, height, alpha, transforms, buildVP8LImagePlanWorkspace(pixels, imageWidth, imageHeight, budget, workspace))
+}
+
+func newVP8LPlanForImage(width int, height int, alpha bool, transforms []vp8lTransform, image vp8lImagePlan) *vp8lPlan {
 	plan := &vp8lPlan{
 		width:      width,
 		height:     height,
 		alpha:      alpha,
 		transforms: append([]vp8lTransform(nil), transforms...),
-		image:      buildVP8LImagePlanWorkspace(pixels, imageWidth, imageHeight, budget, workspace),
+		image:      image,
 	}
 	counter := vp8lBitCounter()
 	plan.writeTo(counter)
@@ -343,16 +465,30 @@ func newVP8LPlanWorkspace(width int, height int, alpha bool, transforms []vp8lTr
 }
 
 func buildVP8LLiteralImagePlan(pixels []uint32, width int, height int) vp8lImagePlan {
-	tokens := make([]vp8lToken, len(pixels))
-	for i, pixel := range pixels {
-		tokens[i] = vp8lLiteralToken(pixel)
-	}
+	tokens := vp8lLiteralTokens(pixels)
 	return vp8lImagePlan{
 		width:  width,
 		height: height,
 		tokens: tokens,
 		group:  buildVP8LCodeGroup(tokens, 0),
 	}
+}
+
+func vp8lLiteralImagePlanWithGroup(pixels []uint32, width int, height int, group vp8lCodeGroup) vp8lImagePlan {
+	return vp8lImagePlan{
+		width:  width,
+		height: height,
+		tokens: vp8lLiteralTokens(pixels),
+		group:  group,
+	}
+}
+
+func vp8lLiteralTokens(pixels []uint32) []vp8lToken {
+	tokens := make([]vp8lToken, len(pixels))
+	for i, pixel := range pixels {
+		tokens[i] = vp8lLiteralToken(pixel)
+	}
+	return tokens
 }
 
 func buildVP8LCodeGroup(tokens []vp8lToken, cacheBits uint8) vp8lCodeGroup {

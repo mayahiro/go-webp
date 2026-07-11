@@ -3,21 +3,25 @@ package webp
 import (
 	"errors"
 	"fmt"
+	"image"
 	"image/color"
 )
 
 var errVP8LSourceLimit = errors.New("webp: VP8L search workspace exceeds limit")
 
 type vp8lSource struct {
-	width   int
-	height  int
-	readRow func(y int, dst []uint32)
+	width    int
+	height   int
+	paletted bool
+	readRow  func(y int, dst []uint32)
 }
 
 func newVP8LSource(source encoderSource, readPixel pixelReader) vp8lSource {
+	_, paletted := source.image.(*image.Paletted)
 	return vp8lSource{
-		width:  source.width,
-		height: source.height,
+		width:    source.width,
+		height:   source.height,
+		paletted: paletted,
 		readRow: func(y int, dst []uint32) {
 			sourceY := source.bounds.Min.Y + y
 			for x := range source.width {

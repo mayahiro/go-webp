@@ -6,7 +6,7 @@ guarantees.
 
 ## Environment
 
-- Date: 2026-07-11
+- Date: 2026-07-12
 - OS: darwin
 - Architecture: arm64
 - CPU: Apple M1 Max
@@ -33,16 +33,16 @@ output size for one encode.
 
 | Fixture | Quality | Time | encoded_B | B/op | allocs/op |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Gradient 128x128 | 1 | 4.896 ms | 866 | 86,186 | 20 |
-| Gradient 128x128 | 50 | 4.448 ms | 2,768 | 90,730 | 20 |
-| Gradient 128x128 | 75 | 5.053 ms | 3,506 | 93,802 | 20 |
-| Gradient 128x128 | 90 | 11.508 ms | 5,284 | 152,746 | 24 |
-| Gradient 128x128 | 100 | 11.936 ms | 8,306 | 164,522 | 21 |
-| UI 256x256 | 75 | 17.542 ms | 2,906 | 306,096 | 21 |
-| Flat 128x128 | 75 | 4.046 ms | 84 | 89,274 | 19 |
-| Palette 256x256 | 75 | 26.382 ms | 39,042 | 394,496 | 23 |
-| Alpha 128x128 | 75 | 6.195 ms | 5,582 | 126,218 | 33 |
-| Photo-like 512x512 | 75 | 115.525 ms | 142,078 | 1,467,968 | 22 |
+| Gradient 128x128 | 1 | 4.544 ms | 866 | 86,186 | 20 |
+| Gradient 128x128 | 50 | 4.499 ms | 2,768 | 90,730 | 20 |
+| Gradient 128x128 | 75 | 5.057 ms | 3,506 | 93,802 | 20 |
+| Gradient 128x128 | 90 | 11.485 ms | 5,284 | 152,746 | 24 |
+| Gradient 128x128 | 100 | 12.056 ms | 8,306 | 164,522 | 21 |
+| UI 256x256 | 75 | 17.723 ms | 2,906 | 306,096 | 21 |
+| Flat 128x128 | 75 | 4.153 ms | 84 | 89,274 | 19 |
+| Palette 256x256 | 75 | 27.099 ms | 39,042 | 394,496 | 23 |
+| Alpha 128x128 | 75 | 6.496 ms | 5,582 | 126,218 | 33 |
+| Photo-like 512x512 | 75 | 116.795 ms | 142,078 | 1,467,968 | 22 |
 
 The photo-like fixture is deterministic synthetic content and is not a
 substitute for a natural-photo corpus.
@@ -51,12 +51,12 @@ substitute for a natural-photo corpus.
 
 | Fixture | Time | encoded_B | B/op | allocs/op |
 | --- | ---: | ---: | ---: | ---: |
-| Gradient 128x128 | 326.135 ms | 58 | 18,453,264 | 10,957 |
-| UI 256x256 | 650.467 ms | 1,284 | 58,717,701 | 19,167 |
-| Flat 128x128 | 200.477 ms | 32 | 14,056,565 | 3,130 |
-| Palette 256x256 | 474.438 ms | 834 | 54,151,536 | 21,041 |
-| Alpha 128x128 | 327.292 ms | 322 | 23,889,189 | 18,117 |
-| Photo-like 512x512 | 1,628.209 ms | 2,916 | 160,735,810 | 27,370 |
+| Gradient 128x128 | 88.615 ms | 58 | 3,444,397 | 1,249 |
+| UI 256x256 | 211.014 ms | 816 | 28,463,373 | 2,680 |
+| Flat 128x128 | 19.168 ms | 32 | 1,072,882 | 133 |
+| Palette 256x256 | 37.536 ms | 462 | 8,126,301 | 1,166 |
+| Alpha 128x128 | 78.359 ms | 120 | 3,599,173 | 1,623 |
+| Photo-like 512x512 | 579.021 ms | 2,916 | 54,303,192 | 3,000 |
 
 ## Interpretation
 
@@ -68,14 +68,20 @@ substitute for a natural-photo corpus.
   1024x1024 reconstruction workspace from about 1.5 MiB to 48 KiB without
   changing the encoded stream
 - Lossless performance varies substantially with image structure. The
-  photo-like 512x512 fixture takes about 1.63 seconds and reports about
-  160.7 MB of cumulative allocation per encode
-- `B/op` is cumulative heap allocation, not peak live memory. Candidate
-  rematerialization can increase `B/op` while encode-scoped workspaces keep
-  simultaneously retained search state bounded
-- Lossless screening keeps transform descriptors and cost summaries, then
-  performs exact match, cache, Huffman, and spatial-entropy optimization only
-  for a bounded finalist set
+  photo-like 512x512 fixture takes about 579 ms and reports about 54.3 MB of
+  cumulative allocation per encode
+- `B/op` is cumulative heap allocation, not peak live memory. Transform
+  materialization alternates between encode-scoped scratch buffers while
+  candidate metadata, tokens, and Huffman structures remain bounded
+- Default lossless search uses cost-only screening, shallow parsing, exact
+  parsing, color-cache selection, and spatial-entropy refinement as separate
+  bounded stages. Combined transforms are expanded only from selected parents
+- Small Default inputs use an adaptive 8- to 16-bit matcher table and one
+  finalist worker. Uniform inputs and paletted inputs with at most 16 colors
+  use dedicated early paths
+- `BestCompression` retains the materialized source, palette analysis,
+  candidate scores, and Default winner in one search session before expanding
+  the search budget
 - Default buffered search uses a 96 MiB estimated workspace gate and at most
   two finalist workers. Inputs outside that gate fall back to the streaming
   encoder; `BestCompression` raises the search gate to 192 MiB and permits up

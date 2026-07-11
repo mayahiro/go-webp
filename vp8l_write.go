@@ -51,19 +51,7 @@ func vp8lPlanForMode(source vp8lSource, mode Mode) (vp8lEncodedPlan, error) {
 	if mode != ModeBestCompression {
 		return vp8lBufferedPlanOrStreaming(source, mode)
 	}
-
-	defaultPlan, err := vp8lBufferedPlanOrStreaming(source, ModeDefault)
-	if err != nil {
-		return nil, err
-	}
-	bestPlan, err := vp8lBufferedPlanOrStreaming(source, ModeBestCompression)
-	if err != nil {
-		return nil, err
-	}
-	if defaultPlan.payloadBitLen() <= bestPlan.payloadBitLen() {
-		return defaultPlan, nil
-	}
-	return bestPlan, nil
+	return vp8lBestPlanOrStreaming(source)
 }
 
 func vp8lBufferedPlanOrStreaming(source vp8lSource, mode Mode) (vp8lEncodedPlan, error) {

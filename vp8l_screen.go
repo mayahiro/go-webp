@@ -29,13 +29,21 @@ type vp8lCandidateReservoir struct {
 	alpha      bool
 	limit      int
 	candidates []vp8lScreenedCandidate
+	counters   *vp8lSearchCounters
+	huffman    vp8lHuffmanWorkspace
+	scorer     *vp8lCandidateScorer
+	seeded     map[vp8lCandidateKey]struct{}
 }
 
-func newVP8LCandidateReservoir(width int, height int, alpha bool, limit int) *vp8lCandidateReservoir {
+func newVP8LCandidateReservoir(width int, height int, alpha bool, limit int, counters *vp8lSearchCounters) *vp8lCandidateReservoir {
+	return newVP8LCandidateReservoirWithScorer(width, height, alpha, limit, counters, nil)
+}
+
+func newVP8LCandidateReservoirWithScorer(width int, height int, alpha bool, limit int, counters *vp8lSearchCounters, scorer *vp8lCandidateScorer) *vp8lCandidateReservoir {
 	if limit < 1 {
 		limit = 1
 	}
-	return &vp8lCandidateReservoir{width: width, height: height, alpha: alpha, limit: limit}
+	return &vp8lCandidateReservoir{width: width, height: height, alpha: alpha, limit: limit, counters: counters, scorer: scorer}
 }
 
 func (r *vp8lCandidateReservoir) add(candidate vp8lTransformCandidate) {
@@ -43,11 +51,50 @@ func (r *vp8lCandidateReservoir) add(candidate vp8lTransformCandidate) {
 		pixels := candidate.pixels
 		candidate.materialize = func() []uint32 { return append([]uint32(nil), pixels...) }
 	}
-	screened := vp8lScreenedCandidate{
+	var score vp8lCandidateScore
+	cached := false
+	if r.scorer == nil {
+		score = vp8lScoreCandidateWorkspace(r.width, r.height, r.alpha, candidate, &r.huffman)
+	} else {
+		entry, wasCached := r.scorer.score(r.width, r.height, r.alpha, candidate)
+		if r.seeded != nil {
+			if _, exists := r.seeded[entry.key]; exists {
+				return
+			}
+		}
+		candidate = entry.candidate
+		score = entry.score
+		cached = wasCached
+	}
+	r.counters.recordScreening(!cached)
+	r.addScreened(vp8lScreenedCandidate{
 		candidate: candidate,
 		family:    vp8lTransformFamily(candidate.transforms),
-		score:     vp8lScoreCandidate(r.width, r.height, r.alpha, candidate),
+		score:     score,
+	})
+}
+
+func (r *vp8lCandidateReservoir) seedScoredCandidates(keys []vp8lCandidateKey) {
+	if r.scorer == nil || len(keys) == 0 {
+		return
 	}
+	r.seeded = make(map[vp8lCandidateKey]struct{}, len(keys))
+	for _, key := range keys {
+		index, ok := r.scorer.indexes[key]
+		if !ok {
+			continue
+		}
+		entry := r.scorer.entries[index]
+		r.seeded[entry.key] = struct{}{}
+		r.addScreened(vp8lScreenedCandidate{
+			candidate: entry.candidate,
+			family:    vp8lTransformFamily(entry.candidate.transforms),
+			score:     entry.score,
+		})
+	}
+}
+
+func (r *vp8lCandidateReservoir) addScreened(screened vp8lScreenedCandidate) {
 	screened.candidate.pixels = nil
 	familyCount := 0
 	var familyIndices [2]int
@@ -213,6 +260,29 @@ func (r *vp8lCandidateReservoir) blockColorBases(limit int) []vp8lTransformCandi
 	return selected
 }
 
+func (r *vp8lCandidateReservoir) familyCandidates(family uint32, limit int) []vp8lTransformCandidate {
+	if limit < 1 {
+		return nil
+	}
+	ranked := append([]vp8lScreenedCandidate(nil), r.candidates...)
+	sort.SliceStable(ranked, func(i int, j int) bool {
+		left := vp8lCandidateRank(ranked[i].score)
+		right := vp8lCandidateRank(ranked[j].score)
+		return left < right
+	})
+	selected := make([]vp8lTransformCandidate, 0, limit)
+	for _, candidate := range ranked {
+		if candidate.family != family {
+			continue
+		}
+		selected = append(selected, candidate.candidate)
+		if len(selected) == limit {
+			break
+		}
+	}
+	return selected
+}
+
 func vp8lCanAddBlockColor(transforms []vp8lTransform) bool {
 	switch len(transforms) {
 	case 0:
@@ -227,7 +297,15 @@ func vp8lCanAddBlockColor(transforms []vp8lTransform) bool {
 }
 
 func vp8lScoreCandidate(width int, height int, alpha bool, candidate vp8lTransformCandidate) vp8lCandidateScore {
-	group, dataBits := vp8lLiteralCodeGroupAndDataBits(candidate.pixels)
+	return vp8lScoreCandidateWorkspace(width, height, alpha, candidate, nil)
+}
+
+func vp8lScoreCandidateWorkspace(width int, height int, alpha bool, candidate vp8lTransformCandidate, workspace *vp8lHuffmanWorkspace) vp8lCandidateScore {
+	var counts vp8lLiteralCounts
+	for _, pixel := range candidate.pixels {
+		counts.observe(pixel)
+	}
+	literalBits := counts.costBits(workspace)
 	plan := &vp8lPlan{
 		width:      width,
 		height:     height,
@@ -238,14 +316,51 @@ func vp8lScoreCandidate(width int, height int, alpha bool, candidate vp8lTransfo
 	plan.writePrefixTo(counter)
 	counter.writeBits(0, 1) // no color cache
 	counter.writeBits(0, 1) // no meta-prefix image
-	group.writeHeaders(counter)
 	localPotential, distantPotential, zeroPixels := vp8lSampleMatchPotential(candidate.pixels, candidate.width)
 	return vp8lCandidateScore{
-		literalBits:           counter.bitLen + dataBits,
+		literalBits:           counter.bitLen + literalBits,
 		localMatchPotential:   localPotential,
 		distantMatchPotential: distantPotential,
 		zeroPixels:            zeroPixels,
 	}
+}
+
+func (c *vp8lLiteralCounts) costBits(workspace *vp8lHuffmanWorkspace) uint64 {
+	green := buildVP8LHuffmanCostWorkspace(c.green[:], workspace)
+	red := buildVP8LHuffmanCostWorkspace(c.red[:], workspace)
+	blue := buildVP8LHuffmanCostWorkspace(c.blue[:], workspace)
+	alpha := buildVP8LHuffmanCostWorkspace(c.alpha[:], workspace)
+	distance := buildVP8LHuffmanCostWorkspace(c.distance[:], workspace)
+	return green.headerBits + green.dataBits +
+		red.headerBits + red.dataBits +
+		blue.headerBits + blue.dataBits +
+		alpha.headerBits + alpha.dataBits +
+		distance.headerBits + distance.dataBits
+}
+
+func vp8lScreenColorCacheCandidate(width int, height int, alpha bool, candidate vp8lTransformCandidate, cacheBits uint8, budget vp8lBudget, workspace *vp8lSearchWorkspace) uint64 {
+	pixels := candidate.pixels
+	if workspace != nil && candidate.materializeWorkspace != nil {
+		pixels = candidate.materializeWorkspace(&workspace.transform, 0)
+	} else if candidate.materialize != nil {
+		pixels = candidate.materialize()
+	}
+	hits := vp8lColorCacheHitsWorkspace(pixels, cacheBits, workspace)
+	group, dataBits := vp8lLiteralCacheGroupAndDataBits(pixels, hits, cacheBits)
+	budget.counters.recordHuffmanEmissionBuilds(5)
+	plan := &vp8lPlan{
+		width:      width,
+		height:     height,
+		alpha:      alpha,
+		transforms: candidate.transforms,
+	}
+	counter := vp8lBitCounter()
+	plan.writePrefixTo(counter)
+	counter.writeBits(1, 1)
+	counter.writeBits(uint32(cacheBits), 4)
+	counter.writeBits(0, 1)
+	group.writeHeaders(counter)
+	return counter.bitLen + dataBits
 }
 
 func vp8lLiteralCodeGroupAndDataBits(pixels []uint32) (vp8lCodeGroup, uint64) {

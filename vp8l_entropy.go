@@ -47,12 +47,15 @@ func vp8lChooseEntropyPlanWorkspace(base vp8lImagePlan, budget vp8lBudget, works
 	}
 	for _, prefixBits := range budget.metaPrefixBits {
 		tiles, tileWidth, tileHeight := vp8lTileHistogramsWorkspace(base, prefixBits, workspace)
+		budget.counters.recordEntropyTiles(len(tiles))
 		if len(tiles) < 2 {
 			continue
 		}
 		for groups := 2; groups <= budget.maxEntropyGroups && groups <= len(tiles); groups *= 2 {
+			budget.counters.recordEntropyTrial()
 			groupMap := vp8lClusterHistograms(tiles, groups)
 			groupMap, codeGroups, groupCosts, greenSize := vp8lRefineHistogramGroups(tiles, groupMap, base.cacheBits, budget.entropyRefinements, huffmanWorkspace)
+			budget.counters.recordHuffmanEmissionBuilds(len(codeGroups) * 5)
 			if len(codeGroups) < 2 {
 				continue
 			}
@@ -61,6 +64,7 @@ func vp8lChooseEntropyPlanWorkspace(base vp8lImagePlan, budget vp8lBudget, works
 				entropyPixels[i] = 0xff000000 | uint32(group>>8)<<16 | uint32(uint8(group))<<8
 			}
 			candidate := base
+			budget.counters.recordHuffmanEmissionBuilds(5)
 			candidate.meta = &vp8lEntropyPlan{
 				prefixBits: prefixBits,
 				width:      tileWidth,
