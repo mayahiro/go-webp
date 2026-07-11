@@ -22,6 +22,7 @@ type cwebpConfig struct {
 	mt       bool
 }
 
+// runGoWebP times only the in-process Encode call for each sample
 func runGoWebP(dir string, fixtureName string, source image.Image, quality int, runs int, mode webp.Mode) (sample, error) {
 	var encoded []byte
 	var elapsed time.Duration

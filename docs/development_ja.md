@@ -13,19 +13,17 @@ private corpusとprivate benchmark reportはrepositoryに含めません
 ## 標準検証
 
 ```sh
-go test ./...
-go vet ./...
-go -C tools tool goimports -l ..
+make check
 ```
 
-開発toolの依存は `tools` 配下の独立したnested moduleで固定します
-repository rootから `go -C tools tool` で実行することで、ライブラリmoduleの依存graphから分離します
-このmoduleにはformat用の `goimports` とlocal profile解析用の `pprof` が含まれます
+開発toolの依存は `tools` 配下、公開性能benchmarkと比較commandは `benchmarks` 配下の独立したnested moduleで管理します
+`make check` はrootとbenchmark moduleのtest、vet、format確認を実行します
+`tools` moduleにはformat用の `goimports` とlocal profile解析用の `pprof` が含まれます
 
 ## 外部Decoder確認
 
 ```sh
-go run ./scripts/verify_lossless_external
+make verify-external
 ```
 
 このコマンドはlossless fixtureをpixel完全一致で確認し、lossy fixtureをRGB誤差の上限で確認します
@@ -35,23 +33,29 @@ go run ./scripts/verify_lossless_external
 ## Go Benchmark
 
 ```sh
-go test . -run '^$' \
-  -bench '^BenchmarkEncodeLossyFixtures$' \
-  -benchmem -benchtime=3x -count=3
-
-go test . -run '^$' \
-  -bench '^BenchmarkEncodeLosslessSmallFixtures$' \
-  -benchmem -benchtime=3x -count=3
+make bench-lossy
+make bench-lossless
 ```
 
 計測環境、現在の結果、解釈は [Benchmarks](../BENCHMARKS.md) を参照してください
 
+## FixtureとCorpusの補助command
+
+```sh
+make generate-fixtures
+make index-corpus
+```
+
+どちらもdefaultではGit対象外の `.local` directoryへ出力します
+fixture commandは決定的な公開PNG setとmanifestを生成します
+corpus commandは `.local/corpus/production` 配下の画像を匿名化してindexします
+
 ## ローカルLossless比較
 
 ```sh
-go run ./scripts/compare_lossless_libwebp -runs 3 -mode default -method 4
-go run ./scripts/compare_lossless_libwebp -runs 3 -mode best -method 6
-go run ./scripts/compare_lossless_libwebp -runs 3 -mode near-lossless -quality 75 -method 4
+make compare-lossless ARGS='-runs 3 -mode default -method 4'
+make compare-lossless ARGS='-runs 3 -mode best -method 6'
+make compare-lossless ARGS='-runs 3 -mode near-lossless -quality 75 -method 4'
 ```
 
 reportにはdecode後のRGB誤差とalpha一致を記録します
@@ -60,10 +64,7 @@ reportにはdecode後のRGB誤差とalpha一致を記録します
 ## ローカルLossy Rate-Distortion比較
 
 ```sh
-go run ./scripts/compare_lossy_libwebp \
-  -runs 3 \
-  -go-mode default \
-  -json report.json
+make compare-lossy ARGS='-runs 3 -go-mode default'
 ```
 
 このコマンドには `cwebp` と `dwebp` が必要です
@@ -78,6 +79,7 @@ schema version 3のJSON reportには次を記録します
 `-corpus` と `-split` で非公開のlocal corpusを選択できます
 reportにはsourceのnameとpathを記録しません
 private inputとreportはGitの外で管理してください
+`ARGS` で渡したpathは `benchmarks` directoryから解決されるため、absolute pathまたは `../` で始まるrepository相対pathを使用してください
 
 go-webpの計測時間はprocess内の `Encode` 呼び出しだけを含みます
 cwebpの計測時間にはprocess起動、PNG decode、encode、出力書き込みも含むため、cross-encoderの時間をencoder coreの順位として扱いません

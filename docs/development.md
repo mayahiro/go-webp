@@ -15,20 +15,19 @@ of the repository.
 ## Standard Verification
 
 ```sh
-go test ./...
-go vet ./...
-go -C tools tool goimports -l ..
+make check
 ```
 
 Development tool dependencies are pinned in the separate nested module under
-`tools`. Run its tools from the repository root with `go -C tools tool`; this
-keeps them out of the library module's dependency graph. The module provides
-`goimports` for formatting and `pprof` for local profile analysis.
+`tools`, while the public performance suite and comparison commands live in
+the `benchmarks` module. `make check` tests and vets both code modules and runs
+the formatting check. The `tools` module provides `goimports` for formatting
+and `pprof` for local profile analysis.
 
 ## External Decoder Verification
 
 ```sh
-go run ./scripts/verify_lossless_external
+make verify-external
 ```
 
 The command checks lossless fixtures for exact pixels and lossy fixtures for
@@ -39,24 +38,30 @@ when neither decoder is available.
 ## Go Benchmarks
 
 ```sh
-go test . -run '^$' \
-  -bench '^BenchmarkEncodeLossyFixtures$' \
-  -benchmem -benchtime=3x -count=3
-
-go test . -run '^$' \
-  -bench '^BenchmarkEncodeLosslessSmallFixtures$' \
-  -benchmem -benchtime=3x -count=3
+make bench-lossy
+make bench-lossless
 ```
 
 See [Benchmarks](../BENCHMARKS.md) for the measurement environment, current
 results, and interpretation.
 
+## Fixture and Corpus Helpers
+
+```sh
+make generate-fixtures
+make index-corpus
+```
+
+Both commands write to the Git-ignored `.local` directory by default. The
+fixture command generates the deterministic public PNG set and manifest. The
+corpus command anonymously indexes images under `.local/corpus/production`.
+
 ## Local Lossless Comparison
 
 ```sh
-go run ./scripts/compare_lossless_libwebp -runs 3 -mode default -method 4
-go run ./scripts/compare_lossless_libwebp -runs 3 -mode best -method 6
-go run ./scripts/compare_lossless_libwebp -runs 3 -mode near-lossless -quality 75 -method 4
+make compare-lossless ARGS='-runs 3 -mode default -method 4'
+make compare-lossless ARGS='-runs 3 -mode best -method 6'
+make compare-lossless ARGS='-runs 3 -mode near-lossless -quality 75 -method 4'
 ```
 
 The report includes decoded RGB error and alpha equality. Ordinary lossless
@@ -65,10 +70,7 @@ profiles require exact pixels.
 ## Local Lossy Rate-Distortion Comparison
 
 ```sh
-go run ./scripts/compare_lossy_libwebp \
-  -runs 3 \
-  -go-mode default \
-  -json report.json
+make compare-lossy ARGS='-runs 3 -go-mode default'
 ```
 
 This command requires `cwebp` and `dwebp`. Its schema-version 3 JSON report
@@ -82,7 +84,9 @@ contains:
 
 A private local corpus can be selected with `-corpus` and `-split`. Source
 names and paths are omitted from the report. Keep private inputs and reports
-outside Git.
+outside Git. Paths passed through `ARGS` are resolved from the `benchmarks`
+directory, so use an absolute path or prefix repository-relative paths with
+`../`.
 
 go-webp timing covers only the in-process `Encode` call. cwebp timing includes
 process startup, PNG decoding, encoding, and output writing, so cross-encoder

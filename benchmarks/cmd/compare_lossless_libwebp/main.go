@@ -16,7 +16,7 @@ import (
 	"time"
 
 	webp "github.com/mayahiro/go-webp"
-	"github.com/mayahiro/go-webp/internal/benchmarkfixture"
+	"github.com/mayahiro/go-webp/benchmarks/internal/benchmarkfixture"
 )
 
 type fixture struct {

@@ -75,3 +75,17 @@ ordered, so worker scheduling does not affect the selected bitstream.
 
 Candidate selection and output are deterministic. The project remains pure Go
 and does not depend on libwebp or cgo at runtime.
+
+## Development Module Boundaries
+
+The repository root is the published encoder module. The nested `benchmarks`
+module contains the public-API performance suite, generated comparison
+fixtures, corpus tooling, and optional libwebp comparison commands. Its local
+`replace` directive always benchmarks the current root checkout without adding
+development dependencies to the published module graph.
+
+White-box benchmarks and ablation tests that require unexported encoder
+configuration remain in the root package. This keeps implementation-specific
+hooks out of the public API. The nested `tools` module pins development
+executables, and the root Makefile coordinates verification across all three
+module boundaries.

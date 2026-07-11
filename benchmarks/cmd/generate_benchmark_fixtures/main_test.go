@@ -11,7 +11,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/mayahiro/go-webp/internal/benchmarkfixture"
+	"github.com/mayahiro/go-webp/benchmarks/internal/benchmarkfixture"
 	"github.com/mayahiro/go-webp/internal/benchmarkimage"
 )
 

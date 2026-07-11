@@ -7,6 +7,7 @@ import (
 	"github.com/mayahiro/go-webp/internal/benchmarkmetric"
 )
 
+// comparisonReport intentionally records anonymous fixture identities instead of source paths
 type comparisonReport struct {
 	SchemaVersion int                 `json:"schema_version"`
 	Configuration reportConfiguration `json:"configuration"`

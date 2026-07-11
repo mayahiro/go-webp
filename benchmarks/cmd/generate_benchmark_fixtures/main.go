@@ -12,7 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/mayahiro/go-webp/internal/benchmarkfixture"
+	"github.com/mayahiro/go-webp/benchmarks/internal/benchmarkfixture"
 	"github.com/mayahiro/go-webp/internal/benchmarkimage"
 )
 
@@ -38,7 +38,7 @@ type fixtureManifest struct {
 }
 
 func main() {
-	out := flag.String("out", ".local/fixtures/public", "output directory for generated PNG fixtures and manifest")
+	out := flag.String("out", "../.local/fixtures/public", "output directory for generated PNG fixtures and manifest")
 	flag.Parse()
 
 	manifest, err := writePublicFixtures(*out)

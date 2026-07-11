@@ -16,8 +16,8 @@ import (
 	"strings"
 
 	webp "github.com/mayahiro/go-webp"
+	"github.com/mayahiro/go-webp/benchmarks/internal/benchmarkfixture"
 	"github.com/mayahiro/go-webp/internal/benchmarkcorpus"
-	"github.com/mayahiro/go-webp/internal/benchmarkfixture"
 )
 
 type comparisonFixture struct {

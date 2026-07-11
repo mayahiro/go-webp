@@ -12,8 +12,6 @@ import (
 	"os/exec"
 	"slices"
 	"testing"
-
-	"github.com/mayahiro/go-webp/internal/benchmarkfixture"
 )
 
 func TestVP8BoolEncoderEqualProbMatchesWriteBit(t *testing.T) {
@@ -1792,16 +1790,7 @@ func TestEncodeLosslessUsesLZ77BackwardReferencesForRuns(t *testing.T) {
 }
 
 func TestVP8LOptimalParserImprovesIndexedFixture(t *testing.T) {
-	var img image.Image
-	for _, fixture := range benchmarkfixture.Standard() {
-		if fixture.Name == "palette256" {
-			img = fixture.Image
-			break
-		}
-	}
-	if img == nil {
-		t.Fatal("palette256 benchmark fixture is missing")
-	}
+	img := newBenchmarkLimitedPalettedFixtureImage(256, 256)
 	bounds := img.Bounds()
 	readPixel := pixelReaderFor(img)
 	analysis := analyzeImage(readPixel, bounds)
@@ -5215,16 +5204,11 @@ func TestEncodeLossyBestCompressionWithDWebP(t *testing.T) {
 	if _, err := exec.LookPath("dwebp"); err != nil {
 		t.Skip("dwebp is not available")
 	}
-	var img image.Image
-	for _, fixture := range benchmarkfixture.Standard() {
-		if fixture.Name == "ui256" {
-			img = fixture.Image
-			break
-		}
-	}
-	if img == nil {
-		t.Fatal("ui256 benchmark fixture is missing")
-	}
+	img := newBenchmarkFixtureImage(lossyBenchmarkCase{
+		kind:   benchmarkImageUI,
+		width:  256,
+		height: 256,
+	})
 	cfg := vp8LossyConfigForModeQuality(ModeBestCompression, 75)
 	source := newVP8Source(newEncoderSource(img), cfg.materializeSource)
 	mbw := (source.width + 15) >> 4

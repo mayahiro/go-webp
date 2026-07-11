@@ -14,6 +14,7 @@ import (
 	webp "github.com/mayahiro/go-webp"
 )
 
+// These unit tests do not invoke the optional external cwebp and dwebp binaries
 func TestParseQualitiesSortsAndDeduplicates(t *testing.T) {
 	got, err := parseQualities("90, 25,75,25")
 	if err != nil {

@@ -13,8 +13,8 @@ import (
 )
 
 func main() {
-	input := flag.String("in", ".local/corpus/production", "local corpus directory")
-	output := flag.String("out", ".local/results/production-corpus.json", "private JSON report path")
+	input := flag.String("in", "../.local/corpus/production", "local corpus directory")
+	output := flag.String("out", "../.local/results/production-corpus.json", "private JSON report path")
 	name := flag.String("name", "production", "anonymous corpus name")
 	holdout := flag.Int("holdout", 20, "deterministic holdout percentage from 1 to 99")
 	flag.Parse()

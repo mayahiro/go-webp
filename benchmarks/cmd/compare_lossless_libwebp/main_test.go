@@ -9,6 +9,7 @@ import (
 	webp "github.com/mayahiro/go-webp"
 )
 
+// These unit tests do not invoke the optional external cwebp and dwebp binaries
 func TestMakeComparisonConfig(t *testing.T) {
 	best, err := makeComparisonConfig("best", 75, 6)
 	if err != nil {

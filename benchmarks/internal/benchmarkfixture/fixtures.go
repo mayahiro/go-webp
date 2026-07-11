@@ -1,4 +1,4 @@
-// Package benchmarkfixture provides deterministic generated images for encoder comparisons
+// Package benchmarkfixture provides deterministic generated images for the benchmark suite
 package benchmarkfixture
 
 import (
