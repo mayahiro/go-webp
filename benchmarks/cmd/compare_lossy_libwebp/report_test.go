@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"image"
 	"image/color"
 	"image/jpeg"
@@ -10,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	webp "github.com/mayahiro/go-webp"
 )
@@ -55,6 +57,37 @@ func TestParseQualitiesRejectsOutOfRangeValues(t *testing.T) {
 		if _, err := parseQualities(value); err == nil {
 			t.Fatalf("parseQualities(%q) succeeded", value)
 		}
+	}
+}
+
+func TestSummarizeTimingReportsMedianAndRange(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		durations  []time.Duration
+		wantMedian int64
+		wantMin    int64
+		wantMax    int64
+	}{
+		{name: "odd", durations: []time.Duration{9, 1, 5}, wantMedian: 5, wantMin: 1, wantMax: 9},
+		{name: "even", durations: []time.Duration{9, 1, 7, 3}, wantMedian: 5, wantMin: 1, wantMax: 9},
+		{name: "empty"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := summarizeTiming(tc.durations)
+			if got.Runs != len(tc.durations) || got.WarmupRuns != comparisonWarmupRuns || got.MedianNS != tc.wantMedian || got.MinNS != tc.wantMin || got.MaxNS != tc.wantMax {
+				t.Fatalf("timing = %#v, want runs/warmup/median/min/max = %d/%d/%d/%d/%d", got, len(tc.durations), comparisonWarmupRuns, tc.wantMedian, tc.wantMin, tc.wantMax)
+			}
+		})
+	}
+}
+
+func TestOutputSHA256IsStableAndContentDependent(t *testing.T) {
+	first := outputSHA256([]byte("first"))
+	if len(first) != 64 || first != outputSHA256([]byte("first")) {
+		t.Fatalf("unstable SHA-256 = %q", first)
+	}
+	if first == outputSHA256([]byte("second")) {
+		t.Fatal("different outputs have the same SHA-256")
 	}
 }
 
@@ -121,30 +154,192 @@ func TestBuildMatchesUsesNearestSizeAndQuality(t *testing.T) {
 	}
 }
 
+func TestMakePointMatchUsesGoMinusCWebPDirection(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		goBytes     int
+		cwebpBytes  int
+		wantBytes   int
+		wantPercent float64
+	}{
+		{name: "go larger", goBytes: 1000, cwebpBytes: 800, wantBytes: 200, wantPercent: 25},
+		{name: "go smaller", goBytes: 800, cwebpBytes: 1000, wantBytes: -200, wantPercent: -20},
+		{name: "zero reference", goBytes: 800, cwebpBytes: 0, wantBytes: 800, wantPercent: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := makePointMatch(
+				sample{EncodedBytes: tc.goBytes},
+				sample{EncodedBytes: tc.cwebpBytes},
+			)
+			if got.GoMinusCWebPBytes != tc.wantBytes || math.Abs(got.GoMinusCWebPPercent-tc.wantPercent) > 1e-12 {
+				t.Fatalf("delta = %d/%v, want %d/%v", got.GoMinusCWebPBytes, got.GoMinusCWebPPercent, tc.wantBytes, tc.wantPercent)
+			}
+		})
+	}
+}
+
+func TestMakePointMatchReportsDirectionalMetricDeltas(t *testing.T) {
+	goSample := sample{Distortion: distortionMetrics{
+		RGBPSNRDB:                  float64Pointer(31),
+		YPSNRDB:                    float64Pointer(32),
+		UVPSNRDB:                   float64Pointer(33),
+		YSSIMDB:                    float64Pointer(34),
+		CompositeOverBlackPSNRDB:   float64Pointer(35),
+		CompositeOverWhitePSNRDB:   float64Pointer(36),
+		CompositeOverCheckerPSNRDB: float64Pointer(37),
+		AlphaExact:                 true,
+	}}
+	cwebpSample := sample{Distortion: distortionMetrics{
+		RGBPSNRDB:                  float64Pointer(30),
+		YPSNRDB:                    float64Pointer(30),
+		UVPSNRDB:                   float64Pointer(30),
+		YSSIMDB:                    float64Pointer(30),
+		CompositeOverBlackPSNRDB:   float64Pointer(30),
+		CompositeOverWhitePSNRDB:   float64Pointer(30),
+		CompositeOverCheckerPSNRDB: float64Pointer(30),
+		AlphaExact:                 false,
+	}}
+
+	got := makePointMatch(goSample, cwebpSample)
+	for name, tc := range map[string]struct {
+		value *float64
+		want  float64
+	}{
+		"RGB PSNR":          {value: got.GoMinusCWebPRGBPSNRDB, want: 1},
+		"Y PSNR":            {value: got.GoMinusCWebPYPSNRDB, want: 2},
+		"UV PSNR":           {value: got.GoMinusCWebPUVPSNRDB, want: 3},
+		"Y SSIM":            {value: got.GoMinusCWebPYSSIMDB, want: 4},
+		"composite black":   {value: got.GoMinusCWebPCompositeBlackPSNRDB, want: 5},
+		"composite white":   {value: got.GoMinusCWebPCompositeWhitePSNRDB, want: 6},
+		"composite checker": {value: got.GoMinusCWebPCompositeCheckerPSNRDB, want: 7},
+	} {
+		if tc.value == nil || math.Abs(*tc.value-tc.want) > 1e-12 {
+			t.Errorf("%s delta = %v, want %v", name, tc.value, tc.want)
+		}
+	}
+	if !got.GoAlphaExact || got.CWebPAlphaExact {
+		t.Fatalf("alpha exact = %t/%t, want true/false", got.GoAlphaExact, got.CWebPAlphaExact)
+	}
+}
+
+func TestGoMinusCWebPMetricHandlesExactValues(t *testing.T) {
+	bothExact := goMinusCWebPMetric(nil, nil)
+	if bothExact == nil || *bothExact != 0 {
+		t.Fatalf("both exact delta = %v, want 0", bothExact)
+	}
+	finite := float64Pointer(30)
+	if got := goMinusCWebPMetric(nil, finite); got != nil {
+		t.Fatalf("exact minus finite delta = %v, want nil", got)
+	}
+	if got := goMinusCWebPMetric(finite, nil); got != nil {
+		t.Fatalf("finite minus exact delta = %v, want nil", got)
+	}
+}
+
+func TestComparisonReportSchemaUsesDirectionalDeltaFields(t *testing.T) {
+	if comparisonReportSchemaVersion != 8 {
+		t.Fatalf("schema version = %d, want 8", comparisonReportSchemaVersion)
+	}
+	data, err := json.Marshal(struct {
+		Configuration reportConfiguration `json:"configuration"`
+		Sample        sample              `json:"sample"`
+		Point         pointMatch          `json:"point"`
+		Aggregate     aggregateReport     `json:"aggregate"`
+	}{Aggregate: aggregateReport{NominalQuality: []aggregatePoint{{}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded := string(data)
+	for _, field := range []string{
+		"go_minus_cwebp_bytes",
+		"go_minus_cwebp_percent",
+		"go_minus_cwebp_rgb_psnr_db",
+		"go_minus_cwebp_y_psnr_db",
+		"go_minus_cwebp_uv_psnr_db",
+		"go_minus_cwebp_y_ssim_db",
+		"go_minus_cwebp_composite_black_psnr_db",
+		"go_minus_cwebp_composite_white_psnr_db",
+		"go_minus_cwebp_composite_checker_psnr_db",
+		"fixture_mean",
+		"pixel_weighted",
+		"byte_weighted",
+		"rate_distortion",
+		"matched_size",
+		"bjontegaard",
+		"bd_rate_rgb_psnr_percent",
+		"bd_rate_y_ssim_percent",
+		"bd_psnr_db",
+		"bd_ssim",
+		"by_source_format",
+		"by_alpha",
+		"gomaxprocs",
+		"timing_statistic",
+		"output_hash_algorithm",
+		"timing",
+		"output_sha256",
+		"median_ns",
+		"min_ns",
+		"max_ns",
+		"go_encode_median_total_ns",
+		"cwebp_process_median_total_ns",
+		"curve_interpolation",
+		"curve_extrapolation",
+		"bjontegaard_min_points",
+	} {
+		if !strings.Contains(encoded, `"`+field+`"`) {
+			t.Errorf("schema is missing %q: %s", field, encoded)
+		}
+	}
+	for _, oldField := range []string{
+		"size_delta_bytes",
+		"size_delta_percent",
+		"rgb_psnr_delta_db",
+		"y_ssim_delta_db",
+		"mean_y_ssim_delta",
+		"mean_go_y_ssim",
+		"mean_cwebp_y_ssim",
+		"mean_go_minus_cwebp_y_ssim",
+		"average_encode_ns",
+		"go_encode_total_ns",
+		"cwebp_process_total_ns",
+	} {
+		if strings.Contains(encoded, `"`+oldField+`"`) {
+			t.Errorf("schema still contains %q: %s", oldField, encoded)
+		}
+	}
+}
+
 func TestAggregateComparisonReportsNominalAndMatchedQuality(t *testing.T) {
 	fixtures := []fixtureReport{
 		{
+			SourceFormat: "jpeg",
+			Width:        1,
+			Height:       1,
 			GoWebP: []sample{{
-				Quality:         50,
-				EncodedBytes:    100,
-				AverageEncodeNS: 10,
-				Distortion:      distortionMetrics{YSSIM: 0.9, YSSIMDB: float64Pointer(10)},
+				Quality:      50,
+				EncodedBytes: 100,
+				Timing:       timingSummary{MedianNS: 10},
+				Distortion:   aggregateTestMetrics(0.9, 10, 100, true),
 			}},
 			CWebP: []sample{
-				{Quality: 50, EncodedBytes: 90, AverageEncodeNS: 4, Distortion: distortionMetrics{YSSIM: 0.88, YSSIMDB: float64Pointer(9)}},
-				{Quality: 60, EncodedBytes: 110, AverageEncodeNS: 5, Distortion: distortionMetrics{YSSIM: 0.901, YSSIMDB: float64Pointer(10.01)}},
+				{Quality: 50, EncodedBytes: 90, Timing: timingSummary{MedianNS: 4}, Distortion: aggregateTestMetrics(0.88, 9, 121, true)},
+				{Quality: 60, EncodedBytes: 110, Timing: timingSummary{MedianNS: 5}, Distortion: aggregateTestMetrics(0.901, 10.01, 81, true)},
 			},
 		},
 		{
+			SourceFormat: "png",
+			HasAlpha:     true,
+			Width:        3,
+			Height:       1,
 			GoWebP: []sample{{
-				Quality:         50,
-				EncodedBytes:    200,
-				AverageEncodeNS: 20,
-				Distortion:      distortionMetrics{YSSIM: 0.8, YSSIMDB: float64Pointer(7)},
+				Quality:      50,
+				EncodedBytes: 200,
+				Timing:       timingSummary{MedianNS: 20},
+				Distortion:   aggregateTestMetrics(0.8, 7, 25, false),
 			}},
 			CWebP: []sample{
-				{Quality: 40, EncodedBytes: 180, AverageEncodeNS: 6, Distortion: distortionMetrics{YSSIM: 0.799, YSSIMDB: float64Pointer(6.99)}},
-				{Quality: 50, EncodedBytes: 210, AverageEncodeNS: 7, Distortion: distortionMetrics{YSSIM: 0.81, YSSIMDB: float64Pointer(7.2)}},
+				{Quality: 40, EncodedBytes: 180, Timing: timingSummary{MedianNS: 6}, Distortion: aggregateTestMetrics(0.799, 6.99, 36, true)},
+				{Quality: 50, EncodedBytes: 210, Timing: timingSummary{MedianNS: 7}, Distortion: aggregateTestMetrics(0.81, 7.2, 16, true)},
 			},
 		},
 	}
@@ -154,30 +349,73 @@ func TestAggregateComparisonReportsNominalAndMatchedQuality(t *testing.T) {
 		t.Fatalf("aggregate lengths = %d/%d", len(got.NominalQuality), len(got.MatchedQuality))
 	}
 	nominal := got.NominalQuality[0]
-	if nominal.Fixtures != 2 || nominal.GoBytes != 300 || nominal.CWebPBytes != 300 || nominal.GoSizeDeltaBytes != 0 {
+	if nominal.Fixtures != 2 || nominal.Pixels != 4 || nominal.AlphaFixtures != 1 || nominal.GoBytes != 300 || nominal.CWebPBytes != 300 || nominal.GoMinusCWebPBytes != 0 {
 		t.Fatalf("nominal aggregate = %#v", nominal)
 	}
-	if nominal.GoSmaller != 1 || nominal.CWebPSmaller != 1 || nominal.GoEncodeTotalNS != 30 || nominal.CWebPProcessTotalNS != 11 {
+	if nominal.GoSmaller != 1 || nominal.CWebPSmaller != 1 || nominal.GoEncodeMedianTotalNS != 30 || nominal.CWebPProcessMedianTotalNS != 11 {
 		t.Fatalf("nominal counters = %#v", nominal)
+	}
+	if nominal.ByteWeighted.GoWebP != 300 || nominal.ByteWeighted.CWebP != 300 || nominal.ByteWeighted.GoMinusCWebP != 0 || nominal.ByteWeighted.GoMinusCWebPPct != 0 {
+		t.Fatalf("byte-weighted aggregate = %#v", nominal.ByteWeighted)
+	}
+	assertAggregateMetric(t, "fixture mean Y SSIM", nominal.FixtureMean.YSSIM, 0.85, 0.845)
+	assertAggregateMetric(t, "fixture mean RGB PSNR", nominal.FixtureMean.RGBPSNRDB, *aggregatePSNRDB(62.5), *aggregatePSNRDB(68.5))
+	assertAggregateMetric(t, "pixel-weighted Y SSIM", nominal.PixelWeighted.YSSIM, 0.825, 0.8275)
+	assertAggregateMetric(t, "pixel-weighted RGB PSNR", nominal.PixelWeighted.RGBPSNRDB, *aggregatePSNRDB(43.75), *aggregatePSNRDB(42.25))
+	if nominal.GoAlphaExactViolations != 1 || nominal.CWebPAlphaExactViolations != 0 {
+		t.Fatalf("alpha exact violations = %d/%d, want 1/0", nominal.GoAlphaExactViolations, nominal.CWebPAlphaExactViolations)
+	}
+	for name, series := range map[string]aggregateSeries{
+		"jpeg":   got.BySourceFormat["jpeg"],
+		"png":    got.BySourceFormat["png"],
+		"opaque": got.ByAlpha["opaque"],
+		"alpha":  got.ByAlpha["alpha"],
+	} {
+		if len(series.NominalQuality) != 2 || series.NominalQuality[0].Fixtures != 1 {
+			t.Errorf("%s aggregate = %#v", name, series)
+		}
 	}
 
 	matched := got.MatchedQuality[0]
-	if matched.CWebPBytes != 290 || matched.GoSizeDeltaBytes != 10 {
+	if matched.CWebPBytes != 290 || matched.GoMinusCWebPBytes != 10 {
 		t.Fatalf("matched sizes = %#v", matched)
 	}
-	if math.Abs(matched.GoSizeDeltaPct-1000.0/290.0) > 1e-12 {
-		t.Fatalf("matched size delta = %v", matched.GoSizeDeltaPct)
+	if math.Abs(matched.GoMinusCWebPPercent-1000.0/290.0) > 1e-12 {
+		t.Fatalf("matched size delta = %v", matched.GoMinusCWebPPercent)
 	}
 	if matched.MinimumCWebPQuality != 40 || matched.MaximumCWebPQuality != 60 || matched.MeanCWebPQuality != 50 {
 		t.Fatalf("matched qualities = %#v", matched)
 	}
-	if math.Abs(matched.MeanYSSIMDelta) > 1e-12 {
-		t.Fatalf("matched mean Y SSIM delta = %v", matched.MeanYSSIMDelta)
-	}
+	assertAggregateMetric(t, "matched fixture mean Y SSIM", matched.FixtureMean.YSSIM, 0.85, 0.85)
+	assertAggregateMetric(t, "matched pixel-weighted Y SSIM", matched.PixelWeighted.YSSIM, 0.825, 0.8245)
 
 	empty := got.MatchedQuality[1]
-	if empty.Fixtures != 0 || empty.MinimumCWebPQuality != 0 || empty.GoSizeDeltaPct != 0 {
+	if empty.Fixtures != 0 || empty.MinimumCWebPQuality != 0 || empty.GoMinusCWebPPercent != 0 {
 		t.Fatalf("empty aggregate = %#v", empty)
+	}
+}
+
+func aggregateTestMetrics(ySSIM float64, ySSIMDB float64, mse float64, alphaExact bool) distortionMetrics {
+	return distortionMetrics{
+		RGBMSE:                  mse,
+		YMSE:                    mse / 2,
+		UVMSE:                   mse / 4,
+		YSSIM:                   ySSIM,
+		YSSIMDB:                 float64Pointer(ySSIMDB),
+		AlphaExact:              alphaExact,
+		CompositeOverBlackMSE:   mse / 5,
+		CompositeOverWhiteMSE:   mse / 6,
+		CompositeOverCheckerMSE: mse / 7,
+	}
+}
+
+func assertAggregateMetric(t *testing.T, name string, got aggregateMetricComparison, wantGo float64, wantCWebP float64) {
+	t.Helper()
+	if got.Go == nil || got.CWebP == nil || got.GoMinusCWebP == nil {
+		t.Fatalf("%s = %#v, want finite values", name, got)
+	}
+	if math.Abs(*got.Go-wantGo) > 1e-12 || math.Abs(*got.CWebP-wantCWebP) > 1e-12 || math.Abs(*got.GoMinusCWebP-(wantGo-wantCWebP)) > 1e-12 {
+		t.Fatalf("%s = %#v, want %v/%v/%v", name, got, wantGo, wantCWebP, wantGo-wantCWebP)
 	}
 }
 
@@ -212,8 +450,33 @@ func TestLoadComparisonFixturesUsesAnonymousCorpusIdentity(t *testing.T) {
 	if strings.Contains(fixtures[0].name, "private") || len(fixtures[0].name) != 16 {
 		t.Fatalf("fixture name is not anonymous: %q", fixtures[0].name)
 	}
+	if fixtures[0].format != "jpeg" || fixtures[0].hasAlpha {
+		t.Fatalf("fixture metadata = %#v", fixtures[0])
+	}
 	if corpus.name != "production" || len(corpus.sha256) != 64 || corpus.split != "all" {
 		t.Fatalf("corpus configuration = %#v", corpus)
+	}
+}
+
+func TestLoadGeneratedComparisonFixturesRecordsFormatAndAlpha(t *testing.T) {
+	fixtures, corpus, err := loadComparisonFixtures("", "", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if corpus.name != "generated-standard" || corpus.split != "all" {
+		t.Fatalf("corpus configuration = %#v", corpus)
+	}
+	alphaFixtures := 0
+	for _, fixture := range fixtures {
+		if fixture.format != "generated" || fixture.split != "all" {
+			t.Errorf("fixture metadata = %#v", fixture)
+		}
+		if fixture.hasAlpha {
+			alphaFixtures++
+		}
+	}
+	if alphaFixtures != 1 {
+		t.Fatalf("alpha fixtures = %d, want 1", alphaFixtures)
 	}
 }
 

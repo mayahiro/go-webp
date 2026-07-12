@@ -15,7 +15,9 @@ specialized image readers, while `source.go` defines the shared source types.
 Direct readers cover `image.NRGBA`, `image.NRGBA64`, `image.RGBA`,
 `image.RGBA64`, `image.Gray`, `image.YCbCr`, `image.Paletted`, and
 `image.Uniform`. Other implementations use conversion through
-`color.NRGBAModel`.
+`color.NRGBAModel`. The lossy `image.YCbCr` reader maps the source Y, Cb, and
+Cr planes directly to VP8 limited-range samples with ratio-specific chroma
+indexing instead of converting through RGB.
 
 ## Lossless VP8L Pipeline
 
@@ -121,6 +123,18 @@ The lossy path converts the shared source into a `vp8Source`. Analysis produces
 a `vp8FramePlan` containing macroblock prediction modes, skip decisions, token
 probabilities, and an optional reusable residual buffer. Partition emission
 consumes that plan to write an intra-only VP8 key frame.
+
+Default and `BestCompression` use the same quality profile and differ only in
+bounded search effort. `BestCompression` evaluates a complete default frame
+incumbent, then runs a second rate-distortion pass with sharp chroma and a
+width-2 luma4x4 refinement. The expanded frame replaces the incumbent only
+when its exact encoded size is smaller.
+
+The first-partition writer also has an exact count-only mode. Normal plans are
+emitted directly. If the 19-bit partition-size limit is exceeded, a bounded
+fallback sequence removes token updates, narrows or disables segmentation and
+luma4x4 signaling, and finally uses a no-skip DC-prediction plan. The accepted
+plan is then used consistently for both first-partition and residual emission.
 
 Alpha is analyzed independently and, when required, is written in an extended
 WebP container beside the VP8 frame. Candidates compare raw and compressed

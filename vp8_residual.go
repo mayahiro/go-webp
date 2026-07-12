@@ -11,10 +11,11 @@ const (
 )
 
 type vp8ResidualSink struct {
-	encoder *vp8BoolEncoder
-	probs   *vp8TokenProbs
-	stats   *vp8TokenStats
-	buffer  *vp8ResidualBuffer
+	encoder    *vp8BoolEncoder
+	probs      *vp8TokenProbs
+	stats      *vp8TokenStats
+	buffer     *vp8ResidualBuffer
+	macroblock *vp8MacroblockResiduals
 }
 
 func (s *vp8ResidualSink) writeBlock(plane int, context uint8, coeff vp8QuantizedBlock, start int) uint8 {
@@ -24,8 +25,12 @@ func (s *vp8ResidualSink) writeBlock(plane int, context uint8, coeff vp8Quantize
 		}
 		return 0
 	}
+	countLossyCounter(lossyCounterResidualBlocks, 1)
 	if s.buffer != nil {
 		return s.buffer.appendBlock(plane, context, coeff, start)
+	}
+	if s.macroblock != nil {
+		return s.macroblock.appendBlock(plane, context, coeff, start)
 	}
 	if s.stats != nil {
 		return vp8RecordBlockTokensFrom(s.stats, plane, context, coeff, start)
@@ -60,6 +65,56 @@ type vp8ResidualMacroblock struct {
 type vp8ResidualBuffer struct {
 	blocks      []vp8ResidualBlock
 	macroblocks []vp8ResidualMacroblock
+}
+
+type vp8MacroblockResiduals struct {
+	blocks [vp8ResidualBlocksPerMacroblock]vp8ResidualBlock
+	count  int
+}
+
+func (b *vp8MacroblockResiduals) appendBlock(plane int, context uint8, coeff vp8QuantizedBlock, start int) uint8 {
+	b.blocks[b.count] = vp8ResidualBlock{
+		coeff:   coeff,
+		plane:   uint8(plane),
+		context: min(context, 2),
+		start:   uint8(start),
+	}
+	b.count++
+	if vp8HasNonZeroCoeff(coeff, start) {
+		return 1
+	}
+	return 0
+}
+
+func (b *vp8MacroblockResiduals) record(stats *vp8TokenStats) {
+	for i := 0; i < b.count; i++ {
+		block := &b.blocks[i]
+		vp8RecordBlockTokensFrom(stats, int(block.plane), block.context, block.coeff, int(block.start))
+	}
+	b.count = 0
+}
+
+func (b *vp8MacroblockResiduals) commit(sink *vp8ResidualSink) {
+	if sink != nil {
+		for i := 0; i < b.count; i++ {
+			block := &b.blocks[i]
+			sink.writeBlock(int(block.plane), block.context, block.coeff, int(block.start))
+		}
+	}
+	b.count = 0
+}
+
+func (stats *vp8TokenStats) add(other *vp8TokenStats) {
+	for plane := range stats {
+		for band := range stats[plane] {
+			for context := range stats[plane][band] {
+				for node := range stats[plane][band][context] {
+					stats[plane][band][context][node].zero += other[plane][band][context][node].zero
+					stats[plane][band][context][node].one += other[plane][band][context][node].one
+				}
+			}
+		}
+	}
 }
 
 func newVP8ResidualBuffer(macroblockCount int) *vp8ResidualBuffer {
@@ -105,6 +160,7 @@ func (b *vp8ResidualBuffer) candidateSkipMapInto(enabled bool, skipMap []bool) [
 	if !enabled {
 		return nil
 	}
+	countLossyCounter(lossyCounterSkipCandidates, uint64(len(b.macroblocks)))
 	if cap(skipMap) < len(b.macroblocks) {
 		skipMap = make([]bool, len(b.macroblocks))
 	} else {
@@ -201,6 +257,7 @@ func (b *vp8ResidualBuffer) encodeWithSkipMap(probs *vp8TokenProbs, skipMap []bo
 }
 
 func collectVP8ResidualBuffer(readLuma lumaReader, readChroma chromaReader, bounds image.Rectangle, mbw int, mbh int, baseQuant vp8Quant, segmentation *vp8Segmentation, modes []vp8MBMode, work *vp8EncodeBuffers) *vp8ResidualBuffer {
+	countLossyCounter(lossyCounterResidualCollectionPasses, 1)
 	yStride := mbw * 16
 	cStride := mbw * 8
 	var upY [][4]uint8
@@ -235,4 +292,56 @@ func collectVP8ResidualBuffer(readLuma lumaReader, readChroma chromaReader, boun
 		}
 	}
 	return buffer
+}
+
+func collectVP8SkipAndTokenStats(readLuma lumaReader, readChroma chromaReader, bounds image.Rectangle, mbw int, mbh int, baseQuant vp8Quant, segmentation *vp8Segmentation, modes []vp8MBMode, work *vp8EncodeBuffers) (vp8TokenStats, []bool) {
+	countLossyCounter(lossyCounterSkipCandidates, uint64(mbw*mbh))
+	yStride := mbw * 16
+	cStride := mbw * 8
+	var upY [][4]uint8
+	var upUV [][4]uint8
+	var upY16 []uint8
+	if work.top == nil {
+		upY = make([][4]uint8, mbw)
+		upUV = make([][4]uint8, mbw)
+		upY16 = make([]uint8, mbw)
+	} else {
+		upY = work.top.upY
+		upUV = work.top.upUV
+		upY16 = work.top.upY16
+		clear(upY)
+		clear(upUV)
+		clear(upY16)
+	}
+
+	var stats vp8TokenStats
+	var skippedStats vp8TokenStats
+	var macroblockResiduals vp8MacroblockResiduals
+	sink := vp8ResidualSink{macroblock: &macroblockResiduals}
+	skipMap := work.resetSkipMap(mbw * mbh)
+	skipped := 0
+	for mby := 0; mby < mbh; mby++ {
+		var leftY [4]uint8
+		var leftUV [4]uint8
+		var leftY16 uint8
+		for mbx := 0; mbx < mbw; mbx++ {
+			macroblock := mby*mbw + mbx
+			quant := segmentation.quantForMacroblock(macroblock, baseQuant)
+			mode := modes[macroblock]
+			lumaNZ := processVP8LumaMB(readLuma, bounds, mbx, mby, work.recY, yStride, quant, mode, &leftY, &upY[mbx], &leftY16, &upY16[mbx], &sink)
+			chromaNZ := processVP8ChromaMB(readChroma, bounds, mbx, mby, work.recCb, work.recCr, cStride, quant, mode, &leftUV, &upUV[mbx], &sink)
+			if lumaNZ || chromaNZ {
+				macroblockResiduals.record(&stats)
+				continue
+			}
+			macroblockResiduals.record(&skippedStats)
+			skipMap[macroblock] = true
+			skipped++
+		}
+	}
+	if !vp8ShouldUseMacroblockSkip(len(skipMap), skipped) {
+		stats.add(&skippedStats)
+		return stats, nil
+	}
+	return stats, skipMap
 }

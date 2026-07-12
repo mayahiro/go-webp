@@ -121,7 +121,14 @@ lossy encoderは4:2:0 chromaを持つintra-only VP8 key frameを書きます
 
 `ModeFast` と `ModeLowMemory` はluma4x4 mode searchを省きます
 `ModeFast` はmacroblock skipとtoken-probability update searchも省きます
-`ModeBestCompression` は2回目のrate-distortion pass、trellis quantization、sharp chroma searchを追加します
+`ModeBestCompression` は `ModeDefault` と同じquality objectiveを使い、sharp chromaを常に有効にし、2回目のrate-distortion passとresidual token probability学習後のluma4x4 modeに対する幅2の上限付きrefinementを追加します
+完全な `ModeDefault` VP8 frameをexact-size incumbentとして保持し、追加searchのframeが小さい場合だけ置き換えます
+同じqualityで大きいVP8 frameを防ぐ一方、両planを評価するため大幅に時間がかかる場合があります
+
+VP8のfirst partition lengthは19 bitsです
+選択したlossy planが上限を超える場合、encoderはfirst partition signalingを段階的に減らして決定的に再試行します
+token probability updateの削除、segmentationの縮小と無効化、luma4x4 searchの制限と無効化を順に行い、それでも収まらない場合だけDC predictionの緊急planを使用します
+最初から上限内に収まるplanのbitstreamは変更しません
 
 ## Alpha
 
@@ -139,6 +146,9 @@ compressed lossy alphaはglobal filter、frequency-coded residual、連続runと
 `image.NRGBA`、`image.RGBA`、`image.Gray`、`image.YCbCr`、`image.Paletted` は専用のread pathを使います
 その他の画像実装は `color.NRGBAModel` 相当の変換を通して読み取ります
 
+lossy encodingでは `image.YCbCr` のfull-range Y、Cb、Cr planeからVP8 limited-range YUVへRGB round tripなしで直接変換します
+Goの全subsampling ratioをratio別readerで処理します
+
 encodingでは入力を複数回走査する場合があります
 主なresource上限は次のとおりです
 
@@ -150,6 +160,7 @@ encodingでは入力を複数回走査する場合があります
 - bufferを使うlossy profileは推定32 MiBまで量子化済みresidualを保持し、統計と最終codingで再利用できる
 - lossyの再構成pixelはfull-frame planeではなく2 macroblock rowsのringを使う
 - 標準画像型ではlossy frame planningとalpha解析を2 workersで実行できる
+- VP8 first partitionが上限を超える場合は上限付きの逐次再planを行うが、通常planではこの追加処理を行わない
 - `ModeLowMemory` はfull-frame source plane、VP8 residual buffer、VP8L token stream、meta-prefix plan、color-cache planを保持しない
 
 Go benchmarkの `B/op` はpeak live memoryではなく累積allocationを表します

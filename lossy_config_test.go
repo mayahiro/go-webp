@@ -2,6 +2,7 @@ package webp
 
 import (
 	"bytes"
+	"fmt"
 	"image"
 	"image/color"
 	"testing"
@@ -32,4 +33,111 @@ func TestEncodeLossyConfigMatchesPublicModes(t *testing.T) {
 			t.Fatalf("configured mode %d output differed from public Encode", mode)
 		}
 	}
+}
+
+func TestVP8BestCompressionSharesDefaultQualityProfile(t *testing.T) {
+	for quality := 1; quality <= 100; quality++ {
+		defaultConfig := vp8LossyConfigForModeQuality(ModeDefault, quality)
+		bestConfig := vp8LossyConfigForModeQuality(ModeBestCompression, quality)
+		if bestConfig.qIndex != defaultConfig.qIndex ||
+			bestConfig.quant != defaultConfig.quant ||
+			bestConfig.quantDeltas != defaultConfig.quantDeltas ||
+			bestConfig.quantBias != defaultConfig.quantBias ||
+			bestConfig.filter != defaultConfig.filter ||
+			bestConfig.rd != defaultConfig.rd ||
+			bestConfig.rdYLambdaScale != defaultConfig.rdYLambdaScale ||
+			bestConfig.rdUVLambdaScale != defaultConfig.rdUVLambdaScale ||
+			bestConfig.textureStrength != defaultConfig.textureStrength {
+			t.Fatalf("quality %d profile differs between Default and BestCompression", quality)
+		}
+	}
+}
+
+func TestVP8BestCompressionEffortIsDefaultSuperset(t *testing.T) {
+	defaultConfig := vp8LossyConfigForModeQuality(ModeDefault, 75)
+	bestConfig := vp8LossyConfigForModeQuality(ModeBestCompression, 75)
+	if !bestConfig.tryY4 || !bestConfig.trySkip || !bestConfig.updateTokenProb || !bestConfig.bufferResiduals || !bestConfig.commitWinningResiduals {
+		t.Fatal("BestCompression disabled a Default search stage")
+	}
+	if bestConfig.maxSegments < defaultConfig.maxSegments || bestConfig.rdPasses < defaultConfig.rdPasses {
+		t.Fatalf("BestCompression effort = segments:%d passes:%d, Default = %d/%d", bestConfig.maxSegments, bestConfig.rdPasses, defaultConfig.maxSegments, defaultConfig.rdPasses)
+	}
+	if !bestConfig.materializeSource || bestConfig.trellis || !bestConfig.sharpYUV || !bestConfig.parallelAlpha || bestConfig.y4RefinementBeamWidth != 2 {
+		t.Fatal("BestCompression did not enable its extended search stages")
+	}
+	if !bestConfig.defaultFrameIncumbent {
+		t.Fatal("BestCompression disabled the Default frame incumbent")
+	}
+	if bestConfig.y4FlatnessLimit > defaultConfig.y4FlatnessLimit {
+		t.Fatalf("BestCompression flatness gate = %d, want no more restrictive than Default %d", bestConfig.y4FlatnessLimit, defaultConfig.y4FlatnessLimit)
+	}
+}
+
+func TestVP8BestCompressionOneTrellisPassMatchesTwoPassFixtures(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		kind benchmarkImageKind
+	}{
+		{name: "Gradient", kind: benchmarkImageGradient},
+		{name: "PhotoLike", kind: benchmarkImagePhotoLike},
+		{name: "UI", kind: benchmarkImageUI},
+	} {
+		img := newBenchmarkFixtureImage(lossyBenchmarkCase{kind: tc.kind, width: 65, height: 49})
+		for _, quality := range []int{25, 75, 90} {
+			t.Run(fmt.Sprintf("%s/Q%d", tc.name, quality), func(t *testing.T) {
+				onePass := vp8LossyConfigForModeQuality(ModeBestCompression, quality)
+				onePass.defaultFrameIncumbent = false
+				onePass.trellis = true
+				onePass.trellisPasses = 1
+				twoPass := onePass
+				twoPass.trellisPasses = 2
+				onePassOutput := encodeLossyConfigForTest(t, img, onePass, ModeBestCompression)
+				twoPassOutput := encodeLossyConfigForTest(t, img, twoPass, ModeBestCompression)
+				if !bytes.Equal(onePassOutput, twoPassOutput) {
+					t.Fatalf("one-pass output = %d bytes, two-pass %d", len(onePassOutput), len(twoPassOutput))
+				}
+			})
+		}
+	}
+}
+
+func TestVP8BestCompressionSelectsSmallerDefaultIncumbent(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		kind benchmarkImageKind
+	}{
+		{name: "Gradient", kind: benchmarkImageGradient},
+		{name: "PhotoLike", kind: benchmarkImagePhotoLike},
+		{name: "UI", kind: benchmarkImageUI},
+	} {
+		img := newBenchmarkFixtureImage(lossyBenchmarkCase{kind: tc.kind, width: 65, height: 49})
+		for _, quality := range []int{25, 75, 90} {
+			t.Run(fmt.Sprintf("%s/Q%d", tc.name, quality), func(t *testing.T) {
+				defaultConfig := vp8LossyConfigForModeQuality(ModeDefault, quality)
+				bestConfig := vp8LossyConfigForModeQuality(ModeBestCompression, quality)
+				rawBestConfig := bestConfig
+				rawBestConfig.defaultFrameIncumbent = false
+
+				defaultOutput := encodeLossyConfigForTest(t, img, defaultConfig, ModeDefault)
+				rawBestOutput := encodeLossyConfigForTest(t, img, rawBestConfig, ModeBestCompression)
+				guardedOutput := encodeLossyConfigForTest(t, img, bestConfig, ModeBestCompression)
+				want := rawBestOutput
+				if len(defaultOutput) <= len(rawBestOutput) {
+					want = defaultOutput
+				}
+				if !bytes.Equal(guardedOutput, want) {
+					t.Fatalf("guarded output = %d bytes, want selected %d bytes", len(guardedOutput), len(want))
+				}
+			})
+		}
+	}
+}
+
+func encodeLossyConfigForTest(t *testing.T, img image.Image, cfg vp8LossyConfig, alphaMode Mode) []byte {
+	t.Helper()
+	var output bytes.Buffer
+	if err := encodeLossyConfig(&output, newEncoderSource(img), cfg, lossyAlphaConfigForMode(alphaMode)); err != nil {
+		t.Fatal(err)
+	}
+	return output.Bytes()
 }

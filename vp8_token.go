@@ -917,10 +917,12 @@ func chooseVP8TokenProbsConfig(stats *vp8TokenStats, update bool) vp8TokenProbs 
 					if next == current {
 						continue
 					}
+					countLossyCounter(lossyCounterTokenProbUpdatesTested, 1)
 					updateProb := vp8TokenProbUpdateProb[plane][band][context][node]
 					keepCost := vp8BitCost(updateProb, false) + vp8BranchCountsCost(counts, current)
 					updateCost := vp8BitCost(updateProb, true) + vp8TokenProbLiteralCost(next) + vp8BranchCountsCost(counts, next)
 					if updateCost < keepCost {
+						countLossyCounter(lossyCounterTokenProbUpdatesSelected, 1)
 						probs[plane][band][context][node] = next
 					}
 				}

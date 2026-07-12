@@ -666,12 +666,15 @@ func TestPixelReaderForFastPaths(t *testing.T) {
 		if got := readYCbCr(p.X, p.Y); got != want {
 			t.Fatalf("YCbCr pixel at %v = %#v, want %#v", p, got, want)
 		}
-		wantLuma := rgbToLuma(want.R, want.G, want.B)
+		yy := ycbcr.Y[ycbcr.YOffset(p.X, p.Y)]
+		ci := ycbcr.COffset(p.X, p.Y)
+		wantLuma := ycbcrToVP8LumaTable[yy]
 		if got := readYCbCrLuma(p.X, p.Y); got != wantLuma {
 			t.Fatalf("YCbCr luma at %v = %d, want %d", p, got, wantLuma)
 		}
 		gotCb, gotCr := readYCbCrChroma(p.X, p.Y)
-		wantCb, wantCr := rgbToChroma(want.R, want.G, want.B)
+		wantCb := ycbcrToVP8ChromaTable[ycbcr.Cb[ci]]
+		wantCr := ycbcrToVP8ChromaTable[ycbcr.Cr[ci]]
 		if gotCb != wantCb || gotCr != wantCr {
 			t.Fatalf("YCbCr chroma at %v = (%d,%d), want (%d,%d)", p, gotCb, gotCr, wantCb, wantCr)
 		}
@@ -1118,6 +1121,14 @@ func TestVP8QualityToQIndexMapping(t *testing.T) {
 	if qualityToVP8QIndex(75) >= qualityToVP8QIndex(50) {
 		t.Fatal("quality 75 did not produce a lower qIndex than quality 50")
 	}
+	previous := qualityToVP8QIndex(1)
+	for quality := 2; quality <= 100; quality++ {
+		current := qualityToVP8QIndex(quality)
+		if current > previous {
+			t.Fatalf("quality %d qIndex = %d, previous quality qIndex = %d", quality, current, previous)
+		}
+		previous = current
+	}
 }
 
 func TestVP8QuantUsesQualityDependentDeltas(t *testing.T) {
@@ -1222,8 +1233,11 @@ func TestVP8LossyConfigForModeQuality(t *testing.T) {
 	if best.rdPasses != 2 {
 		t.Fatalf("ModeBestCompression RD passes = %d, want 2", best.rdPasses)
 	}
-	if !best.trellis {
-		t.Fatal("ModeBestCompression disabled trellis quantization")
+	if best.trellis {
+		t.Fatal("ModeBestCompression enabled trellis quantization after Y4 beam superseded it")
+	}
+	if best.y4RefinementBeamWidth != 2 {
+		t.Fatalf("ModeBestCompression Y4 refinement beam width = %d, want 2", best.y4RefinementBeamWidth)
 	}
 	if best.dcDiffusion {
 		t.Fatal("ModeBestCompression enabled chroma DC error diffusion without an RD benefit check")
@@ -1234,8 +1248,8 @@ func TestVP8LossyConfigForModeQuality(t *testing.T) {
 	if !best.parallelAlpha {
 		t.Fatal("ModeBestCompression disabled parallel alpha analysis")
 	}
-	if best.quantBias != vp8ConservativeQuantBias() || best.rdYLambdaScale != 256 || best.rdUVLambdaScale != 256 {
-		t.Fatalf("ModeBestCompression quant/RD profile = %#v/%d/%d", best.quantBias, best.rdYLambdaScale, best.rdUVLambdaScale)
+	if best.quantBias != lossyQuality.quantBias || best.rdYLambdaScale != lossyQuality.rdYLambdaScale || best.rdUVLambdaScale != lossyQuality.rdUVLambdaScale || best.textureStrength != lossyQuality.textureStrength {
+		t.Fatalf("ModeBestCompression quality profile = %#v/%d/%d/%d, want Default profile %#v/%d/%d/%d", best.quantBias, best.rdYLambdaScale, best.rdUVLambdaScale, best.textureStrength, lossyQuality.quantBias, lossyQuality.rdYLambdaScale, lossyQuality.rdUVLambdaScale, lossyQuality.textureStrength)
 	}
 	if lowMemory := vp8LossyConfigForModeQuality(ModeLowMemory, 75); lowMemory.tryY4 || lowMemory.bufferResiduals || lowMemory.materializeSource || lowMemory.maxSegments != 1 {
 		t.Fatal("ModeLowMemory enabled buffered source or residual state")

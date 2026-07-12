@@ -131,15 +131,11 @@ func lumaReaderFor(m image.Image) lumaReader {
 		}
 	case *image.YCbCr:
 		yPix := img.Y
-		cbPix := img.Cb
-		crPix := img.Cr
+		stride := img.YStride
+		minX := img.Rect.Min.X
+		minY := img.Rect.Min.Y
 		return func(x int, y int) uint8 {
-			yy := yPix[img.YOffset(x, y)]
-			ci := img.COffset(x, y)
-			cb := cbPix[ci]
-			cr := crPix[ci]
-			r, g, b := color.YCbCrToRGB(yy, cb, cr)
-			return rgbToLuma(r, g, b)
+			return ycbcrToVP8Luma(yPix[(y-minY)*stride+x-minX])
 		}
 	case *image.Paletted:
 		if len(img.Palette) == 0 {
@@ -210,17 +206,7 @@ func chromaReaderFor(m image.Image) chromaReader {
 			return 128, 128
 		}
 	case *image.YCbCr:
-		yPix := img.Y
-		cbPix := img.Cb
-		crPix := img.Cr
-		return func(x int, y int) (uint8, uint8) {
-			yy := yPix[img.YOffset(x, y)]
-			ci := img.COffset(x, y)
-			cb := cbPix[ci]
-			cr := crPix[ci]
-			r, g, b := color.YCbCrToRGB(yy, cb, cr)
-			return rgbToChroma(r, g, b)
-		}
+		return ycbcrChromaReader(img)
 	case *image.Paletted:
 		if len(img.Palette) == 0 {
 			readPixel := pixelReaderFor(m)

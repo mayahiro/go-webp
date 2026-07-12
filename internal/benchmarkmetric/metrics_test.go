@@ -19,6 +19,45 @@ func TestMeasureReportsExactImages(t *testing.T) {
 	if !metrics.RGBExact || !metrics.AlphaExact || metrics.RGBPSNRDB != nil || metrics.YSSIM != 1 || metrics.YSSIMDB != nil {
 		t.Fatalf("exact metrics = %#v", metrics)
 	}
+	if metrics.CompositeOverBlackPSNRDB != nil || metrics.CompositeOverWhitePSNRDB != nil || metrics.CompositeOverCheckerPSNRDB != nil {
+		t.Fatalf("exact composite metrics = %#v", metrics)
+	}
+}
+
+func TestMeasureCompositeMetricsIgnoreHiddenTransparentRGB(t *testing.T) {
+	source := image.NewNRGBA(image.Rect(0, 0, 1, 1))
+	decoded := image.NewNRGBA(source.Bounds())
+	source.SetNRGBA(0, 0, color.NRGBA{R: 255, G: 64, B: 32, A: 0})
+	decoded.SetNRGBA(0, 0, color.NRGBA{R: 0, G: 0, B: 0, A: 0})
+
+	metrics, err := Measure(source, decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metrics.RGBMSE == 0 {
+		t.Fatal("hidden RGB change was not measured")
+	}
+	if metrics.CompositeOverBlackMSE != 0 || metrics.CompositeOverWhiteMSE != 0 || metrics.CompositeOverCheckerMSE != 0 {
+		t.Fatalf("hidden RGB affected composite metrics: %#v", metrics)
+	}
+}
+
+func TestMeasureCompositeMetricsIncludeAlphaChanges(t *testing.T) {
+	source := image.NewNRGBA(image.Rect(0, 0, 1, 1))
+	decoded := image.NewNRGBA(source.Bounds())
+	source.SetNRGBA(0, 0, color.NRGBA{R: 200, G: 100, B: 50, A: 128})
+	decoded.SetNRGBA(0, 0, color.NRGBA{R: 200, G: 100, B: 50, A: 255})
+
+	metrics, err := Measure(source, decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metrics.RGBMSE != 0 || metrics.AlphaExact {
+		t.Fatalf("source metrics = %#v", metrics)
+	}
+	if metrics.CompositeOverBlackMSE == 0 || metrics.CompositeOverWhiteMSE == 0 || metrics.CompositeOverCheckerMSE == 0 {
+		t.Fatalf("alpha change was not measured after compositing: %#v", metrics)
+	}
 }
 
 func TestMeasureReportsChangedImages(t *testing.T) {
@@ -37,6 +76,9 @@ func TestMeasureReportsChangedImages(t *testing.T) {
 	wantSSIM := float64(2*100*110+20) / float64(100*100+110*110+20)
 	if metrics.RGBExact || metrics.AlphaExact || math.Abs(metrics.YSSIM-wantSSIM) > 1e-12 {
 		t.Fatalf("changed metrics = %#v, want Y SSIM %.15f", metrics, wantSSIM)
+	}
+	if metrics.RGBMSE != 100 || metrics.YMSE != 100 || metrics.UVMSE != 0 {
+		t.Fatalf("changed MSE metrics = %#v, want RGB/Y/UV = 100/100/0", metrics)
 	}
 }
 

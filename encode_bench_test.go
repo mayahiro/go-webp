@@ -2,6 +2,7 @@ package webp
 
 import (
 	"bytes"
+	"fmt"
 	"image"
 	"math"
 	"testing"
@@ -137,6 +138,142 @@ func BenchmarkEncodeLossyFixtures(b *testing.B) {
 		b.Run(tc.name, func(b *testing.B) {
 			benchmarkEncodeLossyCase(b, tc)
 		})
+	}
+}
+
+func BenchmarkEncodeLossyProfiles(b *testing.B) {
+	fixtures := []struct {
+		name string
+		img  image.Image
+	}{
+		{name: "PhotoLike512", img: newBenchmarkFixtureImage(lossyBenchmarkCase{kind: benchmarkImagePhotoLike, width: 512, height: 512})},
+		{name: "UI512", img: newBenchmarkFixtureImage(lossyBenchmarkCase{kind: benchmarkImageUI, width: 512, height: 512})},
+		{name: "YCbCr512", img: newBenchmarkYCbCrFixtureImage(512, 512)},
+		{name: "AlphaBands512", img: newBenchmarkFixtureImage(lossyBenchmarkCase{kind: benchmarkImageAlphaBands, width: 512, height: 512})},
+	}
+	modes := []struct {
+		name string
+		mode Mode
+	}{
+		{name: "Default", mode: ModeDefault},
+		{name: "BestCompression", mode: ModeBestCompression},
+		{name: "LowMemory", mode: ModeLowMemory},
+	}
+	for _, fixture := range fixtures {
+		for _, mode := range modes {
+			b.Run(fixture.name+"/"+mode.name, func(b *testing.B) {
+				benchmarkEncodeModeProfileImage(b, fixture.img, &Options{
+					Compression: CompressionLossy,
+					Quality:     75,
+					Mode:        mode.mode,
+				})
+			})
+		}
+	}
+}
+
+func BenchmarkEncodeLossyParallelAlpha(b *testing.B) {
+	for _, size := range []int{64, 128, 512} {
+		img := newBenchmarkFixtureImage(lossyBenchmarkCase{kind: benchmarkImageAlphaBands, width: size, height: size})
+		for _, parallel := range []bool{false, true} {
+			b.Run(fmt.Sprintf("%d/Parallel%t", size, parallel), func(b *testing.B) {
+				cfg := vp8LossyConfigForModeQuality(ModeDefault, 75)
+				cfg.parallelAlpha = parallel
+				benchmarkEncodeLossyConfigImage(b, img, cfg)
+			})
+		}
+	}
+}
+
+func BenchmarkEncodeLossyY4FlatnessFullSearch(b *testing.B) {
+	fixtures := []struct {
+		name string
+		img  image.Image
+	}{
+		{name: "Flat512", img: newBenchmarkFixtureImage(lossyBenchmarkCase{kind: benchmarkImageFlat, width: 512, height: 512})},
+		{name: "UI512", img: newBenchmarkFixtureImage(lossyBenchmarkCase{kind: benchmarkImageUI, width: 512, height: 512})},
+		{name: "Gradient512", img: newBenchmarkFixtureImage(lossyBenchmarkCase{kind: benchmarkImageGradient, width: 512, height: 512})},
+		{name: "PhotoLike512", img: newBenchmarkFixtureImage(lossyBenchmarkCase{kind: benchmarkImagePhotoLike, width: 512, height: 512})},
+	}
+	for _, fixture := range fixtures {
+		for _, limit := range []int{0, 1} {
+			b.Run(fmt.Sprintf("%s/Limit%d", fixture.name, limit), func(b *testing.B) {
+				cfg := vp8LossyConfigForModeQuality(ModeDefault, 75)
+				cfg.y4FlatnessLimit = limit
+				benchmarkEncodeLossyConfigImage(b, fixture.img, cfg)
+			})
+		}
+	}
+}
+
+func BenchmarkEncodeLossyResidualCommit(b *testing.B) {
+	fixtures := []struct {
+		name string
+		img  image.Image
+	}{
+		{name: "PhotoLike512", img: newBenchmarkFixtureImage(lossyBenchmarkCase{kind: benchmarkImagePhotoLike, width: 512, height: 512})},
+		{name: "UI512", img: newBenchmarkFixtureImage(lossyBenchmarkCase{kind: benchmarkImageUI, width: 512, height: 512})},
+		{name: "YCbCr512", img: newBenchmarkYCbCrFixtureImage(512, 512)},
+	}
+	for _, fixture := range fixtures {
+		for _, mode := range []struct {
+			name string
+			mode Mode
+		}{
+			{name: "Default", mode: ModeDefault},
+			{name: "BestCompression", mode: ModeBestCompression},
+		} {
+			for _, commit := range []bool{false, true} {
+				b.Run(fmt.Sprintf("%s/%s/Commit%t", fixture.name, mode.name, commit), func(b *testing.B) {
+					cfg := vp8LossyConfigForModeQuality(mode.mode, 75)
+					cfg.commitWinningResiduals = commit
+					benchmarkEncodeLossyConfigImage(b, fixture.img, cfg)
+				})
+			}
+		}
+	}
+}
+
+func BenchmarkEncodeLossyTrellis(b *testing.B) {
+	fixtures := []struct {
+		name string
+		img  image.Image
+	}{
+		{name: "PhotoLike512", img: newBenchmarkFixtureImage(lossyBenchmarkCase{kind: benchmarkImagePhotoLike, width: 512, height: 512})},
+		{name: "UI512", img: newBenchmarkFixtureImage(lossyBenchmarkCase{kind: benchmarkImageUI, width: 512, height: 512})},
+	}
+	for _, fixture := range fixtures {
+		for _, enabled := range []bool{false, true} {
+			b.Run(fmt.Sprintf("%s/Enabled%t", fixture.name, enabled), func(b *testing.B) {
+				cfg := vp8LossyConfigForModeQuality(ModeBestCompression, 75)
+				cfg.defaultFrameIncumbent = false
+				cfg.trellis = enabled
+				if enabled {
+					cfg.trellisPasses = 1
+				}
+				benchmarkEncodeLossyConfigImage(b, fixture.img, cfg)
+			})
+		}
+	}
+}
+
+func BenchmarkEncodeLossyY4RefinementBeam(b *testing.B) {
+	fixtures := []struct {
+		name string
+		img  image.Image
+	}{
+		{name: "PhotoLike512", img: newBenchmarkFixtureImage(lossyBenchmarkCase{kind: benchmarkImagePhotoLike, width: 512, height: 512})},
+		{name: "UI512", img: newBenchmarkFixtureImage(lossyBenchmarkCase{kind: benchmarkImageUI, width: 512, height: 512})},
+	}
+	for _, fixture := range fixtures {
+		for _, width := range []int{0, 2} {
+			b.Run(fmt.Sprintf("%s/Width%d", fixture.name, width), func(b *testing.B) {
+				cfg := vp8LossyConfigForModeQuality(ModeBestCompression, 75)
+				cfg.defaultFrameIncumbent = false
+				cfg.y4RefinementBeamWidth = width
+				benchmarkEncodeLossyConfigImage(b, fixture.img, cfg)
+			})
+		}
 	}
 }
 
@@ -299,6 +436,28 @@ func benchmarkEncodeLossyCase(b *testing.B, tc lossyBenchmarkCase) {
 func benchmarkEncodeLosslessCase(b *testing.B, tc losslessBenchmarkCase) {
 	img := newLosslessBenchmarkFixtureImage(tc)
 	benchmarkEncodeLosslessImage(b, img)
+}
+
+func benchmarkEncodeLossyConfigImage(b *testing.B, img image.Image, cfg vp8LossyConfig) {
+	inputBytes := benchmarkImageInputBytes(img)
+	var encoded bytes.Buffer
+	if err := encodeLossyConfig(&encoded, newEncoderSource(img), cfg, lossyAlphaConfigForMode(ModeDefault)); err != nil {
+		b.Fatal(err)
+	}
+	b.SetBytes(int64(inputBytes))
+	b.ReportAllocs()
+
+	var buf bytes.Buffer
+	buf.Grow(encoded.Len())
+	b.ResetTimer()
+	for b.Loop() {
+		buf.Reset()
+		if err := encodeLossyConfig(&buf, newEncoderSource(img), cfg, lossyAlphaConfigForMode(ModeDefault)); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.ReportMetric(float64(encoded.Len()), "encoded_B")
+	b.ReportMetric(float64(encoded.Len())/float64(inputBytes), "encoded_per_input")
 }
 
 func benchmarkEncodeLosslessImage(b *testing.B, img image.Image) {

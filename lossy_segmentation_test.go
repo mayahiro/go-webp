@@ -96,10 +96,13 @@ func TestVP8TextureProfileUsesBoundedQuantizerRange(t *testing.T) {
 			t.Fatalf("qIndex %d luma bias = %d, want %d", tc.qIndex, cfg.quantBias.y1AC, wantBias)
 		}
 	}
-	for _, mode := range []Mode{ModeFast, ModeLowMemory, ModeBestCompression} {
+	for _, mode := range []Mode{ModeFast, ModeLowMemory} {
 		if got := vp8LossyConfigForQIndex(mode, 20).textureStrength; got != 0 {
 			t.Fatalf("mode %d texture strength = %d, want 0", mode, got)
 		}
+	}
+	if got, want := vp8LossyConfigForQIndex(ModeBestCompression, 20).textureStrength, vp8LossyConfigForQIndex(ModeDefault, 20).textureStrength; got != want {
+		t.Fatalf("BestCompression texture strength = %d, want Default value %d", got, want)
 	}
 }
 

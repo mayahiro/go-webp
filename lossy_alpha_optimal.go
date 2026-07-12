@@ -102,6 +102,7 @@ func buildAlphaOptimalTokens(readPixel pixelReader, bounds image.Rectangle, widt
 	workspace := newAlphaOptimalWorkspace(width)
 	tokens := make([]alphaToken, 0, width*height/4)
 	for y := 0; y < height; y++ {
+		countLossyCounter(lossyCounterAlphaOptimalRows, 1)
 		left := uint8(0)
 		for x := 0; x < width; x++ {
 			alpha := readPixel(bounds.Min.X+x, bounds.Min.Y+y).A

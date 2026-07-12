@@ -145,8 +145,20 @@ bounded analysis includes:
 
 `ModeFast` and `ModeLowMemory` omit luma4x4 mode search. `ModeFast` also omits
 macroblock skip and token-probability update search. `ModeBestCompression`
-adds a second rate-distortion pass, trellis quantization, and sharp chroma
-search.
+uses the same quality objective as `ModeDefault`, always enables sharp chroma,
+adds a second rate-distortion pass, and applies a bounded width-2 refinement
+to luma4x4 modes after learning residual token probabilities. It retains the
+complete `ModeDefault` VP8 frame as an exact-size incumbent and emits the
+expanded-search frame only when it is smaller. This prevents a larger VP8
+frame at the same quality, but can take substantially longer because both
+plans are evaluated.
+
+VP8 stores the first-partition length in 19 bits. If a selected lossy plan
+exceeds that limit, the encoder retries deterministically with progressively
+less first-partition signaling: token-probability updates are removed,
+segmentation is reduced and then disabled, luma4x4 search is limited and then
+disabled, and a DC-prediction emergency plan is used only if the preceding
+plans still do not fit. Plans that already fit keep their existing bitstream.
 
 ## Alpha
 
@@ -169,6 +181,10 @@ path.
 `image.Paletted` use dedicated read paths. Other image implementations are
 read through conversion equivalent to `color.NRGBAModel`.
 
+For lossy encoding, `image.YCbCr` is converted directly from Go's full-range
+Y, Cb, and Cr planes to VP8 limited-range YUV without an intermediate RGB
+round trip. All Go subsampling ratios are handled by ratio-specific readers.
+
 Encoding can scan the input more than once. Important resource bounds include:
 
 - Buffered lossless profiles use a packed source plane capped at 32 MiB
@@ -186,6 +202,8 @@ Encoding can scan the input more than once. Important resource bounds include:
   full-frame reconstruction plane
 - Standard image types can run lossy frame planning and alpha analysis with
   two workers
+- An oversized VP8 first partition can trigger bounded sequential replanning;
+  ordinary plans are emitted without this extra work
 - `ModeLowMemory` avoids the full-frame source plane, VP8 residual buffer,
   VP8L token stream, meta-prefix plan, and color-cache plan
 

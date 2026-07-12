@@ -50,15 +50,29 @@ func encodeLossyConfig(w io.Writer, source encoderSource, lossyConfig vp8LossyCo
 		return fmt.Errorf("webp: image dimensions %dx%d exceed VP8 limit %dx%d", source.width, source.height, maxVP8Dimension, maxVP8Dimension)
 	}
 
+	var defaultFrame []byte
+	if lossyConfig.defaultFrameIncumbent {
+		defaultConfig := makeVP8LossyConfig(lossyConfig.qualityProfile(), vp8EffortProfileForModeQIndex(ModeDefault, lossyConfig.qIndex))
+		defaultSource := newVP8Source(source, defaultConfig.materializeSource)
+		if defaultConfig.sharpYUV && defaultSource.materialized() {
+			defaultSource.applySharpChroma(instrumentLossyPixelReader(source.pixels()))
+		}
+		var err error
+		defaultFrame, err = encodeVP8KeyFrameSource(defaultSource, defaultConfig)
+		if err != nil {
+			return err
+		}
+	}
+
 	vp8Source := newVP8Source(source, lossyConfig.materializeSource)
 	if lossyConfig.sharpYUV && vp8Source.materialized() {
-		vp8Source.applySharpChroma(source.pixels())
+		vp8Source.applySharpChroma(instrumentLossyPixelReader(source.pixels()))
 	}
 	var alphaAnalysis lossyAlphaAnalysis
 	var readPixel pixelReader
 	var alphaDone chan lossyAlphaAnalysis
 	if !lossyStandardImageOpaque(source.image) {
-		readPixel = source.pixels()
+		readPixel = instrumentLossyPixelReader(source.pixels())
 		if lossyCanParallelizeAlpha(source, lossyConfig) {
 			alphaDone = make(chan lossyAlphaAnalysis, 1)
 			go func() {
@@ -75,6 +89,10 @@ func encodeLossyConfig(w io.Writer, source encoderSource, lossyConfig vp8LossyCo
 	if err != nil {
 		return err
 	}
+	if defaultFrame != nil && len(defaultFrame) <= len(frame) {
+		frame = defaultFrame
+	}
+	setLossyCounter(lossyCounterFirstPartitionBits, uint64(vp8FrameFirstPartitionBytes(frame))*8)
 	if alphaAnalysis.hasAlpha {
 		return writeLossyExtended(w, readPixel, source.bounds, source.width, source.height, frame, alphaAnalysis, alphaConfig)
 	}
@@ -1156,6 +1174,7 @@ func writeAlphaLZ77Bits(bits *bitWriter, readPixel pixelReader, bounds image.Rec
 }
 
 func writeAlphaSymbol(bits *bitWriter, code alphaCode, symbol int) {
+	countLossyAlphaSymbol(symbol)
 	if code.normal {
 		if code.n == 1 {
 			return
@@ -1199,6 +1218,7 @@ func writeAlphaDistanceSymbol(bits *bitWriter, code alphaCode, symbol uint8) {
 
 func writeAlphaLZ77Copy(bits *bitWriter, code alphaCode, length int, distanceCode int) {
 	for length > 0 {
+		countLossyAlphaCopy()
 		n := length
 		if n > alphaMaxBackwardRefLength {
 			n = alphaMaxBackwardRefLength
@@ -1292,6 +1312,7 @@ func analyzeLossyAlpha(readPixel pixelReader, bounds image.Rectangle, width int,
 }
 
 func analyzeLossyAlphaConfig(readPixel pixelReader, bounds image.Rectangle, width int, height int, cfg lossyAlphaConfig) lossyAlphaAnalysis {
+	countLossyAlphaFilters(cfg.filters)
 	var analysis lossyAlphaAnalysis
 	previous, current := makeAlphaRowPair(width)
 	var previousResiduals [4][]uint8
@@ -2012,27 +2033,36 @@ func writeChunkPadding(w *bufio.Writer, payloadSize uint64) error {
 }
 
 type vp8LossyConfig struct {
-	qIndex            int
-	quant             vp8Quant
-	quantDeltas       vp8QuantDeltas
-	quantBias         vp8QuantBias
-	filter            vp8LoopFilter
-	rd                vp8RDConfig
-	rdYLambdaScale    int
-	rdUVLambdaScale   int
-	tryY4             bool
-	trySkip           bool
-	updateTokenProb   bool
-	bufferResiduals   bool
-	materializeSource bool
-	maxSegments       int
-	segmentStrength   int
-	textureStrength   int
-	rdPasses          int
-	trellis           bool
-	dcDiffusion       bool
-	sharpYUV          bool
-	parallelAlpha     bool
+	qIndex                 int
+	quant                  vp8Quant
+	quantDeltas            vp8QuantDeltas
+	quantBias              vp8QuantBias
+	filter                 vp8LoopFilter
+	filterLevelDelta       int
+	disableLoopFilter      bool
+	rd                     vp8RDConfig
+	rdYLambdaScale         int
+	rdUVLambdaScale        int
+	tryY4                  bool
+	trySkip                bool
+	updateTokenProb        bool
+	bufferResiduals        bool
+	commitWinningResiduals bool
+	defaultFrameIncumbent  bool
+	materializeSource      bool
+	maxSegments            int
+	segmentStrength        int
+	textureStrength        int
+	rdPasses               int
+	trellis                bool
+	trellisPasses          int
+	dcDiffusion            bool
+	sharpYUV               bool
+	parallelAlpha          bool
+	y4SearchStride         int
+	y4FlatnessLimit        int
+	y4RefinementBeamWidth  int
+	forceDCPrediction      bool
 }
 
 func vp8LossyConfigForModeQuality(mode Mode, quality int) vp8LossyConfig {
@@ -2041,73 +2071,11 @@ func vp8LossyConfigForModeQuality(mode Mode, quality int) vp8LossyConfig {
 
 func vp8LossyConfigForQIndex(mode Mode, qIndex int) vp8LossyConfig {
 	qIndex = clipInt(qIndex, 0, 127)
-	quantDeltas := vp8QuantDeltas{uvDC: -2}
-	quantBias := vp8MildQuantBiasForIndex(qIndex)
-	yLambdaScale, uvLambdaScale := 64, 96
-	textureStrength := 0
-	highQualitySearch := qIndex <= 9
-	if highQualitySearch {
-		yLambdaScale = 32
+	quality := vp8QualityProfileForQIndex(qIndex)
+	if mode == ModeFast || mode == ModeLowMemory {
+		quality = vp8ConservativeQualityProfileForQIndex(qIndex)
 	}
-	conservativeMode := mode == ModeFast || mode == ModeLowMemory || mode == ModeBestCompression
-	if conservativeMode {
-		quantBias = vp8ConservativeQuantBias()
-		yLambdaScale, uvLambdaScale = 256, 256
-		highQualitySearch = false
-	} else if qIndex >= 15 && qIndex <= 30 {
-		quantBias.y1DC = 114
-		quantBias.y1AC = 114
-		quantBias.y2DC = 114
-		quantBias.y2AC = 114
-		textureStrength = 200
-	}
-	quant := vp8QuantForIndexDeltasBias(qIndex, quantDeltas, quantBias)
-	cfg := vp8LossyConfig{
-		qIndex:            qIndex,
-		quant:             quant,
-		quantDeltas:       quantDeltas,
-		quantBias:         quantBias,
-		filter:            vp8LoopFilterForQuant(quant),
-		rd:                newVP8RDConfigScaledTexture(quant, yLambdaScale, uvLambdaScale, textureStrength),
-		rdYLambdaScale:    yLambdaScale,
-		rdUVLambdaScale:   uvLambdaScale,
-		tryY4:             true,
-		trySkip:           true,
-		updateTokenProb:   true,
-		bufferResiduals:   true,
-		materializeSource: highQualitySearch,
-		maxSegments:       4,
-		textureStrength:   textureStrength,
-		rdPasses:          1,
-		sharpYUV:          highQualitySearch,
-		parallelAlpha:     true,
-	}
-	if mode == ModeBestCompression {
-		cfg.tryY4 = true
-		cfg.materializeSource = true
-		cfg.maxSegments = 4
-		cfg.rdPasses = 2
-		cfg.trellis = true
-		cfg.dcDiffusion = false
-		cfg.sharpYUV = true
-	}
-	if mode == ModeFast {
-		cfg.tryY4 = false
-		cfg.trySkip = false
-		cfg.updateTokenProb = false
-		cfg.bufferResiduals = false
-		cfg.materializeSource = false
-		cfg.maxSegments = 1
-		cfg.parallelAlpha = false
-	}
-	if mode == ModeLowMemory {
-		cfg.tryY4 = false
-		cfg.bufferResiduals = false
-		cfg.materializeSource = false
-		cfg.maxSegments = 1
-		cfg.parallelAlpha = false
-	}
-	return cfg
+	return makeVP8LossyConfig(quality, vp8EffortProfileForModeQIndex(mode, qIndex))
 }
 
 func encodeVP8KeyFrame(readLuma lumaReader, readChroma chromaReader, bounds image.Rectangle, width int, height int, qIndex int) ([]byte, error) {
@@ -2125,6 +2093,7 @@ func encodeVP8KeyFrameConfig(readLuma lumaReader, readChroma chromaReader, bound
 }
 
 func encodeVP8KeyFrameSource(source vp8Source, cfg vp8LossyConfig) ([]byte, error) {
+	cfg = cfg.withAdjustedLoopFilter()
 	mbw := (source.width + 15) >> 4
 	mbh := (source.height + 15) >> 4
 	work := newVP8EncodeBuffers(mbw, mbh)
@@ -2134,6 +2103,20 @@ func encodeVP8KeyFrameSource(source vp8Source, cfg vp8LossyConfig) ([]byte, erro
 		return nil, err
 	}
 	return assembleVP8KeyFrame(source.width, source.height, firstPart, residualPart), nil
+}
+
+func (cfg vp8LossyConfig) withAdjustedLoopFilter() vp8LossyConfig {
+	if cfg.disableLoopFilter {
+		cfg.filter = vp8LoopFilter{}
+		return cfg
+	}
+	cfg.filter.level = clipInt(cfg.filter.level+cfg.filterLevelDelta, 0, 63)
+	if cfg.filter.level == 0 {
+		cfg.filter.deltaEnabled = false
+		cfg.filter.refDeltas = [4]int{}
+		cfg.filter.modeDeltas = [4]int{}
+	}
+	return cfg
 }
 
 type vp8FramePlan struct {
@@ -2148,8 +2131,11 @@ type vp8FramePlan struct {
 }
 
 func makeVP8FramePlan(source vp8Source, cfg vp8LossyConfig, work *vp8EncodeBuffers) vp8FramePlan {
+	countLossyCounter(lossyCounterFilterCandidates, 1)
+	setLossyCounter(lossyCounterSelectedFilterLevel, uint64(cfg.filter.level))
 	mbw := (source.width + 15) >> 4
 	mbh := (source.height + 15) >> 4
+	countLossyCounter(lossyCounterMacroblocks, uint64(mbw*mbh))
 	segmentation := makeVP8Segmentation(source.readLuma, source.bounds, mbw, mbh, cfg)
 	useResidualBuffer := cfg.bufferResiduals && (cfg.trySkip || cfg.updateTokenProb) && vp8ResidualBufferFits(mbw, mbh)
 	pass := runVP8ModePass(source, cfg, work, mbw, mbh, &segmentation, nil, useResidualBuffer)
@@ -2158,6 +2144,7 @@ func makeVP8FramePlan(source vp8Source, cfg vp8LossyConfig, work *vp8EncodeBuffe
 		pass = runVP8ModePass(source, cfg, work, mbw, mbh, &segmentation, &tokenProbs, useResidualBuffer)
 		tokenProbs, skipMap = analyzeVP8ModePassEntropy(source, cfg, work, mbw, mbh, &segmentation, pass)
 	}
+	countLossySkippedMacroblocks(skipMap)
 	skipProb := vp8SkipProbability(skipMap)
 	return vp8FramePlan{
 		mbw:            mbw,
@@ -2172,9 +2159,14 @@ func makeVP8FramePlan(source vp8Source, cfg vp8LossyConfig, work *vp8EncodeBuffe
 }
 
 func encodeVP8FramePartitions(source vp8Source, cfg vp8LossyConfig, work *vp8EncodeBuffers, plan vp8FramePlan) ([]byte, []byte, error) {
-	firstPart, err := vp8FirstPartition(plan.mbw, plan.mbh, cfg.qIndex, cfg.quantDeltas, cfg.filter, &plan.segmentation, plan.modes, plan.tokenProbs, plan.skipMap, plan.skipProb)
+	firstPart, residualPart, _, err := encodeVP8FramePartitionsLimit(source, cfg, work, plan, vp8FirstPartitionMax)
+	return firstPart, residualPart, err
+}
+
+func encodeVP8FramePartitionsLimit(source vp8Source, cfg vp8LossyConfig, work *vp8EncodeBuffers, plan vp8FramePlan, firstPartitionLimit int) ([]byte, []byte, vp8FirstPartitionFallbackStage, error) {
+	firstPart, cfg, plan, fallback, err := vp8FirstPartitionWithFallback(source, cfg, work, plan, firstPartitionLimit)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fallback, err
 	}
 	var residualPart []byte
 	if plan.residualBuffer != nil {
@@ -2183,7 +2175,7 @@ func encodeVP8FramePartitions(source vp8Source, cfg vp8LossyConfig, work *vp8Enc
 		clear(work.recY)
 		residualPart = encodeVP8ResidualsConfig(source.readLuma, source.readChroma, source.bounds, source.width, source.height, plan.mbw, plan.mbh, cfg.quant, &plan.segmentation, plan.modes, work, &plan.tokenProbs, plan.skipMap)
 	}
-	return firstPart, residualPart, nil
+	return firstPart, residualPart, fallback, nil
 }
 
 func assembleVP8KeyFrame(width int, height int, firstPart []byte, residualPart []byte) []byte {
@@ -2197,6 +2189,14 @@ func assembleVP8KeyFrame(width int, height int, firstPart []byte, residualPart [
 	frame = append(frame, firstPart...)
 	frame = append(frame, residualPart...)
 	return frame
+}
+
+func vp8FrameFirstPartitionBytes(frame []byte) int {
+	if len(frame) < 3 {
+		return 0
+	}
+	tag := uint32(frame[0]) | uint32(frame[1])<<8 | uint32(frame[2])<<16
+	return int(tag >> 5)
 }
 
 type vp8MBMode struct {
@@ -2346,7 +2346,32 @@ func vp8FirstPartitionCapacity(mbw int, mbh int) int {
 }
 
 func vp8FirstPartition(mbw int, mbh int, qIndex int, quantDeltas vp8QuantDeltas, filter vp8LoopFilter, segmentation *vp8Segmentation, modes []vp8MBMode, tokenProbs vp8TokenProbs, skipMap []bool, skipProb uint8) ([]byte, error) {
+	return vp8FirstPartitionWithLimit(mbw, mbh, qIndex, quantDeltas, filter, segmentation, modes, tokenProbs, skipMap, skipProb, vp8FirstPartitionMax)
+}
+
+func vp8FirstPartitionWithLimit(mbw int, mbh int, qIndex int, quantDeltas vp8QuantDeltas, filter vp8LoopFilter, segmentation *vp8Segmentation, modes []vp8MBMode, tokenProbs vp8TokenProbs, skipMap []bool, skipProb uint8, limit int) ([]byte, error) {
 	enc := newVP8BoolEncoderWithCapacity(vp8FirstPartitionCapacity(mbw, mbh))
+	writeVP8FirstPartitionSyntax(enc, mbw, mbh, qIndex, quantDeltas, filter, segmentation, modes, tokenProbs, skipMap, skipProb)
+	data := enc.bytes()
+	if len(data) > limit {
+		return nil, fmt.Errorf("webp: lossy image is too large for the simple VP8 first partition")
+	}
+	if segmentation.enabled() {
+		countLossyCounter(lossyCounterSegmentMapBits, uint64(mbw*mbh*2))
+	}
+	countLossyCounter(lossyCounterFirstPartitionBits, uint64(len(data))*8)
+	firstPart := make([]byte, len(data))
+	copy(firstPart, data)
+	return firstPart, nil
+}
+
+func vp8FirstPartitionSize(mbw int, mbh int, qIndex int, quantDeltas vp8QuantDeltas, filter vp8LoopFilter, segmentation *vp8Segmentation, modes []vp8MBMode, tokenProbs vp8TokenProbs, skipMap []bool, skipProb uint8) int {
+	counter := newVP8BoolCounter()
+	writeVP8FirstPartitionSyntax(counter, mbw, mbh, qIndex, quantDeltas, filter, segmentation, modes, tokenProbs, skipMap, skipProb)
+	return counter.size()
+}
+
+func writeVP8FirstPartitionSyntax(enc *vp8BoolEncoder, mbw int, mbh int, qIndex int, quantDeltas vp8QuantDeltas, filter vp8LoopFilter, segmentation *vp8Segmentation, modes []vp8MBMode, tokenProbs vp8TokenProbs, skipMap []bool, skipProb uint8) {
 	writeVP8Literal(enc, 0, 1) // color space
 	writeVP8Literal(enc, 0, 1) // pixel clamp
 	writeVP8SegmentationHeader(enc, segmentation)
@@ -2394,13 +2419,6 @@ func vp8FirstPartition(mbw int, mbh int, qIndex int, quantDeltas vp8QuantDeltas,
 			writeVP8ChromaMode(enc, mode.cMode)
 		}
 	}
-	data := enc.bytes()
-	if len(data) > vp8FirstPartitionMax {
-		return nil, fmt.Errorf("webp: lossy image is too large for the simple VP8 first partition")
-	}
-	firstPart := make([]byte, len(data))
-	copy(firstPart, data)
-	return firstPart, nil
 }
 
 func writeVP8LoopFilterDeltas(enc *vp8BoolEncoder, filter vp8LoopFilter) {
@@ -2701,8 +2719,9 @@ type vp8Quant struct {
 	uvAC   int
 	bias   vp8QuantBias
 
-	trellisProbs *vp8TokenProbs
-	dcDiffusion  *vp8DCDiffusion
+	trellisProbs  *vp8TokenProbs
+	trellisPasses int
+	dcDiffusion   *vp8DCDiffusion
 }
 
 type vp8QuantDeltas struct {
@@ -2888,6 +2907,7 @@ func analyzeVP8ModesConfigWithSink(readLuma lumaReader, readChroma chromaReader,
 	baseQuant := cfg.quant
 	if cfg.trellis {
 		baseQuant = baseQuant.withTrellis(tokenProbs)
+		baseQuant.trellisPasses = cfg.trellisPasses
 	}
 	for mby := 0; mby < mbh; mby++ {
 		var leftPred [4]uint8
@@ -2901,9 +2921,11 @@ func analyzeVP8ModesConfigWithSink(readLuma lumaReader, readChroma chromaReader,
 			lumaTarget := makeLumaTargetMB(readLuma, bounds, mbx, mby)
 			lumaBlocks := &lumaTarget.blocks
 			chromaTarget := makeChromaTargetMB(readChroma, bounds, mbx, mby)
-			mode := vp8MBMode{
-				cMode: chooseVP8ChromaModeFromTargetWithProbs(&chromaTarget, mbx, mby, recCb, recCr, cStride, quant, rd, tokenProbs, &leftUV, &upUV[mbx]),
+			chromaMode := uint8(vp8PredDC)
+			if !cfg.forceDCPrediction {
+				chromaMode = chooseVP8ChromaModeFromTargetWithProbs(&chromaTarget, mbx, mby, recCb, recCr, cStride, quant, rd, tokenProbs, &leftUV, &upUV[mbx])
 			}
+			mode := vp8MBMode{cMode: chromaMode}
 			savedLeftPred := leftPred
 			savedUpPred := upPred[mbx]
 			savedLeftY := leftY
@@ -2911,11 +2933,33 @@ func analyzeVP8ModesConfigWithSink(readLuma lumaReader, readChroma chromaReader,
 			savedLeftY16 := leftY16
 			savedUpY16 := upY16[mbx]
 
-			y16Mode, y16Score := chooseVP8Y16ModeWithProbs(lumaBlocks, mbx, mby, recY, yStride, quant, rd, tokenProbs, &leftY, &upY[mbx], &leftY16, &upY16[mbx])
-			if cfg.tryY4 {
-				y4Score := chooseVP8Y4Modes(lumaBlocks, mbx, mby, recY, yStride, quant, rd, tokenProbs, &leftPred, &upPred[mbx], &leftY, &upY[mbx], &mode)
+			y16Mode := uint8(vp8PredDC)
+			y16Score := int64(0)
+			if !cfg.forceDCPrediction {
+				y16Mode, y16Score = chooseVP8Y16ModeWithProbs(lumaBlocks, mbx, mby, recY, yStride, quant, rd, tokenProbs, &leftY, &upY[mbx], &leftY16, &upY16[mbx])
+			}
+			tryY4 := cfg.tryY4 && (cfg.y4SearchStride <= 1 || macroblock%cfg.y4SearchStride == 0)
+			if tryY4 && cfg.y4FlatnessLimit > 0 && vp8LumaTargetRange(lumaBlocks) < cfg.y4FlatnessLimit {
+				tryY4 = false
+			}
+			if tryY4 {
+				var y4Residuals vp8MacroblockResiduals
+				var y4ResidualTarget *vp8MacroblockResiduals
+				if sink != nil {
+					y4ResidualTarget = &y4Residuals
+				}
+				y4Score := int64(0)
+				y4NZ := false
+				if cfg.y4RefinementBeamWidth > 1 && tokenProbs != nil {
+					y4Score, y4NZ = chooseVP8Y4ModesBeam(lumaBlocks, mbx, mby, recY, yStride, quant, rd, tokenProbs, y4ResidualTarget, &leftPred, &upPred[mbx], &leftY, &upY[mbx], &mode, cfg.y4RefinementBeamWidth)
+				} else {
+					y4Score, y4NZ = chooseVP8Y4Modes(lumaBlocks, mbx, mby, recY, yStride, quant, rd, tokenProbs, y4ResidualTarget, &leftPred, &upPred[mbx], &leftY, &upY[mbx], &mode)
+				}
 				if y16Score > y4Score {
-					processVP8ChromaTargetMB(&chromaTarget, mbx, mby, recCb, recCr, cStride, quant, mode, &leftUV, &upUV[mbx], nil)
+					countLossyCounter(lossyCounterY4MacroblocksSelected, 1)
+					y4Residuals.commit(sink)
+					chromaNZ := processVP8ChromaTargetMB(&chromaTarget, mbx, mby, recCb, recCr, cStride, quant, mode, &leftUV, &upUV[mbx], sink)
+					sink.finishMacroblock(y4NZ || chromaNZ)
 					modes[macroblock] = mode
 					continue
 				}
@@ -2987,6 +3031,7 @@ func collectVP8TokenStatsConfig(readLuma lumaReader, readChroma chromaReader, bo
 }
 
 func analyzeVP8MacroblockSkips(readLuma lumaReader, readChroma chromaReader, bounds image.Rectangle, mbw int, mbh int, baseQuant vp8Quant, segmentation *vp8Segmentation, modes []vp8MBMode, work *vp8EncodeBuffers) []bool {
+	countLossyCounter(lossyCounterSkipCandidates, uint64(mbw*mbh))
 	yStride := mbw * 16
 	cStride := mbw * 8
 	var upY [][4]uint8
@@ -3265,65 +3310,241 @@ func processVP8ChromaPlane(target []uint8, mbx int, mby int, rec []uint8, stride
 	return hasNZ
 }
 
-func chooseVP8Y4Modes(target *lumaTargetBlocks, mbx int, mby int, recY []uint8, stride int, quant vp8Quant, rd vp8RDConfig, tokenProbs *vp8TokenProbs, leftPred *[4]uint8, upPred *[4]uint8, leftNZ *[4]uint8, upNZ *[4]uint8, mode *vp8MBMode) int64 {
+func chooseVP8Y4Modes(target *lumaTargetBlocks, mbx int, mby int, recY []uint8, stride int, quant vp8Quant, rd vp8RDConfig, tokenProbs *vp8TokenProbs, residuals *vp8MacroblockResiduals, leftPred *[4]uint8, upPred *[4]uint8, leftNZ *[4]uint8, upNZ *[4]uint8, mode *vp8MBMode) (int64, bool) {
 	score := rd.lumaScore(0, vp8BitCost(145, false))
+	hasNZ := false
 	for by := 0; by < 4; by++ {
 		p := leftPred[by]
 		nz := leftNZ[by]
 		for bx := 0; bx < 4; bx++ {
+			countLossyCounter(lossyCounterY4BlocksConsidered, 1)
 			x := mbx*16 + bx*4
 			y := mby*16 + by*4
 			luma := &(*target)[by*4+bx]
-			blockMode, blockScore, blockNZ, recon := chooseVP8Y4ModeWithProbs(luma, x, y, recY, stride, quant, rd, tokenProbs, upPred[bx], p, nz+upNZ[bx])
+			blockMode, blockScore, blockNZ, recon := chooseVP8Y4ModeWithProbs(luma, x, y, recY, stride, quant, rd, tokenProbs, residuals, upPred[bx], p, nz+upNZ[bx])
 			mode.y4Modes[by*4+bx] = blockMode
 			put4(recY, stride, x, y, recon)
 			score += blockScore
 			p = blockMode
 			nz = blockNZ
+			hasNZ = hasNZ || blockNZ != 0
 			upPred[bx] = blockMode
 			upNZ[bx] = blockNZ
 		}
 		leftPred[by] = p
 		leftNZ[by] = nz
 	}
-	return score
+	return score, hasNZ
+}
+
+const vp8Y4MaxBeamWidth = 2
+
+type vp8Y4BeamState struct {
+	score    int64
+	recon    [16 * 16]uint8
+	modes    [16]uint8
+	nonZero  [16]uint8
+	contexts [16]uint8
+	coeffs   [16]vp8QuantizedBlock
+	greedy   bool
+	leftPred [4]uint8
+	upPred   [4]uint8
+	leftNZ   [4]uint8
+	upNZ     [4]uint8
+}
+
+func chooseVP8Y4ModesBeam(target *lumaTargetBlocks, mbx int, mby int, recY []uint8, stride int, quant vp8Quant, rd vp8RDConfig, tokenProbs *vp8TokenProbs, residuals *vp8MacroblockResiduals, leftPred *[4]uint8, upPred *[4]uint8, leftNZ *[4]uint8, upNZ *[4]uint8, mode *vp8MBMode, beamWidth int) (int64, bool) {
+	beamWidth = clipInt(beamWidth, 1, vp8Y4MaxBeamWidth)
+	beam := [vp8Y4MaxBeamWidth]vp8Y4BeamState{{
+		score:    rd.lumaScore(0, vp8BitCost(145, false)),
+		greedy:   true,
+		leftPred: *leftPred,
+		upPred:   *upPred,
+		leftNZ:   *leftNZ,
+		upNZ:     *upNZ,
+	}}
+	beamCount := 1
+	x0 := mbx * 16
+	y0 := mby * 16
+	for block := 0; block < 16; block++ {
+		countLossyCounter(lossyCounterY4BlocksConsidered, 1)
+		by := block / 4
+		bx := block % 4
+		x := x0 + bx*4
+		y := y0 + by*4
+		luma := &(*target)[block]
+		var next [vp8Y4MaxBeamWidth]vp8Y4BeamState
+		nextCount := 0
+		var greedyCandidate vp8Y4BeamState
+		hasGreedyCandidate := false
+		for parentIndex := 0; parentIndex < beamCount; parentIndex++ {
+			parent := &beam[parentIndex]
+			putVP8Y4BeamReconstruction(recY, stride, x0, y0, &parent.recon)
+			neighbors := makeLuma4Neighbors(recY, stride, x, y)
+			targetTexture := int64(0)
+			if rd.textureLambda > 0 {
+				targetTexture = vp8WeightedHadamard(luma)
+			}
+			topMode := parent.upPred[bx]
+			leftMode := parent.leftPred[by]
+			context := parent.leftNZ[by] + parent.upNZ[bx]
+			var blockScores [vp8NumPredModes]int64
+			var blockNZs [vp8NumPredModes]uint8
+			var reconstructions [vp8NumPredModes][16]uint8
+			var coefficients [vp8NumPredModes]vp8QuantizedBlock
+			localBestMode := uint8(0)
+			localBestScore := int64(1<<63 - 1)
+			for candidateMode := uint8(0); candidateMode < vp8NumPredModes; candidateMode++ {
+				blockScore, blockNZ, recon, coeff := scoreVP8Y4ModeCandidate(luma, &neighbors, targetTexture, quant, rd, tokenProbs, topMode, leftMode, context, candidateMode)
+				blockScores[candidateMode] = blockScore
+				blockNZs[candidateMode] = blockNZ
+				reconstructions[candidateMode] = recon
+				coefficients[candidateMode] = coeff
+				if blockScore < localBestScore {
+					localBestScore = blockScore
+					localBestMode = candidateMode
+				}
+			}
+			for candidateMode := uint8(0); candidateMode < vp8NumPredModes; candidateMode++ {
+				candidateScore := parent.score + blockScores[candidateMode]
+				isGreedy := parent.greedy && candidateMode == localBestMode
+				rank := nextCount
+				for i := 0; i < nextCount; i++ {
+					if candidateScore < next[i].score {
+						rank = i
+						break
+					}
+				}
+				if rank >= beamWidth && !isGreedy {
+					continue
+				}
+				candidate := *parent
+				candidate.score = candidateScore
+				candidate.greedy = isGreedy
+				candidate.modes[block] = candidateMode
+				candidate.nonZero[block] = blockNZs[candidateMode]
+				candidate.contexts[block] = context
+				candidate.coeffs[block] = coefficients[candidateMode]
+				candidate.leftPred[by] = candidateMode
+				candidate.upPred[bx] = candidateMode
+				candidate.leftNZ[by] = blockNZs[candidateMode]
+				candidate.upNZ[bx] = blockNZs[candidateMode]
+				putVP8Y4BeamBlock(&candidate.recon, bx, by, reconstructions[candidateMode])
+				if candidate.greedy {
+					greedyCandidate = candidate
+					hasGreedyCandidate = true
+				}
+				if rank >= beamWidth {
+					continue
+				}
+				if nextCount < beamWidth {
+					nextCount++
+				}
+				for i := nextCount - 1; i > rank; i-- {
+					next[i] = next[i-1]
+				}
+				next[rank] = candidate
+			}
+		}
+		if hasGreedyCandidate {
+			containsGreedy := false
+			for i := 0; i < nextCount; i++ {
+				containsGreedy = containsGreedy || next[i].greedy
+			}
+			if !containsGreedy {
+				if nextCount < beamWidth {
+					nextCount++
+				}
+				next[nextCount-1] = greedyCandidate
+				for i := nextCount - 1; i > 0 && next[i].score < next[i-1].score; i-- {
+					next[i], next[i-1] = next[i-1], next[i]
+				}
+			}
+		}
+		beam = next
+		beamCount = nextCount
+	}
+
+	winner := &beam[0]
+	putVP8Y4BeamReconstruction(recY, stride, x0, y0, &winner.recon)
+	mode.y4Modes = winner.modes
+	*leftPred = winner.leftPred
+	*upPred = winner.upPred
+	*leftNZ = winner.leftNZ
+	*upNZ = winner.upNZ
+	hasNZ := false
+	for block := 0; block < 16; block++ {
+		if residuals != nil {
+			residuals.appendBlock(vp8PlaneY1SansY2, winner.contexts[block], winner.coeffs[block], 0)
+		}
+		hasNZ = hasNZ || winner.nonZero[block] != 0
+	}
+	return winner.score, hasNZ
+}
+
+func putVP8Y4BeamBlock(dst *[16 * 16]uint8, bx int, by int, block [16]uint8) {
+	for y := 0; y < 4; y++ {
+		start := (by*4+y)*16 + bx*4
+		copy(dst[start:start+4], block[y*4:y*4+4])
+	}
+}
+
+func putVP8Y4BeamReconstruction(dst []uint8, stride int, x int, y int, recon *[16 * 16]uint8) {
+	for row := 0; row < 16; row++ {
+		dstRow := vp8ReconstructionRow(dst, stride, y+row)[x:]
+		copy(dstRow[:16], recon[row*16:row*16+16])
+	}
 }
 
 func chooseVP8Y4Mode(target *[16]uint8, x int, y int, recY []uint8, stride int, quant vp8Quant, rd vp8RDConfig, topPred uint8, leftPred uint8, context uint8) (uint8, int64, uint8, [16]uint8) {
-	return chooseVP8Y4ModeWithProbs(target, x, y, recY, stride, quant, rd, nil, topPred, leftPred, context)
+	return chooseVP8Y4ModeWithProbs(target, x, y, recY, stride, quant, rd, nil, nil, topPred, leftPred, context)
 }
 
-func chooseVP8Y4ModeWithProbs(target *[16]uint8, x int, y int, recY []uint8, stride int, quant vp8Quant, rd vp8RDConfig, tokenProbs *vp8TokenProbs, topPred uint8, leftPred uint8, context uint8) (uint8, int64, uint8, [16]uint8) {
+func chooseVP8Y4ModeWithProbs(target *[16]uint8, x int, y int, recY []uint8, stride int, quant vp8Quant, rd vp8RDConfig, tokenProbs *vp8TokenProbs, residuals *vp8MacroblockResiduals, topPred uint8, leftPred uint8, context uint8) (uint8, int64, uint8, [16]uint8) {
 	bestMode := uint8(vp8PredDC)
 	bestScore := int64(1<<63 - 1)
 	bestNZ := uint8(0)
 	var bestRecon [16]uint8
+	var bestCoeff vp8QuantizedBlock
 	neighbors := makeLuma4Neighbors(recY, stride, x, y)
 	targetTexture := int64(0)
 	if rd.textureLambda > 0 {
 		targetTexture = vp8WeightedHadamard(target)
 	}
 	for mode := uint8(0); mode < vp8NumPredModes; mode++ {
-		pred := predictLuma4WithNeighbors(&neighbors, mode)
-		residual := lumaResidualBlockFromTarget(target, pred)
-		coeff := quant.quantizeY1(residual, vp8PlaneY1SansY2, context)
-		recon := reconstructVP8Block(pred, coeff, quant.y1DC, quant.y1AC)
-		distortion := rd.lumaDistortionWithTargetTexture(target, recon, targetTexture)
-		blockBitCost, blockNZ := vp8BlockBitCostAndNonZeroWithProbsPtr(tokenProbs, vp8PlaneY1SansY2, context, &coeff)
-		bitCost := vp8Y4ModeCost(topPred, leftPred, mode) + blockBitCost
-		score := rd.lumaScore(distortion, bitCost)
+		score, blockNZ, recon, coeff := scoreVP8Y4ModeCandidate(target, &neighbors, targetTexture, quant, rd, tokenProbs, topPred, leftPred, context, mode)
 		if score < bestScore {
 			bestScore = score
 			bestMode = mode
 			bestRecon = recon
-			if blockNZ {
+			bestCoeff = coeff
+			if blockNZ != 0 {
 				bestNZ = 1
 			} else {
 				bestNZ = 0
 			}
 		}
 	}
+	if residuals != nil {
+		residuals.appendBlock(vp8PlaneY1SansY2, context, bestCoeff, 0)
+	}
 	return bestMode, bestScore, bestNZ, bestRecon
+}
+
+func scoreVP8Y4ModeCandidate(target *[16]uint8, neighbors *luma4Neighbors, targetTexture int64, quant vp8Quant, rd vp8RDConfig, tokenProbs *vp8TokenProbs, topPred uint8, leftPred uint8, context uint8, mode uint8) (int64, uint8, [16]uint8, vp8QuantizedBlock) {
+	countLossyCounter(lossyCounterY4ModesScored, 1)
+	pred := predictLuma4WithNeighbors(neighbors, mode)
+	residual := lumaResidualBlockFromTarget(target, pred)
+	coeff := quant.quantizeY1(residual, vp8PlaneY1SansY2, context)
+	recon := reconstructVP8Block(pred, coeff, quant.y1DC, quant.y1AC)
+	distortion := rd.lumaDistortionWithTargetTexture(target, recon, targetTexture)
+	blockBitCost, hasNZ := vp8BlockBitCostAndNonZeroWithProbsPtr(tokenProbs, vp8PlaneY1SansY2, context, &coeff)
+	bitCost := vp8Y4ModeCost(topPred, leftPred, mode) + blockBitCost
+	blockNZ := uint8(0)
+	if hasNZ {
+		blockNZ = 1
+	}
+	return rd.lumaScore(distortion, bitCost), blockNZ, recon, coeff
 }
 
 var vp8Y4ModeCostTable = makeVP8Y4ModeCostTable()
@@ -3419,6 +3640,7 @@ func chooseVP8Y16ModeWithProbs(target *lumaTargetBlocks, mbx int, mby int, recY 
 	}
 	modes, nModes := vp8CandidatePredModes(mbx, mby)
 	for i := 0; i < nModes; i++ {
+		countLossyCounter(lossyCounterY16ModesScored, 1)
 		mode := modes[i]
 		score := scoreLuma16RD(target, &targetTexture, mbx, mby, recY, stride, quant, rd, tokenProbs, left, up, *leftY16+*upY16, mode)
 		if score < bestScore {
@@ -3488,6 +3710,7 @@ func chooseVP8ChromaModeFromTargetWithProbs(target *chromaTargetMB, mbx int, mby
 	bestScore := int64(1<<63 - 1)
 	modes, nModes := vp8CandidatePredModes(mbx, mby)
 	for i := 0; i < nModes; i++ {
+		countLossyCounter(lossyCounterChromaModesScored, 1)
 		mode := modes[i]
 		score := scoreChromaRD(target, mbx, mby, recCb, recCr, stride, quant, rd, tokenProbs, left, up, mode)
 		if score < bestScore {
@@ -3880,6 +4103,18 @@ func scoreLuma4FromTarget(target *[16]uint8, block [16]uint8) int64 {
 	return score
 }
 
+func vp8LumaTargetRange(target *lumaTargetBlocks) int {
+	minimum := 255
+	maximum := 0
+	for block := range target {
+		for _, value := range target[block] {
+			minimum = min(minimum, int(value))
+			maximum = max(maximum, int(value))
+		}
+	}
+	return maximum - minimum
+}
+
 func chromaResidualBlock(readChroma chromaReader, bounds image.Rectangle, x int, y int, pred [16]uint8, cb bool) [16]int {
 	var residual [16]int
 	for yy := 0; yy < 4; yy++ {
@@ -3952,6 +4187,7 @@ func makeChromaPairCacheMB(readChroma chromaReader, absX int, absY int) chromaPa
 }
 
 func chromaSamplePairFromCache(cache *chromaPairCacheMB, x int, y int) (uint8, uint8) {
+	countLossyCounter(lossyCounterChromaFilterSamples, 1)
 	centerCb, centerCr, cbMin, cbMax, crMin, crMax := chromaCenterStatsFromCache(cache, x, y)
 	cbSimple := cbMax-cbMin <= 16
 	crSimple := crMax-crMin <= 16
@@ -4027,6 +4263,7 @@ func chromaSample(readChroma chromaReader, bounds image.Rectangle, x int, y int,
 }
 
 func chromaSamplePair(readChroma chromaReader, bounds image.Rectangle, x int, y int) (uint8, uint8) {
+	countLossyCounter(lossyCounterChromaFilterSamples, 1)
 	if chromaSampleWindowInBounds(bounds, x, y) {
 		return chromaSamplePairInBounds(readChroma, bounds.Min.X+x, bounds.Min.Y+y)
 	}
@@ -4255,11 +4492,21 @@ func samplePixel(readPixel pixelReader, bounds image.Rectangle, x int, y int) co
 }
 
 func rgbToLuma(r uint8, g uint8, b uint8) uint8 {
+	countLossyCounter(lossyCounterRGBToYUVConversions, 1)
+	return rgbToLumaValue(r, g, b)
+}
+
+func rgbToLumaValue(r uint8, g uint8, b uint8) uint8 {
 	luma := 16839*int(r) + 33059*int(g) + 6420*int(b)
 	return uint8((luma + 1<<15 + 16<<16) >> 16)
 }
 
 func rgbToChroma(r uint8, g uint8, b uint8) (uint8, uint8) {
+	countLossyCounter(lossyCounterRGBToYUVConversions, 1)
+	return rgbToChromaValue(r, g, b)
+}
+
+func rgbToChromaValue(r uint8, g uint8, b uint8) (uint8, uint8) {
 	cb := (-9719*int(r) - 19081*int(g) + 28800*int(b) + 1<<15 + 128<<16) >> 16
 	cr := (28800*int(r) - 24116*int(g) - 4684*int(b) + 1<<15 + 128<<16) >> 16
 	return uint8(clipInt(cb, 0, 255)), uint8(clipInt(cr, 0, 255))
@@ -4572,6 +4819,7 @@ func quantizeTransformedVP8BlockACOnly(transformed [16]int, acQ int) vp8Quantize
 }
 
 func forwardDCT4(residual [16]int) [16]int {
+	countLossyCounter(lossyCounterForwardDCTCount, 1)
 	var tmp [16]int
 	for i := 0; i < 4; i++ {
 		d0 := residual[i*4+0]
@@ -4689,6 +4937,7 @@ func dequantizeVP8Block(coeff vp8QuantizedBlock, dcQ int, acQ int) [16]int {
 }
 
 func inverseDCT4(pred [16]uint8, coeff [16]int) [16]uint8 {
+	countLossyCounter(lossyCounterInverseDCTCount, 1)
 	const (
 		c1 = 85627
 		c2 = 35468

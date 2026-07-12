@@ -92,6 +92,7 @@ func makeVP8SegmentationForActivities(activities []uint32, cfg vp8LossyConfig) v
 	if cfg.maxSegments >= 4 && macroblocks >= 192 {
 		targetCount = 4
 	}
+	countLossyCounter(lossyCounterSegmentsConsidered, uint64(targetCount))
 	var thresholds [vp8SegmentCount - 1]uint32
 	thresholdCount := 0
 	for i := 1; i < targetCount; i++ {
@@ -125,6 +126,7 @@ func makeVP8SegmentationForActivities(activities []uint32, cfg vp8LossyConfig) v
 	}
 	segmentation.mapProbs = vp8SegmentMapProbabilities(segmentation.mapIDs)
 	segmentation.configureSegments(cfg)
+	countLossyCounter(lossyCounterSegmentsSelected, uint64(segmentation.count))
 	return segmentation
 }
 
@@ -173,9 +175,15 @@ func (s *vp8Segmentation) configureSegments(cfg vp8LossyConfig) {
 	}
 	for i := 0; i < s.count; i++ {
 		quant := vp8QuantForIndexDeltasBias(clipInt(cfg.qIndex+offsets[i], 0, 127), cfg.quantDeltas, cfg.quantBias)
+		filterLevel := vp8LoopFilterForQuant(quant).level
+		if cfg.disableLoopFilter {
+			filterLevel = 0
+		} else {
+			filterLevel = clipInt(filterLevel+cfg.filterLevelDelta, 0, 63)
+		}
 		s.segments[i] = vp8SegmentConfig{
 			quant:       quant,
-			filterLevel: vp8LoopFilterForQuant(quant).level,
+			filterLevel: filterLevel,
 			rd:          newVP8RDConfigScaledTexture(quant, cfg.rdYLambdaScale, cfg.rdUVLambdaScale, cfg.textureStrength),
 		}
 	}

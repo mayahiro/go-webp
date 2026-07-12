@@ -33,16 +33,16 @@ output size for one encode.
 
 | Fixture | Quality | Time | encoded_B | B/op | allocs/op |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Gradient 128x128 | 1 | 4.544 ms | 866 | 86,186 | 20 |
-| Gradient 128x128 | 50 | 4.499 ms | 2,768 | 90,730 | 20 |
-| Gradient 128x128 | 75 | 5.057 ms | 3,506 | 93,802 | 20 |
-| Gradient 128x128 | 90 | 11.485 ms | 5,284 | 152,746 | 24 |
-| Gradient 128x128 | 100 | 12.056 ms | 8,306 | 164,522 | 21 |
-| UI 256x256 | 75 | 17.723 ms | 2,906 | 306,096 | 21 |
-| Flat 128x128 | 75 | 4.153 ms | 84 | 89,274 | 19 |
-| Palette 256x256 | 75 | 27.099 ms | 39,042 | 394,496 | 23 |
-| Alpha 128x128 | 75 | 6.496 ms | 5,582 | 126,218 | 33 |
-| Photo-like 512x512 | 75 | 116.795 ms | 142,078 | 1,467,968 | 22 |
+| Gradient 128x128 | 1 | 4.347 ms | 866 | 86,186 | 20 |
+| Gradient 128x128 | 50 | 4.157 ms | 2,768 | 90,730 | 20 |
+| Gradient 128x128 | 75 | 4.635 ms | 3,506 | 93,802 | 20 |
+| Gradient 128x128 | 90 | 11.111 ms | 5,284 | 152,746 | 24 |
+| Gradient 128x128 | 100 | 11.503 ms | 8,306 | 164,522 | 21 |
+| UI 256x256 | 75 | 11.921 ms | 2,906 | 306,096 | 21 |
+| Flat 128x128 | 75 | 1.507 ms | 84 | 89,274 | 19 |
+| Palette 256x256 | 75 | 24.363 ms | 39,042 | 394,496 | 23 |
+| Alpha 128x128 | 75 | 5.692 ms | 5,582 | 126,218 | 33 |
+| Photo-like 512x512 | 75 | 108.031 ms | 142,078 | 1,467,968 | 22 |
 
 The photo-like fixture is deterministic synthetic content and is not a
 substitute for a natural-photo corpus.
@@ -61,7 +61,7 @@ substitute for a natural-photo corpus.
 ## Interpretation
 
 - Q75 lossy encodes for the generated fixtures through 256x256 remain below
-  30 ms on this machine; the photo-like 512x512 fixture takes about 115 ms
+  25 ms on this machine; the photo-like 512x512 fixture takes about 108 ms
 - High-quality lossy encoding costs more because it enables a broader source
   and mode search
 - Lossy reconstruction uses a two-macroblock-row ring, reducing the estimated

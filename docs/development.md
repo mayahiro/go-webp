@@ -79,15 +79,60 @@ names or anonymous private-corpus IDs. The filter is recorded in JSON reports.
 make compare-lossy ARGS='-runs 3 -go-mode default'
 ```
 
-This command requires `cwebp` and `dwebp`. Its schema-version 4 JSON report
+This command requires `cwebp` and `dwebp`. Its schema-version 8 JSON report
 contains:
 
 - Quality sweeps for go-webp and cwebp
-- Decoded RGB, YUV, alpha, and weighted 7x7 luma SSIM metrics
+- Decoded RGB, YUV, alpha, weighted 7x7 luma SSIM, and RGB composite metrics
+  over black, white, and 8x8 black-and-white checker backgrounds
 - Encoded size and VP8 partition sizes
-- Encode timing
-- The nearest sampled cwebp points by encoded size and luma SSIM dB
-- Aggregate nominal-quality and quality-matched size and quality summaries
+- One warm-up followed by the requested timed runs, with median, minimum, and
+  maximum timing
+- SHA-256 of each encoded output and the Go version, GOOS, GOARCH, and
+  GOMAXPROCS used for the run
+- The nearest sampled cwebp fixture points by encoded size and luma SSIM dB
+- Aggregate target-size and quality-matched points interpolated with PCHIP
+  inside the measured overlap
+- Overall, source-format, and alpha-presence aggregates for nominal-quality and
+  quality-matched comparisons
+- Fixture-mean and pixel-weighted luma SSIM and RGB/Y/UV/composite PSNR,
+  byte-weighted rate totals, and alpha-exact violation counts
+- RGB-PSNR and luma-SSIM BD-rate, BD-PSNR, and BD-SSIM when each Pareto curve
+  retains at least four measured points
+
+All comparison delta fields use one direction and one percentage reference:
+
+```text
+go_minus_cwebp = go-webp - cwebp
+go_minus_cwebp_percent = 100 * go_minus_cwebp / cwebp
+```
+
+A negative size delta means that go-webp is smaller. A positive PSNR or SSIM
+delta means that go-webp has the higher decoded quality metric. Exact metrics
+are represented by `null` in samples. A match between two exact metrics has a
+delta of `0`; a match with only one exact metric has a `null` delta because the
+finite difference is undefined.
+
+Fixture-mean and pixel-weighted PSNR values are calculated from their combined
+MSE, not by averaging per-fixture PSNR dB values. The byte-weighted rate is the
+ratio of summed encoded bytes, so large outputs contribute proportionally. The
+`by_alpha.alpha` aggregate keeps alpha-image regressions visible instead of
+diluting them with opaque images.
+
+Nearest sampled matches remain in each fixture record as directly measured
+evidence. The aggregate rate-distortion section uses shape-preserving piecewise
+cubic Hermite interpolation (PCHIP) over encoded bytes per pixel. It reports
+target-size and luma-SSIM-matched points only inside the common measured range
+and never extrapolates. Bjontegaard integration uses the same PCHIP curves and
+the natural logarithm of rate. A negative BD-rate means go-webp needs fewer
+bytes at equivalent quality; positive BD-PSNR or BD-SSIM means go-webp has the
+higher quality at equivalent rate.
+
+`-runs` controls timed runs and does not include the single warm-up. Every
+timed output must match the warm-up output byte-for-byte; report generation
+fails if an encoder is non-deterministic. Aggregate timing fields sum the
+per-fixture medians. Output SHA-256 values identify the deterministic encoded
+bytes without embedding those bytes in the JSON report.
 
 A private local corpus can be selected with `-corpus` and `-split`. Source
 names and paths are omitted from the report. Keep private inputs and reports
@@ -97,4 +142,5 @@ directory, so use an absolute path or prefix repository-relative paths with
 
 go-webp timing covers only the in-process `Encode` call. cwebp timing includes
 process startup, PNG decoding, encoding, and output writing, so cross-encoder
-timing is not an encoder-core ranking.
+timing is not an encoder-core ranking. The report records both timing totals
+but does not calculate a ratio between these unequal scopes.

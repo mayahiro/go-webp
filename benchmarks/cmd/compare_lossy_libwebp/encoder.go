@@ -2,12 +2,14 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"fmt"
 	"image"
 	"image/png"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"time"
 
@@ -24,16 +26,32 @@ type cwebpConfig struct {
 
 // runGoWebP times only the in-process Encode call for each sample
 func runGoWebP(dir string, fixtureName string, source image.Image, quality int, runs int, mode webp.Mode) (sample, error) {
-	var encoded []byte
-	var elapsed time.Duration
-	for range runs {
+	encode := func() ([]byte, time.Duration, error) {
 		var buf bytes.Buffer
 		start := time.Now()
 		if err := webp.Encode(&buf, source, &webp.Options{Compression: webp.CompressionLossy, Quality: quality, Mode: mode}); err != nil {
-			return sample{}, fmt.Errorf("%s/go-webp/q%d: encode: %w", fixtureName, quality, err)
+			return nil, time.Since(start), err
 		}
-		elapsed += time.Since(start)
-		encoded = append(encoded[:0], buf.Bytes()...)
+		elapsed := time.Since(start)
+		return append([]byte(nil), buf.Bytes()...), elapsed, nil
+	}
+
+	warmupOutput, _, err := encode()
+	if err != nil {
+		return sample{}, fmt.Errorf("%s/go-webp/q%d: warm-up encode: %w", fixtureName, quality, err)
+	}
+	encoded := warmupOutput
+	durations := make([]time.Duration, 0, runs)
+	for run := range runs {
+		candidate, elapsed, err := encode()
+		durations = append(durations, elapsed)
+		if err != nil {
+			return sample{}, fmt.Errorf("%s/go-webp/q%d: encode run %d: %w", fixtureName, quality, run+1, err)
+		}
+		if !bytes.Equal(warmupOutput, candidate) {
+			return sample{}, fmt.Errorf("%s/go-webp/q%d: encoded output changed after warm-up on run %d", fixtureName, quality, run+1)
+		}
+		encoded = candidate
 	}
 	webpPath := filepath.Join(dir, fixtureName+".go-webp.q"+strconv.Itoa(quality)+".webp")
 	layout, err := benchmarkbitstream.ParseLossy(encoded)
@@ -48,44 +66,60 @@ func runGoWebP(dir string, fixtureName string, source image.Image, quality int, 
 		return sample{}, err
 	}
 	return sample{
-		Quality:         quality,
-		EncodedBytes:    len(encoded),
-		AverageEncodeNS: (elapsed / time.Duration(runs)).Nanoseconds(),
-		Layout:          layout,
-		Distortion:      metrics,
+		Quality:      quality,
+		EncodedBytes: len(encoded),
+		Timing:       summarizeTiming(durations),
+		OutputSHA256: outputSHA256(encoded),
+		Layout:       layout,
+		Distortion:   metrics,
 	}, nil
 }
 
 func runCWebP(dir string, fixtureName string, source image.Image, pngPath string, quality int, runs int, cfg cwebpConfig) (sample, error) {
 	webpPath := filepath.Join(dir, fixtureName+".cwebp.q"+strconv.Itoa(quality)+".webp")
-	var elapsed time.Duration
-	for range runs {
-		args := []string{
-			"-quiet",
-			"-q", strconv.Itoa(quality),
-			"-m", strconv.Itoa(cfg.method),
-		}
-		if cfg.sharpYUV {
-			args = append(args, "-sharp_yuv")
-		}
-		if cfg.mt {
-			args = append(args, "-mt")
-		}
-		args = append(args, pngPath, "-o", webpPath)
+	args := []string{
+		"-quiet",
+		"-q", strconv.Itoa(quality),
+		"-m", strconv.Itoa(cfg.method),
+	}
+	if cfg.sharpYUV {
+		args = append(args, "-sharp_yuv")
+	}
+	if cfg.mt {
+		args = append(args, "-mt")
+	}
+	args = append(args, pngPath, "-o", webpPath)
+	runCommand := func() error {
 		cmd := exec.Command("cwebp", args...)
-		start := time.Now()
 		if output, err := cmd.CombinedOutput(); err != nil {
-			return sample{}, fmt.Errorf("%s/cwebp/q%d: %w: %s", fixtureName, quality, err, output)
+			return fmt.Errorf("%w: %s", err, output)
 		}
-		elapsed += time.Since(start)
+		return nil
 	}
-	info, err := os.Stat(webpPath)
-	if err != nil {
-		return sample{}, fmt.Errorf("%s/cwebp/q%d: stat: %w", fixtureName, quality, err)
+	if err := runCommand(); err != nil {
+		return sample{}, fmt.Errorf("%s/cwebp/q%d: warm-up: %w", fixtureName, quality, err)
 	}
-	encoded, err := os.ReadFile(webpPath)
+	warmupOutput, err := os.ReadFile(webpPath)
 	if err != nil {
-		return sample{}, fmt.Errorf("%s/cwebp/q%d: read: %w", fixtureName, quality, err)
+		return sample{}, fmt.Errorf("%s/cwebp/q%d: read warm-up output: %w", fixtureName, quality, err)
+	}
+	encoded := warmupOutput
+	durations := make([]time.Duration, 0, runs)
+	for run := range runs {
+		start := time.Now()
+		err := runCommand()
+		durations = append(durations, time.Since(start))
+		if err != nil {
+			return sample{}, fmt.Errorf("%s/cwebp/q%d: run %d: %w", fixtureName, quality, run+1, err)
+		}
+		candidate, err := os.ReadFile(webpPath)
+		if err != nil {
+			return sample{}, fmt.Errorf("%s/cwebp/q%d: read run %d output: %w", fixtureName, quality, run+1, err)
+		}
+		if !bytes.Equal(warmupOutput, candidate) {
+			return sample{}, fmt.Errorf("%s/cwebp/q%d: encoded output changed after warm-up on run %d", fixtureName, quality, run+1)
+		}
+		encoded = candidate
 	}
 	layout, err := benchmarkbitstream.ParseLossy(encoded)
 	if err != nil {
@@ -96,12 +130,41 @@ func runCWebP(dir string, fixtureName string, source image.Image, pngPath string
 		return sample{}, err
 	}
 	return sample{
-		Quality:         quality,
-		EncodedBytes:    int(info.Size()),
-		AverageEncodeNS: (elapsed / time.Duration(runs)).Nanoseconds(),
-		Layout:          layout,
-		Distortion:      metrics,
+		Quality:      quality,
+		EncodedBytes: len(encoded),
+		Timing:       summarizeTiming(durations),
+		OutputSHA256: outputSHA256(encoded),
+		Layout:       layout,
+		Distortion:   metrics,
 	}, nil
+}
+
+func summarizeTiming(durations []time.Duration) timingSummary {
+	result := timingSummary{
+		Runs:       len(durations),
+		WarmupRuns: comparisonWarmupRuns,
+	}
+	if len(durations) == 0 {
+		return result
+	}
+	sorted := slices.Clone(durations)
+	slices.Sort(sorted)
+	result.MinNS = sorted[0].Nanoseconds()
+	result.MaxNS = sorted[len(sorted)-1].Nanoseconds()
+	middle := len(sorted) / 2
+	if len(sorted)&1 != 0 {
+		result.MedianNS = sorted[middle].Nanoseconds()
+	} else {
+		lower := sorted[middle-1].Nanoseconds()
+		upper := sorted[middle].Nanoseconds()
+		result.MedianNS = lower + (upper-lower)/2
+	}
+	return result
+}
+
+func outputSHA256(data []byte) string {
+	digest := sha256.Sum256(data)
+	return fmt.Sprintf("%x", digest)
 }
 
 func decodeAndMeasure(dir string, name string, webpPath string, source image.Image) (distortionMetrics, error) {

@@ -73,14 +73,44 @@ make compare-lossy ARGS='-runs 3 -go-mode default'
 ```
 
 このコマンドには `cwebp` と `dwebp` が必要です
-schema version 4のJSON reportには次を記録します
+schema version 8のJSON reportには次を記録します
 
 - go-webpとcwebpのquality sweep
-- decode後のRGB、YUV、alpha、7x7 weighted luma SSIM
+- decode後のRGB、YUV、alpha、7x7 weighted luma SSIM、black、white、8x8 black-and-white checker背景へのRGB composite metric
 - encoded sizeとVP8 partition size
-- encode時間
-- encoded sizeとluma SSIM dBが最も近いcwebp sample
-- nominal qualityおよびquality-matchedのaggregate size、quality summary
+- 1回のwarm-up後に指定run数を計測したmedian、minimum、maximum time
+- encoded outputのSHA-256と実行時のGo version、GOOS、GOARCH、GOMAXPROCS
+- encoded sizeとluma SSIM dBが最も近いfixture単位のcwebp sample
+- 測定範囲の重なり内をPCHIP補間したaggregate target-sizeおよびquality-matched point
+- nominal qualityおよびquality-matchedについてoverall、source format別、alpha有無別のaggregate
+- fixture meanとpixel-weightedのluma SSIM、RGB、Y、UV、composite PSNR、byte-weighted rate total、alpha exact違反数
+- 各Pareto curveに4点以上残る場合のRGB PSNRおよびluma SSIM BD-rate、BD-PSNR、BD-SSIM
+
+すべてのcomparison delta fieldは次の方向とpercent基準を使用します
+
+```text
+go_minus_cwebp = go-webp - cwebp
+go_minus_cwebp_percent = 100 * go_minus_cwebp / cwebp
+```
+
+size deltaが負の場合はgo-webpの出力が小さいことを表します
+PSNRまたはSSIM deltaが正の場合はgo-webpのdecode後quality metricが高いことを表します
+sampleのexact metricは`null`で表し、両方がexactの場合のdeltaは`0`、片側だけがexactの場合は有限差を定義できないためdeltaを`null`とします
+
+fixture meanとpixel-weighted PSNRはfixtureごとのPSNR dB平均ではなく、それぞれのMSEを合算して計算します
+byte-weighted rateはencoded bytesの合計比であり、大きいoutputほど比例して寄与します
+`by_alpha.alpha` aggregateを使い、alpha付き画像の回帰がopaque画像で薄まらないようにします
+
+fixture recordには直接測定した証跡として最近傍sample matchを残します
+aggregate rate-distortion sectionではencoded bytes per pixelにshape-preserving piecewise cubic Hermite interpolation、PCHIPを使用します
+target-sizeとluma SSIM matched pointは共通の測定範囲内だけをreportし、外挿は行いません
+Bjontegaard積分にも同じPCHIP curveとrateの自然対数を使用します
+BD-rateが負の場合は同等品質でgo-webpのbytesが少ないことを表し、BD-PSNRまたはBD-SSIMが正の場合は同等rateでgo-webpの品質が高いことを表します
+
+`-runs` はtimed run数を指定し、1回のwarm-upを含みません
+各timed outputはwarm-up outputとbyte単位で一致する必要があり、非決定的なoutputを検出した場合はreport生成を失敗させます
+aggregate timing fieldはfixtureごとのmedianを合計します
+output SHA-256はencoded bytes自体をJSONへ含めずに決定的な出力を識別するために使用します
 
 `-corpus` と `-split` で非公開のlocal corpusを選択できます
 reportにはsourceのnameとpathを記録しません
@@ -89,3 +119,4 @@ private inputとreportはGitの外で管理してください
 
 go-webpの計測時間はprocess内の `Encode` 呼び出しだけを含みます
 cwebpの計測時間にはprocess起動、PNG decode、encode、出力書き込みも含むため、cross-encoderの時間をencoder coreの順位として扱いません
+reportには両方のtime totalを記録しますが、scopeが異なるためratioは計算しません

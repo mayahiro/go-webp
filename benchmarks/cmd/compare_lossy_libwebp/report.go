@@ -7,6 +7,9 @@ import (
 	"github.com/mayahiro/go-webp/internal/benchmarkmetric"
 )
 
+const comparisonReportSchemaVersion = 8
+const comparisonWarmupRuns = 1
+
 // comparisonReport intentionally records anonymous fixture identities instead of source paths
 type comparisonReport struct {
 	SchemaVersion int                 `json:"schema_version"`
@@ -16,32 +19,41 @@ type comparisonReport struct {
 }
 
 type reportConfiguration struct {
-	Runs               int    `json:"runs"`
-	Qualities          []int  `json:"qualities"`
-	CWebPVersion       string `json:"cwebp_version"`
-	CWebPMethod        int    `json:"cwebp_method"`
-	CWebPSharpYUV      bool   `json:"cwebp_sharp_yuv"`
-	CWebPMT            bool   `json:"cwebp_mt"`
-	GoVersion          string `json:"go_version"`
-	GOOS               string `json:"goos"`
-	GOARCH             string `json:"goarch"`
-	GoMode             string `json:"go_mode"`
-	GoTimingScope      string `json:"go_timing_scope"`
-	CWebPTimingScope   string `json:"cwebp_timing_scope"`
-	QualityMatchMetric string `json:"quality_match_metric"`
-	MatchStrategy      string `json:"match_strategy"`
-	ExactPSNRValue     string `json:"exact_psnr_value"`
-	ExactSSIMValue     string `json:"exact_ssim_value"`
-	Corpus             string `json:"corpus"`
-	CorpusSHA256       string `json:"corpus_sha256,omitempty"`
-	CorpusSplit        string `json:"corpus_split"`
-	HoldoutPercent     int    `json:"holdout_percent,omitempty"`
+	Runs                 int    `json:"runs"`
+	Qualities            []int  `json:"qualities"`
+	CWebPVersion         string `json:"cwebp_version"`
+	CWebPMethod          int    `json:"cwebp_method"`
+	CWebPSharpYUV        bool   `json:"cwebp_sharp_yuv"`
+	CWebPMT              bool   `json:"cwebp_mt"`
+	GoVersion            string `json:"go_version"`
+	GOOS                 string `json:"goos"`
+	GOARCH               string `json:"goarch"`
+	GOMAXPROCS           int    `json:"gomaxprocs"`
+	GoMode               string `json:"go_mode"`
+	WarmupRuns           int    `json:"warmup_runs"`
+	TimingStatistic      string `json:"timing_statistic"`
+	OutputHashAlgorithm  string `json:"output_hash_algorithm"`
+	GoTimingScope        string `json:"go_timing_scope"`
+	CWebPTimingScope     string `json:"cwebp_timing_scope"`
+	QualityMatchMetric   string `json:"quality_match_metric"`
+	MatchStrategy        string `json:"match_strategy"`
+	MatchLimitation      string `json:"match_limitation"`
+	CurveInterpolation   string `json:"curve_interpolation"`
+	CurveExtrapolation   string `json:"curve_extrapolation"`
+	BjontegaardMinPoints int    `json:"bjontegaard_min_points"`
+	ExactPSNRValue       string `json:"exact_psnr_value"`
+	ExactSSIMValue       string `json:"exact_ssim_value"`
+	Corpus               string `json:"corpus"`
+	CorpusSHA256         string `json:"corpus_sha256,omitempty"`
+	CorpusSplit          string `json:"corpus_split"`
+	HoldoutPercent       int    `json:"holdout_percent,omitempty"`
 }
 
 type fixtureReport struct {
 	Name           string       `json:"name"`
 	SourceFormat   string       `json:"source_format,omitempty"`
 	Split          string       `json:"split,omitempty"`
+	HasAlpha       bool         `json:"has_alpha"`
 	Width          int          `json:"width"`
 	Height         int          `json:"height"`
 	GoWebP         []sample     `json:"go_webp"`
@@ -51,112 +63,40 @@ type fixtureReport struct {
 }
 
 type sample struct {
-	Quality         int                            `json:"quality"`
-	EncodedBytes    int                            `json:"encoded_bytes"`
-	AverageEncodeNS int64                          `json:"average_encode_ns"`
-	Layout          benchmarkbitstream.LossyLayout `json:"layout"`
-	Distortion      distortionMetrics              `json:"distortion"`
+	Quality      int                            `json:"quality"`
+	EncodedBytes int                            `json:"encoded_bytes"`
+	Timing       timingSummary                  `json:"timing"`
+	OutputSHA256 string                         `json:"output_sha256"`
+	Layout       benchmarkbitstream.LossyLayout `json:"layout"`
+	Distortion   distortionMetrics              `json:"distortion"`
+}
+
+type timingSummary struct {
+	Runs       int   `json:"runs"`
+	WarmupRuns int   `json:"warmup_runs"`
+	MedianNS   int64 `json:"median_ns"`
+	MinNS      int64 `json:"min_ns"`
+	MaxNS      int64 `json:"max_ns"`
 }
 
 type distortionMetrics = benchmarkmetric.Metrics
 
 type pointMatch struct {
-	GoQuality      int      `json:"go_quality"`
-	CWebPQuality   int      `json:"cwebp_quality"`
-	GoBytes        int      `json:"go_bytes"`
-	CWebPBytes     int      `json:"cwebp_bytes"`
-	SizeDeltaBytes int      `json:"size_delta_bytes"`
-	SizeDeltaPct   float64  `json:"size_delta_percent"`
-	RGBPSNRDeltaDB *float64 `json:"rgb_psnr_delta_db"`
-	YSSIMDeltaDB   *float64 `json:"y_ssim_delta_db"`
-}
-
-type aggregateReport struct {
-	NominalQuality []aggregatePoint `json:"nominal_quality"`
-	MatchedQuality []aggregatePoint `json:"matched_quality"`
-}
-
-type aggregatePoint struct {
-	GoQuality           int     `json:"go_quality"`
-	Fixtures            int     `json:"fixtures"`
-	GoBytes             int     `json:"go_bytes"`
-	CWebPBytes          int     `json:"cwebp_bytes"`
-	GoSizeDeltaBytes    int     `json:"go_size_delta_bytes"`
-	GoSizeDeltaPct      float64 `json:"go_size_delta_percent"`
-	GoEncodeTotalNS     int64   `json:"go_encode_total_ns"`
-	CWebPProcessTotalNS int64   `json:"cwebp_process_total_ns"`
-	GoSmaller           int     `json:"go_smaller"`
-	CWebPSmaller        int     `json:"cwebp_smaller"`
-	EqualSize           int     `json:"equal_size"`
-	MeanGoYSSIM         float64 `json:"mean_go_y_ssim"`
-	MeanCWebPYSSIM      float64 `json:"mean_cwebp_y_ssim"`
-	MeanYSSIMDelta      float64 `json:"mean_y_ssim_delta"`
-	MeanCWebPQuality    float64 `json:"mean_cwebp_quality"`
-	MinimumCWebPQuality int     `json:"minimum_cwebp_quality"`
-	MaximumCWebPQuality int     `json:"maximum_cwebp_quality"`
-}
-
-func aggregateComparison(fixtures []fixtureReport, qualities []int) aggregateReport {
-	result := aggregateReport{
-		NominalQuality: make([]aggregatePoint, 0, len(qualities)),
-		MatchedQuality: make([]aggregatePoint, 0, len(qualities)),
-	}
-	for _, quality := range qualities {
-		result.NominalQuality = append(result.NominalQuality, aggregateQuality(fixtures, quality, false))
-		result.MatchedQuality = append(result.MatchedQuality, aggregateQuality(fixtures, quality, true))
-	}
-	return result
-}
-
-func aggregateQuality(fixtures []fixtureReport, quality int, matchQuality bool) aggregatePoint {
-	result := aggregatePoint{GoQuality: quality, MinimumCWebPQuality: 101}
-	var cwebpQualityTotal int
-	for _, fixture := range fixtures {
-		goSample, ok := sampleAtQuality(fixture.GoWebP, quality)
-		if !ok {
-			continue
-		}
-		var cwebpSample sample
-		if matchQuality {
-			cwebpSample, ok = nearestQualitySample(goSample, fixture.CWebP)
-		} else {
-			cwebpSample, ok = sampleAtQuality(fixture.CWebP, quality)
-		}
-		if !ok {
-			continue
-		}
-		result.Fixtures++
-		result.GoBytes += goSample.EncodedBytes
-		result.CWebPBytes += cwebpSample.EncodedBytes
-		result.GoEncodeTotalNS += goSample.AverageEncodeNS
-		result.CWebPProcessTotalNS += cwebpSample.AverageEncodeNS
-		result.MeanGoYSSIM += goSample.Distortion.YSSIM
-		result.MeanCWebPYSSIM += cwebpSample.Distortion.YSSIM
-		cwebpQualityTotal += cwebpSample.Quality
-		result.MinimumCWebPQuality = min(result.MinimumCWebPQuality, cwebpSample.Quality)
-		result.MaximumCWebPQuality = max(result.MaximumCWebPQuality, cwebpSample.Quality)
-		switch {
-		case goSample.EncodedBytes < cwebpSample.EncodedBytes:
-			result.GoSmaller++
-		case goSample.EncodedBytes > cwebpSample.EncodedBytes:
-			result.CWebPSmaller++
-		default:
-			result.EqualSize++
-		}
-	}
-	result.GoSizeDeltaBytes = result.GoBytes - result.CWebPBytes
-	if result.CWebPBytes != 0 {
-		result.GoSizeDeltaPct = 100 * float64(result.GoSizeDeltaBytes) / float64(result.CWebPBytes)
-	}
-	if result.Fixtures == 0 {
-		result.MinimumCWebPQuality = 0
-		return result
-	}
-	result.MeanGoYSSIM /= float64(result.Fixtures)
-	result.MeanCWebPYSSIM /= float64(result.Fixtures)
-	result.MeanYSSIMDelta = result.MeanGoYSSIM - result.MeanCWebPYSSIM
-	result.MeanCWebPQuality = float64(cwebpQualityTotal) / float64(result.Fixtures)
-	return result
+	GoQuality                          int      `json:"go_quality"`
+	CWebPQuality                       int      `json:"cwebp_quality"`
+	GoBytes                            int      `json:"go_bytes"`
+	CWebPBytes                         int      `json:"cwebp_bytes"`
+	GoMinusCWebPBytes                  int      `json:"go_minus_cwebp_bytes"`
+	GoMinusCWebPPercent                float64  `json:"go_minus_cwebp_percent"`
+	GoMinusCWebPRGBPSNRDB              *float64 `json:"go_minus_cwebp_rgb_psnr_db"`
+	GoMinusCWebPYPSNRDB                *float64 `json:"go_minus_cwebp_y_psnr_db"`
+	GoMinusCWebPUVPSNRDB               *float64 `json:"go_minus_cwebp_uv_psnr_db"`
+	GoMinusCWebPYSSIMDB                *float64 `json:"go_minus_cwebp_y_ssim_db"`
+	GoMinusCWebPCompositeBlackPSNRDB   *float64 `json:"go_minus_cwebp_composite_black_psnr_db"`
+	GoMinusCWebPCompositeWhitePSNRDB   *float64 `json:"go_minus_cwebp_composite_white_psnr_db"`
+	GoMinusCWebPCompositeCheckerPSNRDB *float64 `json:"go_minus_cwebp_composite_checker_psnr_db"`
+	GoAlphaExact                       bool     `json:"go_alpha_exact"`
+	CWebPAlphaExact                    bool     `json:"cwebp_alpha_exact"`
 }
 
 func sampleAtQuality(samples []sample, quality int) (sample, bool) {
@@ -226,24 +166,40 @@ func qualityDistance(a sample, b sample) float64 {
 }
 
 func makePointMatch(goSample sample, cwebpSample sample) pointMatch {
-	deltaBytes := cwebpSample.EncodedBytes - goSample.EncodedBytes
+	deltaBytes := goSample.EncodedBytes - cwebpSample.EncodedBytes
 	deltaPct := 0.0
-	if goSample.EncodedBytes != 0 {
-		deltaPct = 100 * float64(deltaBytes) / float64(goSample.EncodedBytes)
+	if cwebpSample.EncodedBytes != 0 {
+		deltaPct = 100 * float64(deltaBytes) / float64(cwebpSample.EncodedBytes)
 	}
 	return pointMatch{
-		GoQuality:      goSample.Quality,
-		CWebPQuality:   cwebpSample.Quality,
-		GoBytes:        goSample.EncodedBytes,
-		CWebPBytes:     cwebpSample.EncodedBytes,
-		SizeDeltaBytes: deltaBytes,
-		SizeDeltaPct:   deltaPct,
-		RGBPSNRDeltaDB: metricDelta(goSample.Distortion.RGBPSNRDB, cwebpSample.Distortion.RGBPSNRDB),
-		YSSIMDeltaDB:   metricDelta(goSample.Distortion.YSSIMDB, cwebpSample.Distortion.YSSIMDB),
+		GoQuality:             goSample.Quality,
+		CWebPQuality:          cwebpSample.Quality,
+		GoBytes:               goSample.EncodedBytes,
+		CWebPBytes:            cwebpSample.EncodedBytes,
+		GoMinusCWebPBytes:     deltaBytes,
+		GoMinusCWebPPercent:   deltaPct,
+		GoMinusCWebPRGBPSNRDB: goMinusCWebPMetric(goSample.Distortion.RGBPSNRDB, cwebpSample.Distortion.RGBPSNRDB),
+		GoMinusCWebPYPSNRDB:   goMinusCWebPMetric(goSample.Distortion.YPSNRDB, cwebpSample.Distortion.YPSNRDB),
+		GoMinusCWebPUVPSNRDB:  goMinusCWebPMetric(goSample.Distortion.UVPSNRDB, cwebpSample.Distortion.UVPSNRDB),
+		GoMinusCWebPYSSIMDB:   goMinusCWebPMetric(goSample.Distortion.YSSIMDB, cwebpSample.Distortion.YSSIMDB),
+		GoMinusCWebPCompositeBlackPSNRDB: goMinusCWebPMetric(
+			goSample.Distortion.CompositeOverBlackPSNRDB,
+			cwebpSample.Distortion.CompositeOverBlackPSNRDB,
+		),
+		GoMinusCWebPCompositeWhitePSNRDB: goMinusCWebPMetric(
+			goSample.Distortion.CompositeOverWhitePSNRDB,
+			cwebpSample.Distortion.CompositeOverWhitePSNRDB,
+		),
+		GoMinusCWebPCompositeCheckerPSNRDB: goMinusCWebPMetric(
+			goSample.Distortion.CompositeOverCheckerPSNRDB,
+			cwebpSample.Distortion.CompositeOverCheckerPSNRDB,
+		),
+		GoAlphaExact:    goSample.Distortion.AlphaExact,
+		CWebPAlphaExact: cwebpSample.Distortion.AlphaExact,
 	}
 }
 
-func metricDelta(goValue *float64, cwebpValue *float64) *float64 {
+func goMinusCWebPMetric(goValue *float64, cwebpValue *float64) *float64 {
 	if goValue == nil && cwebpValue == nil {
 		zero := 0.0
 		return &zero
@@ -251,7 +207,7 @@ func metricDelta(goValue *float64, cwebpValue *float64) *float64 {
 	if goValue == nil || cwebpValue == nil {
 		return nil
 	}
-	delta := *cwebpValue - *goValue
+	delta := *goValue - *cwebpValue
 	return &delta
 }
 

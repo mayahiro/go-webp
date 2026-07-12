@@ -1,10 +1,11 @@
 package webp
 
 type vp8BoolEncoder struct {
-	out      []byte
-	range_   uint32
-	bottom   uint32
-	bitCount int
+	out          []byte
+	range_       uint32
+	bottom       uint32
+	bitCount     int
+	emittedBytes int
 }
 
 func newVP8BoolEncoder() *vp8BoolEncoder {
@@ -36,7 +37,7 @@ func (e *vp8BoolEncoder) writeBit(prob uint8, bit bool) {
 		e.bottom <<= 1
 		e.bitCount--
 		if e.bitCount == 0 {
-			e.out = append(e.out, byte(e.bottom>>24))
+			e.writeOutputByte(byte(e.bottom >> 24))
 			e.bottom &= (1 << 24) - 1
 			e.bitCount = 8
 		}
@@ -60,14 +61,25 @@ func (e *vp8BoolEncoder) writeBitEqualProb(bit bool) {
 		e.bottom <<= 1
 		e.bitCount--
 		if e.bitCount == 0 {
-			e.out = append(e.out, byte(e.bottom>>24))
+			e.writeOutputByte(byte(e.bottom >> 24))
 			e.bottom &= (1 << 24) - 1
 			e.bitCount = 8
 		}
 	}
 }
 
+func (e *vp8BoolEncoder) writeOutputByte(value byte) {
+	if e.out == nil {
+		e.emittedBytes++
+		return
+	}
+	e.out = append(e.out, value)
+}
+
 func (e *vp8BoolEncoder) addOneToOutput() {
+	if e.out == nil {
+		return
+	}
 	for i := len(e.out) - 1; i >= 0; i-- {
 		if e.out[i] != 0xff {
 			e.out[i]++

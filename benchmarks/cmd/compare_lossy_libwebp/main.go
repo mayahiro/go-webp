@@ -18,13 +18,15 @@ import (
 	webp "github.com/mayahiro/go-webp"
 	"github.com/mayahiro/go-webp/benchmarks/internal/benchmarkfixture"
 	"github.com/mayahiro/go-webp/internal/benchmarkcorpus"
+	"github.com/mayahiro/go-webp/internal/benchmarkimage"
 )
 
 type comparisonFixture struct {
-	name   string
-	format string
-	split  string
-	image  image.Image
+	name     string
+	format   string
+	split    string
+	hasAlpha bool
+	image    image.Image
 }
 
 type corpusConfiguration struct {
@@ -91,28 +93,36 @@ func run() error {
 	}
 
 	report := comparisonReport{
-		SchemaVersion: 4,
+		SchemaVersion: comparisonReportSchemaVersion,
 		Configuration: reportConfiguration{
-			Runs:               *runs,
-			Qualities:          qualities,
-			CWebPVersion:       version,
-			CWebPMethod:        *method,
-			CWebPSharpYUV:      *sharpYUV,
-			CWebPMT:            *mt,
-			GoVersion:          runtime.Version(),
-			GOOS:               runtime.GOOS,
-			GOARCH:             runtime.GOARCH,
-			GoMode:             goModeName,
-			GoTimingScope:      "in-process webp.Encode call",
-			CWebPTimingScope:   "process startup, PNG decode, encode, and output write",
-			QualityMatchMetric: "y_ssim_db",
-			MatchStrategy:      "nearest sampled cwebp point for each go-webp point",
-			ExactPSNRValue:     "null",
-			ExactSSIMValue:     "null",
-			Corpus:             corpus.name,
-			CorpusSHA256:       corpus.sha256,
-			CorpusSplit:        corpus.split,
-			HoldoutPercent:     corpus.holdoutPercent,
+			Runs:                 *runs,
+			Qualities:            qualities,
+			CWebPVersion:         version,
+			CWebPMethod:          *method,
+			CWebPSharpYUV:        *sharpYUV,
+			CWebPMT:              *mt,
+			GoVersion:            runtime.Version(),
+			GOOS:                 runtime.GOOS,
+			GOARCH:               runtime.GOARCH,
+			GOMAXPROCS:           runtime.GOMAXPROCS(0),
+			GoMode:               goModeName,
+			WarmupRuns:           comparisonWarmupRuns,
+			TimingStatistic:      "median_ns with min_ns and max_ns range",
+			OutputHashAlgorithm:  "sha256",
+			GoTimingScope:        "in-process webp.Encode call",
+			CWebPTimingScope:     "process startup, PNG decode, encode, and output write",
+			QualityMatchMetric:   "y_ssim_db for sampled matches; pixel_weighted_y_ssim for aggregate curve matches",
+			MatchStrategy:        "nearest sampled fixture points plus aggregate PCHIP curve matching",
+			MatchLimitation:      "curve matching uses only overlapping measured ranges and never extrapolates",
+			CurveInterpolation:   rateDistortionInterpolation,
+			CurveExtrapolation:   "disabled",
+			BjontegaardMinPoints: 4,
+			ExactPSNRValue:       "null",
+			ExactSSIMValue:       "null",
+			Corpus:               corpus.name,
+			CorpusSHA256:         corpus.sha256,
+			CorpusSplit:          corpus.split,
+			HoldoutPercent:       corpus.holdoutPercent,
 		},
 	}
 	cfg := cwebpConfig{method: *method, sharpYUV: *sharpYUV, mt: *mt}
@@ -126,6 +136,7 @@ func run() error {
 			Name:         fixture.name,
 			SourceFormat: fixture.format,
 			Split:        fixture.split,
+			HasAlpha:     fixture.hasAlpha,
 			Width:        fixture.image.Bounds().Dx(),
 			Height:       fixture.image.Bounds().Dy(),
 			GoWebP:       make([]sample, 0, len(qualities)),
@@ -155,10 +166,13 @@ func loadComparisonFixtures(corpusDir string, corpusName string, split string, h
 		standard := benchmarkfixture.Standard()
 		fixtures := make([]comparisonFixture, 0, len(standard))
 		for _, fixture := range standard {
+			identity := benchmarkimage.IdentifyPixels(fixture.Image)
 			fixtures = append(fixtures, comparisonFixture{
-				name:  fixture.Name,
-				split: "all",
-				image: fixture.Image,
+				name:     fixture.Name,
+				format:   "generated",
+				split:    "all",
+				hasAlpha: identity.HasAlpha,
+				image:    fixture.Image,
 			})
 		}
 		return fixtures, corpusConfiguration{name: "generated-standard", split: "all"}, nil
@@ -174,10 +188,11 @@ func loadComparisonFixtures(corpusDir string, corpusName string, split string, h
 	fixtures := make([]comparisonFixture, 0, len(samples))
 	for _, sample := range samples {
 		fixtures = append(fixtures, comparisonFixture{
-			name:   sample.Metadata.ID,
-			format: sample.Metadata.Format,
-			split:  sample.Metadata.Split,
-			image:  sample.Pixels,
+			name:     sample.Metadata.ID,
+			format:   sample.Metadata.Format,
+			split:    sample.Metadata.Split,
+			hasAlpha: sample.Metadata.HasAlpha,
+			image:    sample.Pixels,
 		})
 	}
 	return fixtures, corpusConfiguration{

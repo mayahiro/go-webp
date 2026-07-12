@@ -102,11 +102,12 @@ func newVP8Source(source encoderSource, materialize bool) vp8Source {
 	}
 	total := source.width * source.height
 	if !materialize || total <= 0 || total > vp8SourcePlaneMaxBytes/3 {
-		result.readLuma = source.readLuma()
-		result.readChroma = source.readChroma()
+		result.readLuma = instrumentLossyLumaReader(source.readLuma())
+		result.readChroma = instrumentLossyChromaReader(source.readChroma())
 		return result
 	}
 	data := make([]uint8, total*3)
+	countLossyCounter(lossyCounterPreparedSourceBytes, uint64(len(data)))
 	plane := vp8SourcePlane{
 		data:   data,
 		width:  source.width,
@@ -115,14 +116,27 @@ func newVP8Source(source encoderSource, materialize bool) vp8Source {
 		cbBase: total,
 		crBase: total * 2,
 	}
-	readPixel := source.pixels()
-	for y := source.bounds.Min.Y; y < source.bounds.Max.Y; y++ {
-		row := (y - source.bounds.Min.Y) * source.width
-		for x := source.bounds.Min.X; x < source.bounds.Max.X; x++ {
-			index := row + x - source.bounds.Min.X
-			pixel := readPixel(x, y)
-			data[index] = rgbToLuma(pixel.R, pixel.G, pixel.B)
-			data[plane.cbBase+index], data[plane.crBase+index] = rgbToChroma(pixel.R, pixel.G, pixel.B)
+	if _, ok := source.image.(*image.YCbCr); ok {
+		readLuma := instrumentLossyLumaReader(source.readLuma())
+		readChroma := instrumentLossyChromaReader(source.readChroma())
+		for y := source.bounds.Min.Y; y < source.bounds.Max.Y; y++ {
+			row := (y - source.bounds.Min.Y) * source.width
+			for x := source.bounds.Min.X; x < source.bounds.Max.X; x++ {
+				index := row + x - source.bounds.Min.X
+				data[index] = readLuma(x, y)
+				data[plane.cbBase+index], data[plane.crBase+index] = readChroma(x, y)
+			}
+		}
+	} else {
+		readPixel := instrumentLossyPixelReader(source.pixels())
+		for y := source.bounds.Min.Y; y < source.bounds.Max.Y; y++ {
+			row := (y - source.bounds.Min.Y) * source.width
+			for x := source.bounds.Min.X; x < source.bounds.Max.X; x++ {
+				index := row + x - source.bounds.Min.X
+				pixel := readPixel(x, y)
+				data[index] = rgbToLuma(pixel.R, pixel.G, pixel.B)
+				data[plane.cbBase+index], data[plane.crBase+index] = rgbToChroma(pixel.R, pixel.G, pixel.B)
+			}
 		}
 	}
 	result.plane = plane
@@ -201,6 +215,7 @@ func (s *vp8Source) meanChroma2x2(x int, y int) (uint8, uint8) {
 }
 
 func (s *vp8Source) chromaRGBScore2x2(readPixel pixelReader, x int, y int, cb uint8, cr uint8) uint64 {
+	countLossyCounter(lossyCounterSharpChromaCandidates, 1)
 	var score uint64
 	for yy := 0; yy < 2 && y+yy < s.height; yy++ {
 		for xx := 0; xx < 2 && x+xx < s.width; xx++ {
