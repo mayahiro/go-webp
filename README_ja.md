@@ -77,8 +77,8 @@ Apple M1 Max、darwin/arm64、Go 1.26.5での代表値です
 
 | Encoding | Fixture | Time | Encoded size |
 | --- | --- | ---: | ---: |
-| Lossy Q75 | UI 256x256 | 17.723 ms | 2,906 bytes |
-| Lossy Q75 | Photo-like 512x512 | 116.795 ms | 142,078 bytes |
+| Lossy Q75 | UI 256x256 | 11.921 ms | 2,906 bytes |
+| Lossy Q75 | Photo-like 512x512 | 108.031 ms | 142,078 bytes |
 | Lossless | Gradient 128x128 | 88.615 ms | 58 bytes |
 | Lossless | Photo-like 512x512 | 579.021 ms | 2,916 bytes |
 

@@ -35,6 +35,42 @@ func TestEncodeLossyConfigMatchesPublicModes(t *testing.T) {
 	}
 }
 
+func TestEncodeLossyModeAutoCurrentRoutingMatchesDefault(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		alpha uint8
+	}{
+		{name: "opaque", alpha: 255},
+		{name: "alpha", alpha: 127},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			img := image.NewNRGBA(image.Rect(0, 0, 32, 24))
+			for y := 0; y < img.Bounds().Dy(); y++ {
+				for x := 0; x < img.Bounds().Dx(); x++ {
+					img.SetNRGBA(x, y, color.NRGBA{
+						R: uint8(7 * x),
+						G: uint8(9 * y),
+						B: uint8(3 * (x + y)),
+						A: tc.alpha,
+					})
+				}
+			}
+			for _, quality := range []int{1, 75, 100} {
+				t.Run(fmt.Sprintf("quality-%d", quality), func(t *testing.T) {
+					defaultOutput := encodePublicLossyForTest(t, img, ModeDefault, quality)
+					autoOutput := encodePublicLossyForTest(t, img, ModeAuto, quality)
+					if !bytes.Equal(autoOutput, defaultOutput) {
+						t.Fatalf("ModeAuto output = %d bytes, want current ModeDefault routing output %d bytes", len(autoOutput), len(defaultOutput))
+					}
+					if repeated := encodePublicLossyForTest(t, img, ModeAuto, quality); !bytes.Equal(repeated, autoOutput) {
+						t.Fatal("ModeAuto output was not deterministic within the same encoder version")
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestVP8BestCompressionSharesDefaultQualityProfile(t *testing.T) {
 	for quality := 1; quality <= 100; quality++ {
 		defaultConfig := vp8LossyConfigForModeQuality(ModeDefault, quality)
@@ -137,6 +173,15 @@ func encodeLossyConfigForTest(t *testing.T, img image.Image, cfg vp8LossyConfig,
 	t.Helper()
 	var output bytes.Buffer
 	if err := encodeLossyConfig(&output, newEncoderSource(img), cfg, lossyAlphaConfigForMode(alphaMode)); err != nil {
+		t.Fatal(err)
+	}
+	return output.Bytes()
+}
+
+func encodePublicLossyForTest(t *testing.T, img image.Image, mode Mode, quality int) []byte {
+	t.Helper()
+	var output bytes.Buffer
+	if err := Encode(&output, img, &Options{Compression: CompressionLossy, Mode: mode, Quality: quality}); err != nil {
 		t.Fatal(err)
 	}
 	return output.Bytes()

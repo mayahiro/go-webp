@@ -57,7 +57,9 @@ const (
 	ModeNearLossless
 	// ModeLossyQuality writes VP8 lossy output and uses Quality for quality control.
 	ModeLossyQuality
-	// ModeAuto chooses a conservative internal profile from simple image features.
+	// ModeAuto lets the encoder select an internal profile. It currently uses
+	// image features for lossless encoding and the default profile for lossy
+	// encoding. The selected profile and encoded bytes may change between releases.
 	ModeAuto
 )
 

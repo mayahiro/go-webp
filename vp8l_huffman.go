@@ -26,12 +26,15 @@ type vp8lHuffmanTree struct {
 }
 
 type vp8lHuffmanWorkspace struct {
-	counts     []uint32
-	lengths    []uint8
-	nodes      []huffmanNode
-	active     []int
-	symbols    []huffmanSymbol
-	groupCosts []uint8
+	counts          []uint32
+	lengths         []uint8
+	nodes           []huffmanNode
+	active          []int
+	symbols         []huffmanSymbol
+	groupCosts      []uint8
+	groupRemap      map[uint16]uint16
+	compactedGroups []uint16
+	denseHistograms []vp8lDenseHistogram
 }
 
 func buildVP8LHuffmanTree(counts []uint32) vp8lHuffmanTree {

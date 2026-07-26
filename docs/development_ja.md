@@ -23,12 +23,36 @@ make check
 ## 外部Decoder確認
 
 ```sh
-make verify-external
+make verify-external ARGS='-decoder dwebp'
+make verify-external ARGS='-decoder ximage'
 ```
 
 このコマンドはlossless fixtureをpixel完全一致で確認し、lossy fixtureをRGB誤差の上限で確認します
-`dwebp` を優先し、利用できない場合は `go run` で一時的な `golang.org/x/image/webp` decoderを使います
-どちらも利用できない場合のみmacOSの `sips` を使います
+generated setにはalpha 0かつhidden RGBが非ゼロのpixelを含みます
+CIはlibwebp `dwebp` 1.6.0と `golang.org/x/image/webp` v0.41.0を独立jobで実行し、各decoder versionをreportします
+dwebp archiveは公式WebM release siteから取得し、SHA-256を検証します
+decoder更新はencoder変更と分離し、conformance差分を個別にreviewします
+
+container確認はRFC 9649を基準にします
+VP8L構造確認はWebP Lossless Bitstream Specificationを基準とし、signature、version、transform重複、Huffman data、token上限、payload全bitの分類を検証します
+decoderが受理したことだけをformat conformanceの根拠にはしません
+
+## Fuzzing
+
+通常の `go test` ではcommit済みseed corpusを毎回実行します
+public `Encode` targetは全public mode、quality 1から100、NRGBA、RGBA、Gray、YCbCr、Paletted、opaqueとalpha、odd dimensions、non-zero origin、padding付きstride、決定的output、RIFF、VP8L、VP8、VP8X、ALPH構造を確認します
+`ModeBestCompression` を繰り返し実行できるように画像を8x8以下へ制限します
+
+scheduledまたはmanual GitHub Actionsでは2 workers、targetごとに5分、job timeout 15分で両fuzz targetを変異実行します
+localでは次を実行します
+
+```sh
+go test . -run '^$' -fuzz '^FuzzEncodePublicAPI$' -fuzztime=5m -parallel=2
+go test . -run '^$' -fuzz '^FuzzVP8LLiteralPlanRoundTrip$' -fuzztime=5m -parallel=2
+```
+
+検出したfailureを修正した後、最小化された入力を `testdata/fuzz/<target>` へ残し、通常testで再実行します
+writer failureとerror propagationは全public modeを対象とする独立table-driven testで確認します
 
 ## Go Benchmark
 
@@ -53,18 +77,33 @@ corpus commandは `.local/corpus/production` 配下の画像を匿名化してin
 ## ローカルLossless比較
 
 ```sh
-make compare-lossless ARGS='-runs 3 -mode default -method 4'
-make compare-lossless ARGS='-runs 3 -mode best -method 6'
+make compare-lossless ARGS='-runs 3 -mode default -quality 75 -method 4'
+make compare-lossless ARGS='-runs 3 -mode best -quality 100 -method 6'
 make compare-lossless ARGS='-runs 3 -mode near-lossless -quality 75 -method 4'
-make compare-lossless ARGS='-runs 1 -mode best -method 6 -corpus ../.local/corpus/production -split holdout'
-make compare-lossless ARGS='-runs 1 -mode default -method 4 -corpus ../.local/corpus/production -split holdout -fixtures anonymous-id-1,anonymous-id-2'
+make compare-lossless ARGS='-runs 3 -mode best -quality 100 -method 6 -corpus ../.local/corpus/production -split validation'
+make compare-lossless ARGS='-runs 1 -mode default -quality 75 -method 4 -corpus ../.local/corpus/production -split validation -fixtures anonymous-id-1,anonymous-id-2'
 ```
 
-reportにはdecode後のRGB誤差とalpha一致を記録します
-通常のlossless profileではpixel完全一致を必須とします
-private corpusではpixel hash由来の匿名IDを使い、corpus SHA-256だけを表示してsource nameとpathは出力しません
+通常の比較ではcwebpを `-lossless -exact` と明示的な `-q`、`-m` で実行します
+標準比較はquality 75、method 4、最大圧縮寄りの比較はquality 100、method 6です
+
+schema version 2のreportはschema version 1のfieldを維持し、次を追加します
+
+- 1回のwarm-up後に指定run数を計測したmedian、minimum、maximumと互換性維持用average
+- 決定的なoutputのSHA-256と、timed outputがwarm-upと異なる場合のreport生成拒否
+- go-webp commitとdirty state、Go version、GOOS、GOARCH、GOMAXPROCS、CPU model、OS version
+- 正規化した完全なcwebp arguments、cwebp quality、method、version、dwebp version
+- source origin formatとcwebp input formatの分離。sourceはGoでdecode後、PNGとしてcwebpへ渡す
+- pixel exact、alpha exact、encoded size、VP8L layout、source origin format別とalpha有無別aggregate
+
+推奨split名は `development` と `validation` です
+従来の `train` と `holdout` もaliasとして使用できます
 `ARGS` のpathは `benchmarks` directoryから解決されます
-`-fixtures` では生成fixture名またはprivate corpusの匿名IDを指定して調整用の再測定ができ、filter条件はJSON reportへ記録されます
+
+private sourceのnameとpathはreportへ保存しません
+raw per-fixture reportには画像由来の識別子とhashが含まれるため、権限 `0600` のprivate artifactとしてGitの外で管理します
+terminal outputには連番placeholderを使い、fixture IDとcorpus hashを表示しません
+`-fixtures` はlocalの対象限定測定だけに使い、指定IDはprivate JSON reportだけへ保存します
 
 ## ローカルLossy Rate-Distortion比較
 

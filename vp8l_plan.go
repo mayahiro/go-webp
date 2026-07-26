@@ -106,78 +106,80 @@ func (p *vp8lPlan) payloadBitLen() uint64 {
 }
 
 type vp8lBudget struct {
-	maxSourceBytes      uint64
-	predictorModes      []uint8
-	predictorSizeBits   []uint8
-	colorSizeBits       []uint8
-	colorBaseCandidates int
-	colorSearchSamples  int
-	trySubtractGreen    bool
-	tryColor            bool
-	tryPalette          bool
-	tryPalettePredictor bool
-	tryCombined         bool
-	stagedCombined      bool
-	matchChainDepth     int
-	matchEdges          int
-	lowColorMatchEdges  int
-	matchHashBits       int
-	optimalPasses       int
-	tryColorCache       bool
-	colorCacheBits      []uint8
-	cacheCandidates     int
-	screenCandidates    int
-	shallowCandidates   int
-	exactCandidates     int
-	tryMetaPrefix       bool
-	metaPrefixBits      []uint8
-	maxEntropyGroups    int
-	entropyIterations   int
-	entropyRefinements  int
-	maxWorkers          int
-	maxParallelBytes    uint64
-	maxWorkspaceBytes   uint64
-	earlyExitUniform    bool
-	earlyExitPalette    bool
-	metaCandidates      int
-	counters            *vp8lSearchCounters
+	maxSourceBytes           uint64
+	predictorModes           []uint8
+	predictorSizeBits        []uint8
+	colorSizeBits            []uint8
+	colorBaseCandidates      int
+	colorSearchSamples       int
+	trySubtractGreen         bool
+	tryColor                 bool
+	tryPalette               bool
+	tryPalettePredictor      bool
+	tryCombined              bool
+	stagedCombined           bool
+	matchChainDepth          int
+	matchEdges               int
+	lowColorMatchEdges       int
+	matchHashBits            int
+	optimalPasses            int
+	tryColorCache            bool
+	colorCacheBits           []uint8
+	cacheCandidates          int
+	screenCandidates         int
+	shallowCandidates        int
+	exactCandidates          int
+	tryMetaPrefix            bool
+	metaPrefixBits           []uint8
+	maxEntropyGroups         int
+	entropyIterations        int
+	entropyRefinements       int
+	refineFinalEntropyGroups bool
+	maxWorkers               int
+	maxParallelBytes         uint64
+	maxWorkspaceBytes        uint64
+	earlyExitUniform         bool
+	earlyExitPalette         bool
+	metaCandidates           int
+	counters                 *vp8lSearchCounters
 }
 
 func vp8lBudgetForMode(mode Mode) vp8lBudget {
 	budget := vp8lBudget{
-		maxSourceBytes:      vp8lMaxSourceBytes,
-		predictorModes:      []uint8{1, 2, 12, 3, 7},
-		predictorSizeBits:   []uint8{4, 6, 8},
-		colorSizeBits:       []uint8{5},
-		colorBaseCandidates: 0,
-		colorSearchSamples:  256,
-		trySubtractGreen:    true,
-		tryColor:            true,
-		tryPalette:          true,
-		tryPalettePredictor: true,
-		tryCombined:         true,
-		stagedCombined:      true,
-		matchChainDepth:     128,
-		matchEdges:          2,
-		lowColorMatchEdges:  4,
-		optimalPasses:       1,
-		tryColorCache:       true,
-		colorCacheBits:      []uint8{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11},
-		cacheCandidates:     2,
-		screenCandidates:    12,
-		shallowCandidates:   6,
-		exactCandidates:     3,
-		tryMetaPrefix:       true,
-		metaPrefixBits:      []uint8{5, 6},
-		maxEntropyGroups:    16,
-		entropyIterations:   1,
-		entropyRefinements:  0,
-		maxWorkers:          2,
-		maxParallelBytes:    64 << 20,
-		maxWorkspaceBytes:   96 << 20,
-		earlyExitUniform:    true,
-		earlyExitPalette:    true,
-		metaCandidates:      1,
+		maxSourceBytes:           vp8lMaxSourceBytes,
+		predictorModes:           []uint8{1, 2, 12, 3, 7},
+		predictorSizeBits:        []uint8{4, 6, 8},
+		colorSizeBits:            []uint8{5},
+		colorBaseCandidates:      0,
+		colorSearchSamples:       256,
+		trySubtractGreen:         true,
+		tryColor:                 true,
+		tryPalette:               true,
+		tryPalettePredictor:      true,
+		tryCombined:              true,
+		stagedCombined:           true,
+		matchChainDepth:          128,
+		matchEdges:               2,
+		lowColorMatchEdges:       4,
+		optimalPasses:            1,
+		tryColorCache:            true,
+		colorCacheBits:           []uint8{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11},
+		cacheCandidates:          2,
+		screenCandidates:         12,
+		shallowCandidates:        6,
+		exactCandidates:          3,
+		tryMetaPrefix:            true,
+		metaPrefixBits:           []uint8{5, 6},
+		maxEntropyGroups:         vp8lMaxEntropyGroups,
+		entropyIterations:        1,
+		entropyRefinements:       0,
+		refineFinalEntropyGroups: true,
+		maxWorkers:               2,
+		maxParallelBytes:         64 << 20,
+		maxWorkspaceBytes:        96 << 20,
+		earlyExitUniform:         true,
+		earlyExitPalette:         true,
+		metaCandidates:           1,
 	}
 	switch mode {
 	case ModeFast:
@@ -235,9 +237,10 @@ func vp8lBudgetForMode(mode Mode) vp8lBudget {
 		budget.shallowCandidates = 10
 		budget.exactCandidates = 10
 		budget.metaPrefixBits = []uint8{3, 4, 5, 6, 7, 8}
-		budget.maxEntropyGroups = 16
+		budget.maxEntropyGroups = vp8lMaxEntropyGroups
 		budget.entropyIterations = 3
 		budget.entropyRefinements = 2
+		budget.refineFinalEntropyGroups = false
 		budget.maxWorkers = 4
 		budget.maxParallelBytes = 128 << 20
 		budget.maxWorkspaceBytes = 192 << 20

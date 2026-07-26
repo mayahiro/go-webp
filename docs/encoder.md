@@ -78,7 +78,7 @@ below 3 pixels, are left unchanged.
 | `ModeLowMemory` | Avoids full-frame source, residual, token, and cache buffers |
 | `ModeNearLossless` | Selects VP8L near-lossless encoding |
 | `ModeLossyQuality` | Selects VP8 lossy encoding |
-| `ModeAuto` | Chooses a conservative internal profile from image features |
+| `ModeAuto` | Lets the encoder select an internal profile |
 
 No profile guarantees the smallest or fastest output for every image.
 `ModeFast` and `ModeLowMemory` can produce larger output because they
@@ -88,6 +88,12 @@ Balanced lossless profiles use the default bounded transform, match, and
 entropy budgets. `ModeBestCompression` broadens those budgets, while
 `ModeAuto` selects the fast lossless profile only for very small verified
 indexed payloads.
+
+For lossy encoding, `ModeAuto` currently uses the same quality, effort, and
+alpha configuration as `ModeDefault`. This is the current routing behavior,
+not a permanent alias or a serialization contract. A future release may select
+a different lossy profile for `ModeAuto`. Within the same encoder version,
+identical input and options produce deterministic output.
 
 ## Lossless Encoding
 

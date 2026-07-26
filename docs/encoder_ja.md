@@ -73,13 +73,18 @@ near-lossless qualityに対するRGB各channelの最大誤差は次のとおり�
 | `ModeLowMemory` | full-frame source、residual、token、cache bufferを回避 |
 | `ModeNearLossless` | VP8L near-lossless encodingを選択 |
 | `ModeLossyQuality` | VP8 lossy encodingを選択 |
-| `ModeAuto` | 画像特徴から保守的な内部profileを選択 |
+| `ModeAuto` | encoderに内部profileの選択を委ねる |
 
 すべての画像で最小または最速になることを保証するprofileはありません
 `ModeFast` と `ModeLowMemory` は意図的にsearchを減らすため、出力が大きくなる場合があります
 
 Balanced lossless profileは標準の上限付きtransform、match、entropy budgetを使用します
 `ModeBestCompression` は各budgetを広げ、`ModeAuto` は検証済みindexed payloadが非常に小さい場合だけfast lossless profileを選択します
+
+lossy encodingでは、現在の `ModeAuto` は `ModeDefault` と同じquality、effort、alpha設定を使用します
+これは現在のroutingであり、永続的なaliasやserialization contractではありません
+将来のreleaseでは `ModeAuto` が別のlossy profileを選択する可能性があります
+同じencoder version、入力、optionsの組み合わせでは決定的な出力を生成します
 
 ## Lossless Encoding
 

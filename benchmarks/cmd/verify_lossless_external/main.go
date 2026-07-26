@@ -18,6 +18,8 @@ import (
 
 type decoderKind string
 
+const xImageDecoderVersion = "v0.41.0"
+
 const (
 	decoderAuto   decoderKind = "auto"
 	decoderDWebP  decoderKind = "dwebp"
@@ -45,6 +47,10 @@ func main() {
 	if err != nil {
 		fatal(err)
 	}
+	version, err := externalDecoderVersion(decoder)
+	if err != nil {
+		fatal(err)
+	}
 
 	dir, err := os.MkdirTemp("", "go-webp-lossless-external-*")
 	if err != nil {
@@ -56,7 +62,9 @@ func main() {
 		fmt.Printf("keeping temporary files in %s\n", dir)
 	}
 
-	for _, f := range fixtures() {
+	allFixtures := fixtures()
+	fmt.Printf("decoder=%s version=%s fixtures=%d\n", decoder, version, len(allFixtures))
+	for _, f := range allFixtures {
 		if err := verifyFixture(dir, decoder, f); err != nil {
 			fatal(err)
 		}
@@ -145,6 +153,27 @@ func decodeToPNG(decoder decoderKind, webpPath string, pngPath string) error {
 	return nil
 }
 
+func externalDecoderVersion(decoder decoderKind) (string, error) {
+	switch decoder {
+	case decoderDWebP:
+		output, err := exec.Command("dwebp", "-version").CombinedOutput()
+		if err != nil {
+			return "", fmt.Errorf("dwebp version: %w: %s", err, bytes.TrimSpace(output))
+		}
+		return string(bytes.TrimSpace(output)), nil
+	case decoderXImage:
+		return "golang.org/x/image " + xImageDecoderVersion, nil
+	case decoderSIPS:
+		output, err := exec.Command("sips", "--version").CombinedOutput()
+		if err != nil {
+			return "", fmt.Errorf("sips version: %w: %s", err, bytes.TrimSpace(output))
+		}
+		return string(bytes.TrimSpace(output)), nil
+	default:
+		return "", fmt.Errorf("unsupported decoder %q", decoder)
+	}
+}
+
 func decodeWithXImage(webpPath string, pngPath string) error {
 	dir, err := os.MkdirTemp("", "go-webp-ximage-decoder-*")
 	if err != nil {
@@ -152,7 +181,8 @@ func decodeWithXImage(webpPath string, pngPath string) error {
 	}
 	defer os.RemoveAll(dir)
 
-	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module verify\n\ngo 1.25.0\n\nrequire golang.org/x/image v0.41.0\n"), 0o600); err != nil {
+	module := fmt.Sprintf("module verify\n\ngo 1.25.0\n\nrequire golang.org/x/image %s\n", xImageDecoderVersion)
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(module), 0o600); err != nil {
 		return err
 	}
 	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(ximageDecoderProgram), 0o600); err != nil {
@@ -294,6 +324,7 @@ func fixtures() []fixture {
 		{name: "gray-gradient-256", img: grayGradient256Fixture()},
 		{name: "rgba-offset", img: rgbaOffsetFixture()},
 		{name: "gray-offset", img: grayOffsetFixture()},
+		{name: "hidden-rgb-alpha", img: hiddenRGBFixture()},
 		{name: "predictor-lz77", img: predictorLZ77Fixture()},
 		{name: "predictor-color-transform", img: predictorColorTransformFixture()},
 		{name: "subtract-green", img: subtractGreenFixture()},
@@ -325,6 +356,25 @@ func fixtures() []fixture {
 			alphaExact:   true,
 		},
 	}
+}
+
+func hiddenRGBFixture() image.Image {
+	img := image.NewNRGBA(image.Rect(0, 0, 16, 16))
+	for y := range 16 {
+		for x := range 16 {
+			alpha := uint8(255)
+			if (x+y)%3 == 0 {
+				alpha = 0
+			}
+			img.SetNRGBA(x, y, color.NRGBA{
+				R: uint8(17 + x*11),
+				G: uint8(29 + y*13),
+				B: uint8(43 + (x+y)*7),
+				A: alpha,
+			})
+		}
+	}
+	return img
 }
 
 func nearLosslessWant(src image.Image, quality int) image.Image {

@@ -20,13 +20,15 @@ import (
 	"github.com/mayahiro/go-webp/benchmarks/internal/benchmarkfixture"
 	"github.com/mayahiro/go-webp/internal/benchmarkbitstream"
 	"github.com/mayahiro/go-webp/internal/benchmarkcorpus"
+	"github.com/mayahiro/go-webp/internal/benchmarkimage"
 )
 
 type fixture struct {
-	name   string
-	format string
-	split  string
-	img    image.Image
+	name     string
+	format   string
+	split    string
+	hasAlpha bool
+	img      image.Image
 }
 
 type corpusConfiguration struct {
@@ -34,6 +36,7 @@ type corpusConfiguration struct {
 	sha256         string
 	split          string
 	holdoutPercent int
+	private        bool
 }
 
 type comparisonConfig struct {
@@ -51,13 +54,15 @@ type distortionMetrics struct {
 }
 
 type result struct {
-	fixture    string
-	encoder    string
-	runs       int
-	size       int64
-	avg        time.Duration
-	layout     benchmarkbitstream.LosslessLayout
-	distortion distortionMetrics
+	fixture      string
+	encoder      string
+	runs         int
+	size         int64
+	avg          time.Duration
+	timing       losslessTimingSummary
+	outputSHA256 string
+	layout       benchmarkbitstream.LosslessLayout
+	distortion   distortionMetrics
 }
 
 func main() {
@@ -69,7 +74,7 @@ func main() {
 	keep := flag.Bool("keep", false, "keep generated files when out is empty")
 	corpusDir := flag.String("corpus", "", "private image corpus directory; empty uses generated fixtures")
 	corpusName := flag.String("corpus-name", "production", "anonymous private corpus name")
-	corpusSplit := flag.String("split", "holdout", "private corpus split: train, holdout, or all")
+	corpusSplit := flag.String("split", "validation", "private corpus split: development, validation, or all; train and holdout remain accepted aliases")
 	holdoutPercent := flag.Int("holdout", 20, "deterministic private corpus holdout percentage")
 	jsonPath := flag.String("json", "", "optional JSON report path")
 	fixtureIDs := flag.String("fixtures", "", "optional comma-separated fixture names or anonymous corpus IDs")
@@ -116,48 +121,79 @@ func main() {
 		fatal(err)
 	}
 
-	version, err := commandVersion("cwebp", "-version")
+	cwebpVersion, err := commandVersion("cwebp", "-version")
 	if err != nil {
 		fatal(err)
 	}
+	dwebpVersion, err := commandVersion("dwebp", "-version")
+	if err != nil {
+		fatal(err)
+	}
+	repository, err := currentRepositoryMetadata()
+	if err != nil {
+		fatal(err)
+	}
+	host := currentHostMetadata()
 	fmt.Printf("workdir=%s\n", dir)
-	fmt.Printf("mode=%s method=%d quality=%d cwebp=%s\n", cfg.name, *method, *quality, version)
-	fmt.Printf("corpus=%s split=%s holdout=%d sha256=%s\n", corpus.name, corpus.split, corpus.holdoutPercent, corpus.sha256)
+	fmt.Printf("mode=%s method=%d quality=%d cwebp=%s dwebp=%s\n", cfg.name, *method, *quality, cwebpVersion, dwebpVersion)
+	if corpus.private {
+		fmt.Printf("corpus=%s split=%s holdout=%d fixtures=%d private=true\n", corpus.name, corpus.split, corpus.holdoutPercent, len(fixtures))
+	} else {
+		fmt.Printf("corpus=%s split=%s holdout=%d sha256=%s\n", corpus.name, corpus.split, corpus.holdoutPercent, corpus.sha256)
+	}
 	if len(selectedFixtureIDs) != 0 {
-		fmt.Printf("fixtures=%s\n", strings.Join(selectedFixtureIDs, ","))
+		if corpus.private {
+			fmt.Printf("fixture_filter_count=%d private=true\n", len(selectedFixtureIDs))
+		} else {
+			fmt.Printf("fixtures=%s\n", strings.Join(selectedFixtureIDs, ","))
+		}
 	}
 	fmt.Printf("%-14s %-10s %4s %12s %10s %10s %8s %11s\n", "fixture", "encoder", "runs", "encoded_B", "avg_ms", "rgb_mae", "rgb_max", "alpha_exact")
 	report := losslessComparisonReport{
-		SchemaVersion: 1,
+		SchemaVersion: losslessComparisonReportSchemaVersion,
 		Configuration: losslessReportConfiguration{
-			Runs:             *runs,
-			CWebPVersion:     version,
-			CWebPMethod:      *method,
-			GoVersion:        runtime.Version(),
-			GOOS:             runtime.GOOS,
-			GOARCH:           runtime.GOARCH,
-			GoMode:           cfg.name,
-			GoTimingScope:    "in-process webp.Encode call",
-			CWebPTimingScope: "process startup, PNG decode, encode, and output write",
-			Corpus:           corpus.name,
-			CorpusSHA256:     corpus.sha256,
-			CorpusSplit:      corpus.split,
-			HoldoutPercent:   corpus.holdoutPercent,
-			FixtureFilter:    selectedFixtureIDs,
+			Runs:                *runs,
+			WarmupRuns:          losslessComparisonWarmupRuns,
+			TimingStatistic:     "median_ns with min_ns and max_ns range; average_encode_ns retained for schema compatibility",
+			OutputHashAlgorithm: "sha256",
+			CWebPVersion:        cwebpVersion,
+			CWebPMethod:         *method,
+			CWebPQuality:        *quality,
+			CWebPArguments:      reportCWebPArguments(cfg),
+			CWebPInputFormat:    "png",
+			DWebPVersion:        dwebpVersion,
+			GoVersion:           runtime.Version(),
+			GOOS:                runtime.GOOS,
+			GOARCH:              runtime.GOARCH,
+			GOMAXPROCS:          runtime.GOMAXPROCS(0),
+			GoCommit:            repository.commit,
+			GoDirty:             repository.dirty,
+			CPUModel:            host.cpuModel,
+			OSVersion:           host.osVersion,
+			GoMode:              cfg.name,
+			GoTimingScope:       "in-process webp.Encode call",
+			CWebPTimingScope:    "process startup, PNG decode, encode, and output write",
+			Corpus:              corpus.name,
+			CorpusSHA256:        corpus.sha256,
+			CorpusSplit:         corpus.split,
+			HoldoutPercent:      corpus.holdoutPercent,
+			FixtureFilter:       selectedFixtureIDs,
 		},
 	}
-	var goBytes, libwebpBytes int64
-	var goTime, libwebpTime time.Duration
-	for _, f := range fixtures {
-		pngPath := filepath.Join(dir, f.name+".png")
-		if err := writePNG(pngPath, f.img); err != nil {
-			fatal(fmt.Errorf("%s: write png: %w", f.name, err))
+	for index, f := range fixtures {
+		workFixture := f
+		if corpus.private {
+			workFixture.name = fmt.Sprintf("private-%03d", index+1)
 		}
-		goResult, err := runGoWebP(dir, f, *runs, cfg)
+		pngPath := filepath.Join(dir, workFixture.name+".png")
+		if err := writePNG(pngPath, workFixture.img); err != nil {
+			fatal(fmt.Errorf("%s: write png: %w", workFixture.name, err))
+		}
+		goResult, err := runGoWebP(dir, workFixture, *runs, cfg)
 		if err != nil {
 			fatal(err)
 		}
-		libwebpResult, err := runLibWebP(dir, f, pngPath, *runs, cfg)
+		libwebpResult, err := runLibWebP(dir, workFixture, pngPath, *runs, cfg)
 		if err != nil {
 			fatal(err)
 		}
@@ -174,22 +210,27 @@ func main() {
 				r.distortion.alphaExact,
 			)
 		}
-		goBytes += goResult.size
-		libwebpBytes += libwebpResult.size
-		goTime += goResult.avg
-		libwebpTime += libwebpResult.avg
 		report.Fixtures = append(report.Fixtures, losslessFixtureReport{
-			Name:         f.name,
-			SourceFormat: f.format,
-			Split:        f.split,
-			Width:        f.img.Bounds().Dx(),
-			Height:       f.img.Bounds().Dy(),
-			GoWebP:       losslessSampleFromResult(goResult),
-			CWebP:        losslessSampleFromResult(libwebpResult),
+			Name:               f.name,
+			SourceFormat:       f.format,
+			SourceOriginFormat: f.format,
+			CWebPInputFormat:   "png",
+			Split:              f.split,
+			HasAlpha:           f.hasAlpha,
+			Width:              f.img.Bounds().Dx(),
+			Height:             f.img.Bounds().Dy(),
+			GoWebP:             losslessSampleFromResult(goResult),
+			CWebP:              losslessSampleFromResult(libwebpResult),
 		})
 	}
 	report.Aggregate = aggregateLosslessFixtures(report.Fixtures)
-	fmt.Printf("aggregate go-webp_B=%d libwebp_B=%d go-webp_ms=%.3f libwebp_ms=%.3f\n", goBytes, libwebpBytes, float64(goTime.Microseconds())/1000, float64(libwebpTime.Microseconds())/1000)
+	fmt.Printf(
+		"aggregate go-webp_B=%d libwebp_B=%d go-webp_median_total_ms=%.3f libwebp_median_total_ms=%.3f\n",
+		report.Aggregate.GoWebPBytes,
+		report.Aggregate.CWebPBytes,
+		float64(report.Aggregate.GoMedianTotalNS)/float64(time.Millisecond),
+		float64(report.Aggregate.CWebPMedianTotalNS)/float64(time.Millisecond),
+	)
 	if *jsonPath != "" {
 		if err := writeLosslessReport(*jsonPath, report); err != nil {
 			fatal(err)
@@ -239,7 +280,7 @@ func makeComparisonConfig(mode string, quality int, method int) (comparisonConfi
 	cfg := comparisonConfig{
 		name:      mode,
 		goOptions: webp.Options{Compression: webp.CompressionLossless},
-		cwebpArgs: []string{"-lossless", "-m", strconv.Itoa(method)},
+		cwebpArgs: []string{"-lossless", "-exact", "-q", strconv.Itoa(quality), "-m", strconv.Itoa(method)},
 		exact:     true,
 	}
 	switch mode {
@@ -267,17 +308,23 @@ func makeComparisonConfig(mode string, quality int, method int) (comparisonConfi
 	return cfg, nil
 }
 
+func reportCWebPArguments(cfg comparisonConfig) []string {
+	args := append([]string{"-quiet"}, cfg.cwebpArgs...)
+	return append(args, "<input.png>", "-o", "<output.webp>")
+}
+
 func runGoWebP(dir string, f fixture, runs int, cfg comparisonConfig) (result, error) {
-	var total time.Duration
-	var encoded []byte
-	for i := 0; i < runs; i++ {
+	encode := func() ([]byte, time.Duration, error) {
 		var buf bytes.Buffer
 		start := time.Now()
 		if err := webp.Encode(&buf, f.img, &cfg.goOptions); err != nil {
-			return result{}, fmt.Errorf("%s/go-webp: encode: %w", f.name, err)
+			return nil, time.Since(start), err
 		}
-		total += time.Since(start)
-		encoded = buf.Bytes()
+		return append([]byte(nil), buf.Bytes()...), time.Since(start), nil
+	}
+	encoded, durations, err := runDeterministicLosslessEncodes(f.name+"/go-webp", runs, encode)
+	if err != nil {
+		return result{}, err
 	}
 	webpPath := filepath.Join(dir, f.name+".go-webp.webp")
 	layout, err := benchmarkbitstream.ParseLossless(encoded)
@@ -292,36 +339,38 @@ func runGoWebP(dir string, f fixture, runs int, cfg comparisonConfig) (result, e
 		return result{}, err
 	}
 	return result{
-		fixture:    f.name,
-		encoder:    "go-webp",
-		runs:       runs,
-		size:       int64(len(encoded)),
-		avg:        total / time.Duration(runs),
-		layout:     layout,
-		distortion: metrics,
+		fixture:      f.name,
+		encoder:      "go-webp",
+		runs:         runs,
+		size:         int64(len(encoded)),
+		avg:          averageLosslessDuration(durations),
+		timing:       summarizeLosslessTiming(durations),
+		outputSHA256: losslessOutputSHA256(encoded),
+		layout:       layout,
+		distortion:   metrics,
 	}, nil
 }
 
 func runLibWebP(dir string, f fixture, pngPath string, runs int, cfg comparisonConfig) (result, error) {
 	webpPath := filepath.Join(dir, f.name+".libwebp.webp")
-	var total time.Duration
-	for i := 0; i < runs; i++ {
+	encode := func() ([]byte, time.Duration, error) {
 		args := append([]string{"-quiet"}, cfg.cwebpArgs...)
 		args = append(args, pngPath, "-o", webpPath)
 		cmd := exec.Command("cwebp", args...)
 		start := time.Now()
 		if out, err := cmd.CombinedOutput(); err != nil {
-			return result{}, fmt.Errorf("%s/libwebp: cwebp: %w: %s", f.name, err, string(out))
+			return nil, time.Since(start), fmt.Errorf("cwebp: %w: %s", err, string(out))
 		}
-		total += time.Since(start)
+		elapsed := time.Since(start)
+		encoded, err := os.ReadFile(webpPath)
+		if err != nil {
+			return nil, elapsed, fmt.Errorf("read webp: %w", err)
+		}
+		return encoded, elapsed, nil
 	}
-	info, err := os.Stat(webpPath)
+	encoded, durations, err := runDeterministicLosslessEncodes(f.name+"/libwebp", runs, encode)
 	if err != nil {
-		return result{}, fmt.Errorf("%s/libwebp: stat webp: %w", f.name, err)
-	}
-	encoded, err := os.ReadFile(webpPath)
-	if err != nil {
-		return result{}, fmt.Errorf("%s/libwebp: read webp: %w", f.name, err)
+		return result{}, err
 	}
 	layout, err := benchmarkbitstream.ParseLossless(encoded)
 	if err != nil {
@@ -332,14 +381,48 @@ func runLibWebP(dir string, f fixture, pngPath string, runs int, cfg comparisonC
 		return result{}, err
 	}
 	return result{
-		fixture:    f.name,
-		encoder:    "libwebp",
-		runs:       runs,
-		size:       info.Size(),
-		avg:        total / time.Duration(runs),
-		layout:     layout,
-		distortion: metrics,
+		fixture:      f.name,
+		encoder:      "libwebp",
+		runs:         runs,
+		size:         int64(len(encoded)),
+		avg:          averageLosslessDuration(durations),
+		timing:       summarizeLosslessTiming(durations),
+		outputSHA256: losslessOutputSHA256(encoded),
+		layout:       layout,
+		distortion:   metrics,
 	}, nil
+}
+
+func runDeterministicLosslessEncodes(name string, runs int, encode func() ([]byte, time.Duration, error)) ([]byte, []time.Duration, error) {
+	warmupOutput, _, err := encode()
+	if err != nil {
+		return nil, nil, fmt.Errorf("%s: warm-up encode: %w", name, err)
+	}
+	encoded := warmupOutput
+	durations := make([]time.Duration, 0, runs)
+	for run := range runs {
+		candidate, elapsed, err := encode()
+		if err != nil {
+			return nil, nil, fmt.Errorf("%s: encode run %d: %w", name, run+1, err)
+		}
+		durations = append(durations, elapsed)
+		if !bytes.Equal(warmupOutput, candidate) {
+			return nil, nil, fmt.Errorf("%s: encoded output changed after warm-up on run %d", name, run+1)
+		}
+		encoded = candidate
+	}
+	return encoded, durations, nil
+}
+
+func averageLosslessDuration(durations []time.Duration) time.Duration {
+	if len(durations) == 0 {
+		return 0
+	}
+	var total time.Duration
+	for _, duration := range durations {
+		total += duration
+	}
+	return total / time.Duration(len(durations))
 }
 
 func decodeAndMeasure(dir string, f fixture, webpPath string, suffix string, requireExact bool) (distortionMetrics, error) {
@@ -435,35 +518,89 @@ func commandVersion(name string, args ...string) (string, error) {
 
 func loadLosslessComparisonFixtures(corpusDir string, corpusName string, split string, holdoutPercent int) ([]fixture, corpusConfiguration, error) {
 	if strings.TrimSpace(corpusDir) == "" {
-		shared := benchmarkfixture.Standard()
+		shared := append(benchmarkfixture.Standard(), benchmarkfixture.Fixture{
+			Name:     "hidden-rgb-alpha16",
+			Category: "alpha-exact",
+			Image:    hiddenRGBAlphaFixture(),
+		})
 		result := make([]fixture, len(shared))
 		for i, f := range shared {
-			result[i] = fixture{name: f.Name, split: "all", img: f.Image}
+			identity := benchmarkimage.IdentifyPixels(f.Image)
+			result[i] = fixture{name: f.Name, format: "generated", split: "all", hasAlpha: identity.HasAlpha, img: f.Image}
 		}
 		return result, corpusConfiguration{name: "generated-standard", split: "all"}, nil
 	}
-	report, samples, err := benchmarkcorpus.LoadSplit(corpusDir, corpusName, holdoutPercent, split)
+	storageSplit, reportSplit, err := normalizeLosslessCorpusSplit(split)
+	if err != nil {
+		return nil, corpusConfiguration{}, err
+	}
+	report, samples, err := benchmarkcorpus.LoadSplit(corpusDir, corpusName, holdoutPercent, storageSplit)
 	if err != nil {
 		return nil, corpusConfiguration{}, err
 	}
 	if len(samples) == 0 {
-		return nil, corpusConfiguration{}, fmt.Errorf("corpus split %q contains no images", split)
+		return nil, corpusConfiguration{}, fmt.Errorf("corpus split %q contains no images", reportSplit)
 	}
 	result := make([]fixture, len(samples))
 	for i, sample := range samples {
 		result[i] = fixture{
-			name:   sample.Metadata.ID,
-			format: sample.Metadata.Format,
-			split:  sample.Metadata.Split,
-			img:    sample.Pixels,
+			name:     sample.Metadata.ID,
+			format:   sample.Metadata.Format,
+			split:    roadmapSplitName(sample.Metadata.Split),
+			hasAlpha: sample.Metadata.HasAlpha,
+			img:      sample.Pixels,
 		}
 	}
 	return result, corpusConfiguration{
 		name:           report.Corpus,
 		sha256:         report.CorpusSHA256,
-		split:          split,
+		split:          reportSplit,
 		holdoutPercent: report.HoldoutPercent,
+		private:        true,
 	}, nil
+}
+
+func normalizeLosslessCorpusSplit(split string) (string, string, error) {
+	switch strings.ToLower(strings.TrimSpace(split)) {
+	case "development", "train":
+		return "train", "development", nil
+	case "validation", "holdout":
+		return "holdout", "validation", nil
+	case "all":
+		return "all", "all", nil
+	default:
+		return "", "", fmt.Errorf("invalid corpus split %q", split)
+	}
+}
+
+func roadmapSplitName(split string) string {
+	switch split {
+	case "train":
+		return "development"
+	case "holdout":
+		return "validation"
+	default:
+		return split
+	}
+}
+
+func hiddenRGBAlphaFixture() image.Image {
+	img := image.NewNRGBA(image.Rect(0, 0, 16, 16))
+	for y := range 16 {
+		for x := range 16 {
+			alpha := uint8(255)
+			if (x+y)%3 == 0 {
+				alpha = 0
+			}
+			img.SetNRGBA(x, y, color.NRGBA{
+				R: uint8(17 + x*11),
+				G: uint8(29 + y*13),
+				B: uint8(43 + (x+y)*7),
+				A: alpha,
+			})
+		}
+	}
+	return img
 }
 
 func fatal(err error) {

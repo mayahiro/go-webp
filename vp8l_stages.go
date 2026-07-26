@@ -48,5 +48,8 @@ func vp8lRefineCandidateEntropyPlan(width int, height int, alpha bool, candidate
 		graph := buildVP8LMatchGraphWorkspace(pixels, candidate.width, budget, workspace)
 		image = vp8lReparseEntropyPlanWorkspace(pixels, graph, image, budget, workspace)
 	}
+	if budget.refineFinalEntropyGroups {
+		image = vp8lRefineFinalEntropyGroupsWorkspace(image, budget, workspace)
+	}
 	return newVP8LPlanForImage(width, height, alpha, candidate.transforms, image)
 }

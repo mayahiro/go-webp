@@ -767,6 +767,125 @@ func TestVP8LSpatialEntropyPlanReducesExactBits(t *testing.T) {
 	assertVP8LRoundTrip(t, output.Bytes(), img)
 }
 
+func TestVP8LFinalEntropyGroupRefinementKeepsIncumbent(t *testing.T) {
+	const width, height = 128, 64
+	pixels := make([]uint32, width*height)
+	state := uint32(7)
+	for y := range height {
+		for x := range width {
+			if x < width/2 {
+				value := uint32((x + y) & 1)
+				pixels[y*width+x] = 0xff000000 | value<<16 | value<<8 | value
+				continue
+			}
+			state = state*1664525 + 1013904223
+			pixels[y*width+x] = 0xff000000 | state&0x00ffffff
+		}
+	}
+	base := buildVP8LLiteralImagePlan(pixels, width, height)
+	budget := vp8lBudgetForMode(ModeDefault)
+	incumbent := vp8lChooseEntropyPlan(base, budget)
+	if incumbent.meta == nil {
+		t.Fatal("spatial entropy search selected no meta-prefix image")
+	}
+	want := vp8lRefineFinalEntropyGroupsWorkspace(incumbent, budget, nil)
+	got := vp8lRefineFinalEntropyGroupsWorkspace(incumbent, budget, &vp8lSearchWorkspace{})
+	if got.bitLen(true) > incumbent.bitLen(true) {
+		t.Fatalf("refined bits = %d, want at most incumbent %d", got.bitLen(true), incumbent.bitLen(true))
+	}
+	if got.bitLen(true) != want.bitLen(true) {
+		t.Fatalf("workspace refined bits = %d, independent refinement %d", got.bitLen(true), want.bitLen(true))
+	}
+	tiles, tileWidth, tileHeight := vp8lTileHistograms(got, got.meta.prefixBits)
+	groupMap, groups := vp8lBuildHistogramGroups(tiles, got.meta.groupMap, got.cacheBits, nil)
+	entropyPixels := make([]uint32, len(groupMap))
+	for i, group := range groupMap {
+		entropyPixels[i] = 0xff000000 | uint32(group>>8)<<16 | uint32(uint8(group))<<8
+	}
+	rebuilt := got
+	rebuilt.meta = &vp8lEntropyPlan{
+		prefixBits: got.meta.prefixBits,
+		width:      tileWidth,
+		height:     tileHeight,
+		groupMap:   groupMap,
+		image:      buildVP8LLiteralImagePlan(entropyPixels, tileWidth, tileHeight),
+		groups:     groups,
+	}
+	if rebuilt.bitLen(true) != got.bitLen(true) {
+		t.Fatalf("selectively rebuilt bits = %d, full rebuild %d", got.bitLen(true), rebuilt.bitLen(true))
+	}
+}
+
+func TestVP8LClusterHistogramWorkspaceMatchesIndependentRuns(t *testing.T) {
+	first := []vp8lSparseHistogram{
+		{{key: vp8lAlphabetGreen<<16 | 1, count: 7}},
+		{{key: vp8lAlphabetGreen<<16 | 2, count: 5}},
+		{},
+		{{key: vp8lAlphabetGreen<<16 | 1, count: 3}},
+	}
+	second := []vp8lSparseHistogram{
+		{{key: vp8lAlphabetGreen<<16 | 9, count: 11}},
+		{},
+	}
+	workspace := &vp8lSearchWorkspace{}
+	for _, tc := range []struct {
+		name   string
+		tiles  []vp8lSparseHistogram
+		groups int
+	}{
+		{name: "first", tiles: first, groups: 2},
+		{name: "second-smaller", tiles: second, groups: 2},
+		{name: "first-reused", tiles: first, groups: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			want := vp8lClusterHistograms(tc.tiles, tc.groups)
+			got := vp8lClusterHistogramsWorkspace(tc.tiles, tc.groups, workspace)
+			if len(got) != len(want) {
+				t.Fatalf("assignment length = %d, want %d", len(got), len(want))
+			}
+			for i := range want {
+				if got[i] != want[i] {
+					t.Fatalf("assignment[%d] = %d, want %d", i, got[i], want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestVP8LHistogramGroupWorkspaceMatchesIndependentCosts(t *testing.T) {
+	const width, height = 32, 16
+	pixels := make([]uint32, width*height)
+	for i := range pixels {
+		pixels[i] = 0xff000000 | uint32(i%17)<<16 | uint32(i%11)<<8 | uint32(i%7)
+	}
+	base := buildVP8LLiteralImagePlan(pixels, width, height)
+	tiles, _, _ := vp8lTileHistograms(base, 3)
+	assignments := vp8lClusterHistograms(tiles, 4)
+	wantAssignments, wantGroups, wantCosts, wantGreenSize := vp8lRefineHistogramGroups(tiles, assignments, 0, 2, nil)
+	wantCosts = append([]uint8(nil), wantCosts...)
+
+	workspace := &vp8lHuffmanWorkspace{}
+	for run := range 2 {
+		gotAssignments, gotGroups, gotCosts, gotGreenSize := vp8lRefineHistogramGroups(tiles, assignments, 0, 2, workspace)
+		if gotGreenSize != wantGreenSize || len(gotGroups) != len(wantGroups) {
+			t.Fatalf("run %d result dimensions = green %d groups %d, want %d/%d", run, gotGreenSize, len(gotGroups), wantGreenSize, len(wantGroups))
+		}
+		if len(gotAssignments) != len(wantAssignments) || len(gotCosts) != len(wantCosts) {
+			t.Fatalf("run %d result lengths = assignments %d costs %d, want %d/%d", run, len(gotAssignments), len(gotCosts), len(wantAssignments), len(wantCosts))
+		}
+		for i := range wantAssignments {
+			if gotAssignments[i] != wantAssignments[i] {
+				t.Fatalf("run %d assignment[%d] = %d, want %d", run, i, gotAssignments[i], wantAssignments[i])
+			}
+		}
+		for i := range wantCosts {
+			if gotCosts[i] != wantCosts[i] {
+				t.Fatalf("run %d cost[%d] = %d, want %d", run, i, gotCosts[i], wantCosts[i])
+			}
+		}
+	}
+}
+
 func FuzzVP8LLiteralPlanRoundTrip(f *testing.F) {
 	f.Add(uint8(1), uint8(1), []byte{1, 2, 3, 4})
 	f.Add(uint8(3), uint8(2), []byte{

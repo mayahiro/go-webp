@@ -68,7 +68,11 @@ func buildVP8LImagePlanWorkspace(pixels []uint32, width int, height int, budget 
 
 func vp8lRefineEntropyPlanWorkspace(pixels []uint32, graph vp8lMatchGraph, best vp8lImagePlan, budget vp8lBudget, workspace *vp8lSearchWorkspace) vp8lImagePlan {
 	best = vp8lChooseEntropyPlanWorkspace(best, budget, workspace)
-	return vp8lReparseEntropyPlanWorkspace(pixels, graph, best, budget, workspace)
+	best = vp8lReparseEntropyPlanWorkspace(pixels, graph, best, budget, workspace)
+	if budget.refineFinalEntropyGroups {
+		best = vp8lRefineFinalEntropyGroupsWorkspace(best, budget, workspace)
+	}
+	return best
 }
 
 func vp8lReparseEntropyPlanWorkspace(pixels []uint32, graph vp8lMatchGraph, best vp8lImagePlan, budget vp8lBudget, workspace *vp8lSearchWorkspace) vp8lImagePlan {

@@ -11,6 +11,7 @@ const (
 	vp8lAlphabetBlue
 	vp8lAlphabetAlpha
 	vp8lAlphabetDistance
+	vp8lMaxEntropyGroups = 16
 )
 
 type vp8lHistogramEntry struct {
@@ -53,7 +54,7 @@ func vp8lChooseEntropyPlanWorkspace(base vp8lImagePlan, budget vp8lBudget, works
 		}
 		for groups := 2; groups <= budget.maxEntropyGroups && groups <= len(tiles); groups *= 2 {
 			budget.counters.recordEntropyTrial()
-			groupMap := vp8lClusterHistograms(tiles, groups)
+			groupMap := vp8lClusterHistogramsWorkspace(tiles, groups, workspace)
 			groupMap, codeGroups, groupCosts, greenSize := vp8lRefineHistogramGroups(tiles, groupMap, base.cacheBits, budget.entropyRefinements, huffmanWorkspace)
 			budget.counters.recordHuffmanEmissionBuilds(len(codeGroups) * 5)
 			if len(codeGroups) < 2 {
@@ -240,8 +241,11 @@ func vp8lWriteTokenHistogramEntries(entries []vp8lHistogramEntry, token vp8lToke
 }
 
 func vp8lClusterHistograms(tiles []vp8lSparseHistogram, requestedGroups int) []uint16 {
-	features := make([]vp8lHistogramFeature, len(tiles))
-	nonEmpty := make([]int, 0, len(tiles))
+	return vp8lClusterHistogramsWorkspace(tiles, requestedGroups, nil)
+}
+
+func vp8lClusterHistogramsWorkspace(tiles []vp8lSparseHistogram, requestedGroups int, workspace *vp8lSearchWorkspace) []uint16 {
+	features, nonEmpty, assignments := workspace.resetEntropyClustering(len(tiles))
 	for i, tile := range tiles {
 		features[i] = vp8lHistogramFeatures(tile)
 		if len(tile) != 0 {
@@ -269,7 +273,6 @@ func vp8lClusterHistograms(tiles []vp8lSparseHistogram, requestedGroups int) []u
 		}
 		centroids[group] = features[bestIndex]
 	}
-	assignments := make([]uint16, len(tiles))
 	for range 4 {
 		var sums [16]vp8lHistogramFeature
 		var counts [16]int
@@ -417,6 +420,119 @@ func vp8lRefineHistogramGroups(tiles []vp8lSparseHistogram, assignments []uint16
 	return assignments, groups, groupCosts, greenSize
 }
 
+func vp8lRefineFinalEntropyGroupsWorkspace(base vp8lImagePlan, budget vp8lBudget, workspace *vp8lSearchWorkspace) vp8lImagePlan {
+	if base.meta == nil || len(base.meta.groups) < 2 || len(base.meta.groups) > vp8lMaxEntropyGroups {
+		return base
+	}
+	tiles, tileWidth, tileHeight := vp8lTileHistogramsWorkspace(base, base.meta.prefixBits, workspace)
+	var huffmanWorkspace *vp8lHuffmanWorkspace
+	if workspace != nil {
+		huffmanWorkspace = &workspace.huffman
+	}
+	groupCosts, greenSize := vp8lBuildCodeGroupCosts(base.meta.groups, base.cacheBits, huffmanWorkspace)
+	alphabetSize := vp8lHistogramAlphabetSize(greenSize)
+	assignments := append([]uint16(nil), base.meta.groupMap...)
+	var changedGroups [vp8lMaxEntropyGroups]bool
+	changed := false
+	for tileIndex, tile := range tiles {
+		if len(tile) == 0 {
+			continue
+		}
+		bestGroup := int(assignments[tileIndex])
+		bestCost := vp8lSparseHistogramTableCost(tile, groupCosts[bestGroup*alphabetSize:(bestGroup+1)*alphabetSize], greenSize)
+		for group := range base.meta.groups {
+			cost := vp8lSparseHistogramTableCost(tile, groupCosts[group*alphabetSize:(group+1)*alphabetSize], greenSize)
+			if cost < bestCost {
+				bestCost = cost
+				bestGroup = group
+			}
+		}
+		if uint16(bestGroup) != assignments[tileIndex] {
+			changedGroups[assignments[tileIndex]] = true
+			changedGroups[bestGroup] = true
+			assignments[tileIndex] = uint16(bestGroup)
+			changed = true
+		}
+	}
+	if !changed {
+		return base
+	}
+	groupMap, codeGroups, rebuiltGroups := vp8lBuildRefinedHistogramGroups(tiles, assignments, base.meta.groups, changedGroups, base.cacheBits, huffmanWorkspace)
+	groupCosts, greenSize = vp8lBuildCodeGroupCosts(codeGroups, base.cacheBits, huffmanWorkspace)
+	entropyPixels := make([]uint32, len(groupMap))
+	for i, group := range groupMap {
+		entropyPixels[i] = 0xff000000 | uint32(group>>8)<<16 | uint32(uint8(group))<<8
+	}
+	candidate := base
+	candidate.meta = &vp8lEntropyPlan{
+		prefixBits: base.meta.prefixBits,
+		width:      tileWidth,
+		height:     tileHeight,
+		groupMap:   append([]uint16(nil), groupMap...),
+		image:      buildVP8LLiteralImagePlan(entropyPixels, tileWidth, tileHeight),
+		groups:     codeGroups,
+	}
+	budget.counters.recordEntropyTrial()
+	budget.counters.recordEntropyTiles(len(tiles))
+	budget.counters.recordHuffmanEmissionBuilds(rebuiltGroups*5 + 5)
+	candidateBits := vp8lEntropyCandidateBitLen(base.cacheBits, candidate.meta, tiles, vp8lTokenExtraBits(base.tokens), groupCosts, greenSize)
+	if candidateBits < base.bitLen(true) {
+		return candidate
+	}
+	return base
+}
+
+func vp8lBuildRefinedHistogramGroups(tiles []vp8lSparseHistogram, assignments []uint16, incumbent []vp8lCodeGroup, changed [vp8lMaxEntropyGroups]bool, cacheBits uint8, workspace *vp8lHuffmanWorkspace) ([]uint16, []vp8lCodeGroup, int) {
+	var used map[uint16]uint16
+	var compacted []uint16
+	if workspace == nil {
+		used = make(map[uint16]uint16)
+		compacted = make([]uint16, len(assignments))
+	} else {
+		if workspace.groupRemap == nil {
+			workspace.groupRemap = make(map[uint16]uint16)
+		} else {
+			clear(workspace.groupRemap)
+		}
+		used = workspace.groupRemap
+		if cap(workspace.compactedGroups) < len(assignments) {
+			workspace.compactedGroups = make([]uint16, len(assignments))
+		} else {
+			workspace.compactedGroups = workspace.compactedGroups[:len(assignments)]
+		}
+		compacted = workspace.compactedGroups
+	}
+	var incumbentByGroup [vp8lMaxEntropyGroups]uint16
+	for i, group := range assignments {
+		mapped, exists := used[group]
+		if !exists {
+			mapped = uint16(len(used))
+			used[group] = mapped
+			incumbentByGroup[mapped] = group
+		}
+		compacted[i] = mapped
+	}
+	histograms := vp8lResetDenseHistograms(len(used), cacheBits, workspace)
+	for tileIndex, tile := range tiles {
+		incumbentGroup := assignments[tileIndex]
+		if changed[incumbentGroup] {
+			histograms[compacted[tileIndex]].addSparse(tile)
+		}
+	}
+	groups := make([]vp8lCodeGroup, len(used))
+	rebuilt := 0
+	for group := range groups {
+		incumbentGroup := incumbentByGroup[group]
+		if changed[incumbentGroup] {
+			groups[group] = histograms[group].codeGroup(workspace)
+			rebuilt++
+		} else {
+			groups[group] = incumbent[incumbentGroup]
+		}
+	}
+	return compacted, groups, rebuilt
+}
+
 func vp8lBuildCodeGroupCosts(groups []vp8lCodeGroup, cacheBits uint8, workspace *vp8lHuffmanWorkspace) ([]uint8, int) {
 	greenSize := nLiteralCodes + nLengthCodes
 	if cacheBits != 0 {
@@ -470,8 +586,25 @@ func vp8lSparseHistogramTableCost(histogram vp8lSparseHistogram, costs []uint8, 
 }
 
 func vp8lBuildHistogramGroups(tiles []vp8lSparseHistogram, assignments []uint16, cacheBits uint8, workspace *vp8lHuffmanWorkspace) ([]uint16, []vp8lCodeGroup) {
-	used := make(map[uint16]uint16)
-	compacted := make([]uint16, len(assignments))
+	var used map[uint16]uint16
+	var compacted []uint16
+	if workspace == nil {
+		used = make(map[uint16]uint16)
+		compacted = make([]uint16, len(assignments))
+	} else {
+		if workspace.groupRemap == nil {
+			workspace.groupRemap = make(map[uint16]uint16)
+		} else {
+			clear(workspace.groupRemap)
+		}
+		used = workspace.groupRemap
+		if cap(workspace.compactedGroups) < len(assignments) {
+			workspace.compactedGroups = make([]uint16, len(assignments))
+		} else {
+			workspace.compactedGroups = workspace.compactedGroups[:len(assignments)]
+		}
+		compacted = workspace.compactedGroups
+	}
 	for i, group := range assignments {
 		mapped, exists := used[group]
 		if !exists {
@@ -480,10 +613,7 @@ func vp8lBuildHistogramGroups(tiles []vp8lSparseHistogram, assignments []uint16,
 		}
 		compacted[i] = mapped
 	}
-	histograms := make([]vp8lDenseHistogram, len(used))
-	for i := range histograms {
-		histograms[i] = newVP8LDenseHistogram(cacheBits)
-	}
+	histograms := vp8lResetDenseHistograms(len(used), cacheBits, workspace)
 	for tileIndex, tile := range tiles {
 		histograms[compacted[tileIndex]].addSparse(tile)
 	}
@@ -492,6 +622,35 @@ func vp8lBuildHistogramGroups(tiles []vp8lSparseHistogram, assignments []uint16,
 		groups[i] = histograms[i].codeGroup(workspace)
 	}
 	return compacted, groups
+}
+
+func vp8lResetDenseHistograms(count int, cacheBits uint8, workspace *vp8lHuffmanWorkspace) []vp8lDenseHistogram {
+	if workspace == nil {
+		histograms := make([]vp8lDenseHistogram, count)
+		for i := range histograms {
+			histograms[i] = newVP8LDenseHistogram(cacheBits)
+		}
+		return histograms
+	}
+	if cap(workspace.denseHistograms) < count {
+		workspace.denseHistograms = make([]vp8lDenseHistogram, count)
+	} else {
+		workspace.denseHistograms = workspace.denseHistograms[:count]
+	}
+	greenSize := nLiteralCodes + nLengthCodes
+	if cacheBits != 0 {
+		greenSize += 1 << cacheBits
+	}
+	for i := range workspace.denseHistograms {
+		histogram := &workspace.denseHistograms[i]
+		histogram.green = vp8lResizeUint32s(histogram.green, greenSize)
+		clear(histogram.green)
+		clear(histogram.red[:])
+		clear(histogram.blue[:])
+		clear(histogram.alpha[:])
+		clear(histogram.distance[:])
+	}
+	return workspace.denseHistograms
 }
 
 func newVP8LDenseHistogram(cacheBits uint8) vp8lDenseHistogram {

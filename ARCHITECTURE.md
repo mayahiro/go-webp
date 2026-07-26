@@ -124,6 +124,13 @@ a `vp8FramePlan` containing macroblock prediction modes, skip decisions, token
 probabilities, and an optional reusable residual buffer. Partition emission
 consumes that plan to write an intra-only VP8 key frame.
 
+The implementation follows those pipeline boundaries. `lossy.go` owns
+top-level dispatch and container assembly, `lossy_frame.go` owns frame planning
+and partition emission, and `lossy_mode.go` owns macroblock analysis and
+residual processing. `lossy_alpha.go` and `lossy_alpha_huffman.go` own alpha
+candidate selection and coding, while `vp8_predict.go` and `vp8_transform.go`
+contain the prediction and transform kernels.
+
 Default and `BestCompression` use the same quality profile and differ only in
 bounded search effort. `BestCompression` evaluates a complete default frame
 incumbent, then runs a second rate-distortion pass with sharp chroma and a

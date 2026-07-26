@@ -30,6 +30,28 @@ type vp8lSearchWorkspace struct {
 	entropyEntries     []vp8lHistogramEntry
 	entropyTiles       []vp8lSparseHistogram
 	entropyDenseCounts []uint32
+	entropyFeatures    []vp8lHistogramFeature
+	entropyNonEmpty    []int
+	entropyAssignments []uint16
+}
+
+func (w *vp8lSearchWorkspace) resetEntropyClustering(tileCount int) ([]vp8lHistogramFeature, []int, []uint16) {
+	if w == nil {
+		return make([]vp8lHistogramFeature, tileCount), make([]int, 0, tileCount), make([]uint16, tileCount)
+	}
+	if cap(w.entropyFeatures) < tileCount {
+		w.entropyFeatures = make([]vp8lHistogramFeature, tileCount)
+	} else {
+		w.entropyFeatures = w.entropyFeatures[:tileCount]
+	}
+	w.entropyNonEmpty = vp8lResizeIntsCapacity(w.entropyNonEmpty, tileCount)[:0]
+	if cap(w.entropyAssignments) < tileCount {
+		w.entropyAssignments = make([]uint16, tileCount)
+	} else {
+		w.entropyAssignments = w.entropyAssignments[:tileCount]
+		clear(w.entropyAssignments)
+	}
+	return w.entropyFeatures, w.entropyNonEmpty, w.entropyAssignments
 }
 
 func (w *vp8lSearchWorkspace) resetEntropyDenseCounts(length int) []uint32 {
