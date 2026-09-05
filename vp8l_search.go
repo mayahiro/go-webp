@@ -125,7 +125,13 @@ func (s *vp8lSearchSession) paletteTable() ([]uint32, bool) {
 }
 
 func vp8lBestPlanOrStreaming(source vp8lSource) (vp8lEncodedPlan, error) {
+	defaultBudget := vp8lBudgetForMode(ModeDefault)
 	bestBudget := vp8lBudgetForMode(ModeBestCompression)
+	pixelCount := uint64(source.width) * uint64(source.height)
+	if vp8lBufferedSearchBytes(pixelCount, defaultBudget) > defaultBudget.maxWorkspaceBytes &&
+		vp8lBufferedSearchBytes(pixelCount, bestBudget) > bestBudget.maxWorkspaceBytes {
+		return vp8lBestStreamingPlan(source)
+	}
 	session, err := newVP8LSearchSession(source, bestBudget.maxSourceBytes)
 	if errors.Is(err, errVP8LSourceLimit) {
 		return vp8lBestStreamingPlan(source)

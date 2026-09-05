@@ -74,6 +74,35 @@ func TestVP8LBufferedSearchRejectsWorkspaceBeforeReadingSource(t *testing.T) {
 	}
 }
 
+func TestEncodeLosslessBalancedWorkspaceFallbackMatchesDefault(t *testing.T) {
+	const width, height = 1400, 1000
+	budget := vp8lBudgetForMode(ModeDefault)
+	if vp8lBufferedSearchBytes(width*height, budget) <= budget.maxWorkspaceBytes {
+		t.Fatal("fixture must exceed the buffered search workspace limit")
+	}
+	img := image.NewNRGBA(image.Rect(-3, 5, width-3, height+5))
+	for y := range height {
+		for x := range width {
+			// A diagonal pattern benefits from predictors beyond left and above.
+			value := uint32(x+y+1) * 2654435761
+			img.SetNRGBA(img.Rect.Min.X+x, img.Rect.Min.Y+y, color.NRGBA{
+				R: uint8(value >> 24), G: uint8(value >> 16), B: uint8(value >> 8), A: 255,
+			})
+		}
+	}
+	want := encodeLosslessForTest(t, img, ModeDefault)
+	assertVP8LRoundTrip(t, want, img)
+	for _, mode := range []Mode{ModeBalanced, ModeAuto} {
+		t.Run(modeNameForTest(mode), func(t *testing.T) {
+			got := encodeLosslessForTest(t, img, mode)
+			if !bytes.Equal(got, want) {
+				t.Errorf("fallback output = %d bytes, default = %d bytes", len(got), len(want))
+			}
+			assertVP8LRoundTrip(t, got, img)
+		})
+	}
+}
+
 func TestVP8LStreamingPlanPayloadBitsMatchEmission(t *testing.T) {
 	img := newLosslessBenchmarkFixtureImage(losslessBenchmarkCase{kind: benchmarkImageUI, width: 41, height: 29})
 	source := newEncoderSource(img)

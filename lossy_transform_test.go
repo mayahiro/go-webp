@@ -62,7 +62,8 @@ func TestVP8SharpChromaDoesNotIncreaseLocalRGBError(t *testing.T) {
 		for bx := 0; bx < halfWidth; bx++ {
 			x, y := bx*2, by*2
 			cb, cr := chromaSamplePair(vp8Source.readChroma, source.bounds, x, y)
-			baselineScores[by*halfWidth+bx] = vp8Source.chromaRGBScore2x2(readPixel, x, y, cb, cr)
+			block := vp8Source.chromaRGBBlock(readPixel, x, y)
+			baselineScores[by*halfWidth+bx] = block.score(cb, cr)
 		}
 	}
 	vp8Source.applySharpChroma(readPixel)
@@ -70,7 +71,8 @@ func TestVP8SharpChromaDoesNotIncreaseLocalRGBError(t *testing.T) {
 		for bx := 0; bx < halfWidth; bx++ {
 			x, y := bx*2, by*2
 			cb, cr := chromaSamplePair(vp8Source.readChroma, source.bounds, x, y)
-			gotScore := vp8Source.chromaRGBScore2x2(readPixel, x, y, cb, cr)
+			block := vp8Source.chromaRGBBlock(readPixel, x, y)
+			gotScore := block.score(cb, cr)
 			wantMax := baselineScores[by*halfWidth+bx]
 			if gotScore > wantMax {
 				t.Fatalf("sharp chroma block (%d,%d) RGB score = %d, want <= %d", bx, by, gotScore, wantMax)

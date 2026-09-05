@@ -101,6 +101,41 @@ func TestEncodePropagatesBoundedWriterFailuresForPublicModes(t *testing.T) {
 	}
 }
 
+func TestEncodeLosslessPropagatesMidstreamWriterFailures(t *testing.T) {
+	img := image.NewNRGBA(image.Rect(0, 0, 64, 64))
+	state := uint32(0x12345678)
+	for i := range img.Pix {
+		state ^= state << 13
+		state ^= state >> 17
+		state ^= state << 5
+		img.Pix[i] = uint8(state)
+	}
+	for _, mode := range []Mode{
+		ModeDefault,
+		ModeFast,
+		ModeBalanced,
+		ModeBestCompression,
+		ModeLowMemory,
+		ModeNearLossless,
+		ModeAuto,
+	} {
+		t.Run(modeNameForTest(mode), func(t *testing.T) {
+			opts := &Options{Mode: mode, Quality: 75}
+			encoded := encodeFuzzImage(t, img, opts)
+			// Force writes before the final Flush of the 4 KiB output buffer.
+			if len(encoded) <= 8192 {
+				t.Fatalf("encoded size = %d, want more than 8192 bytes", len(encoded))
+			}
+			for _, limit := range []int{0, 4096, len(encoded) / 2, len(encoded) - 1} {
+				writer := &boundedErrorWriter{remaining: limit}
+				if err := Encode(writer, img, opts); !errors.Is(err, errBoundedWriter) {
+					t.Errorf("limit %d error = %v, want %v", limit, err, errBoundedWriter)
+				}
+			}
+		})
+	}
+}
+
 func fuzzImage(kind uint8, bounds image.Rectangle, padding int, opaque bool, data []byte) image.Image {
 	width, height := bounds.Dx(), bounds.Dy()
 	switch kind {

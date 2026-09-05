@@ -20,6 +20,8 @@ func Encode(w io.Writer, m image.Image, o *Options) error
 
 `Encode` writes the encoded image to `w`. A nil `Options` value and the zero
 value both select lossless WebP.
+Write errors from `w` are returned unchanged, including failures during
+buffered output. If writing fails, `w` may contain a partial image.
 
 ```go
 type Options struct {
@@ -121,12 +123,16 @@ feature independently. Buffered profiles use a staged bounded search:
 `ModeFast` and `ModeLowMemory` use a row-streaming path with inexpensive
 transforms and greedy matches. Buffered modes also fall back to streaming when
 the source or estimated search workspace exceeds its configured limit.
+`ModeBalanced` uses the same search budget as `ModeDefault` in both buffered
+and streaming encoding.
 
 `ModeBestCompression` retains the complete default plan as an incumbent and
 expands the budget in the same search session. Source pixels, palette analysis,
 candidate scores, and the default winner remain reusable. The expanded result
 is selected only when its exact payload is smaller, so it does not produce a
 larger lossless payload than `ModeDefault` for the same input.
+If both searches exceed their estimated workspace limits, the encoder selects
+streaming plans without materializing the source plane.
 
 The matcher does not use unbounded hash chains, and every profile limits
 candidate counts, edges, parse iterations, entropy groups, workers, and

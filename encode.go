@@ -87,6 +87,8 @@ type Encoder struct {
 }
 
 // Encode writes the image m to w in WebP format.
+// Write errors from w are returned unchanged. If writing fails, w may contain
+// a partial image.
 func Encode(w io.Writer, m image.Image, o *Options) error {
 	if w == nil {
 		return errors.New("webp: nil writer")

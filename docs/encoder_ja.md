@@ -18,6 +18,8 @@ func Encode(w io.Writer, m image.Image, o *Options) error
 
 `Encode` はencode結果を `w` へ書き込みます
 `Options` がnilの場合とzero valueの場合はlossless WebPを選択します
+buffer出力中の失敗を含め、`w` の書き込みエラーはそのまま返します
+書き込みが失敗すると、`w` に不完全な画像が残る場合があります
 
 ```go
 type Options struct {
@@ -103,10 +105,12 @@ bufferを使うprofileは次の段階的な上限付きsearchを行います
 
 `ModeFast` と `ModeLowMemory` はcheapなtransformとgreedy matchを持つrow-streaming pathを使用します
 bufferを使うmodeでもsourceまたは推定search workspaceが設定上限を超える場合はstreamingへfallbackします
+`ModeBalanced` はbufferを使う場合もstreamingの場合も `ModeDefault` と同じsearch budgetを使います
 
 `ModeBestCompression` はDefaultの完全planをincumbentとして保持し、同じsearch sessionでbudgetを拡張します
 source pixels、palette解析、candidate score、Default winnerは再利用されます
 拡張結果のexact payloadが小さい場合だけ置き換えるため、同じ入力で `ModeDefault` より大きいlossless payloadを出力しません
+両方のsearchが推定workspace上限を超える場合は、source planeを作らずにstreaming planを選択します
 
 matcherは制限なしのhash chainを使いません
 各profileはcandidate数、edge数、parse反復、entropy group、worker、workspace推定を制限するため、より広いsearchを行うencoderより出力が大きくなる入力もあります

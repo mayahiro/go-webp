@@ -94,6 +94,9 @@ func writeLosslessVP8L(w io.Writer, plan vp8lEncodedPlan) error {
 	}
 	bits := vp8lBitWriter(buffered)
 	plan.writeTo(bits)
+	if bits.err != nil {
+		return bits.err
+	}
 	if bits.bitLen != plan.payloadBitLen() {
 		return fmt.Errorf("webp: VP8L plan size changed during emission: got %d bits, want %d", bits.bitLen, plan.payloadBitLen())
 	}

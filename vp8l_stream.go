@@ -256,7 +256,7 @@ func vp8lStreamingPredictorModes(mode Mode) []uint8 {
 	switch mode {
 	case ModeBestCompression:
 		return []uint8{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13}
-	case ModeDefault, ModeNearLossless:
+	case ModeDefault, ModeBalanced, ModeNearLossless:
 		return []uint8{1, 2, 12, 3, 4, 7, 11, 13}
 	default:
 		return []uint8{1, 2, 12}
