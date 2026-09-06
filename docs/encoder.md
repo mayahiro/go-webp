@@ -125,6 +125,8 @@ transforms and greedy matches. Buffered modes also fall back to streaming when
 the source or estimated search workspace exceeds its configured limit.
 `ModeBalanced` uses the same search budget as `ModeDefault` in both buffered
 and streaming encoding.
+Streaming emission stops reading source rows when the output writer reports an
+error and returns that error to the caller.
 
 `ModeBestCompression` retains the complete default plan as an incumbent and
 expands the budget in the same search session. Source pixels, palette analysis,
@@ -132,7 +134,9 @@ candidate scores, and the default winner remain reusable. The expanded result
 is selected only when its exact payload is smaller, so it does not produce a
 larger lossless payload than `ModeDefault` for the same input.
 If both searches exceed their estimated workspace limits, the encoder selects
-streaming plans without materializing the source plane.
+streaming plans without materializing the source plane. It evaluates the default
+streaming candidates once, then adds only the predictors unique to
+`ModeBestCompression`, retaining the default plan on ties.
 
 The matcher does not use unbounded hash chains, and every profile limits
 candidate counts, edges, parse iterations, entropy groups, workers, and
@@ -163,7 +167,8 @@ to luma4x4 modes after learning residual token probabilities. It retains the
 complete `ModeDefault` VP8 frame as an exact-size incumbent and emits the
 expanded-search frame only when it is smaller. This prevents a larger VP8
 frame at the same quality, but can take substantially longer because both
-plans are evaluated.
+plans are evaluated. When both searches use the same source materialization and
+sharp-chroma settings, they share the prepared source plane.
 
 VP8 stores the first-partition length in 19 bits. If a selected lossy plan
 exceeds that limit, the encoder retries deterministically with progressively
@@ -184,8 +189,9 @@ matches. `ModeFast` limits search to unfiltered alpha and repeated runs.
 `ModeLowMemory` retains filter search but omits previous-row candidates, while
 `ModeBestCompression` applies bounded optimal parsing to its run and
 previous-row candidates. Fully opaque standard image types skip alpha
-candidate analysis; custom image implementations use the general analysis
-path.
+candidate analysis, including `image.NRGBA64`, `image.RGBA64`, and `image.Gray16`.
+Custom image implementations use the general analysis path; if that scan finds
+no alpha, the encoder skips optimal alpha parsing.
 
 ## Input and Resource Behavior
 

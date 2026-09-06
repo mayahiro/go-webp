@@ -450,7 +450,7 @@ func analyzeLossyAlphaConfig(readPixel pixelReader, bounds image.Rectangle, widt
 			analysis.lz77Residuals[i].flushRLE()
 		}
 	}
-	if cfg.optimalPasses > 0 && uint64(width)*uint64(height) <= uint64(cfg.optimalPixels) {
+	if analysis.hasAlpha && cfg.optimalPasses > 0 && uint64(width)*uint64(height) <= uint64(cfg.optimalPixels) {
 		optimizeLossyAlphaPlans(readPixel, bounds, width, height, cfg, &analysis)
 	}
 	return analysis

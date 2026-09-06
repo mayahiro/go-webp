@@ -147,7 +147,7 @@ func TestVP8BestCompressionSelectsSmallerDefaultIncumbent(t *testing.T) {
 		{name: "UI", kind: benchmarkImageUI},
 	} {
 		img := newBenchmarkFixtureImage(lossyBenchmarkCase{kind: tc.kind, width: 65, height: 49})
-		for _, quality := range []int{25, 75, 90} {
+		for _, quality := range []int{25, 75, 90, 100} {
 			t.Run(fmt.Sprintf("%s/Q%d", tc.name, quality), func(t *testing.T) {
 				defaultConfig := vp8LossyConfigForModeQuality(ModeDefault, quality)
 				bestConfig := vp8LossyConfigForModeQuality(ModeBestCompression, quality)
@@ -157,8 +157,13 @@ func TestVP8BestCompressionSelectsSmallerDefaultIncumbent(t *testing.T) {
 				defaultOutput := encodeLossyConfigForTest(t, img, defaultConfig, ModeDefault)
 				rawBestOutput := encodeLossyConfigForTest(t, img, rawBestConfig, ModeBestCompression)
 				guardedOutput := encodeLossyConfigForTest(t, img, bestConfig, ModeBestCompression)
+				defaultChunks := readWebPChunks(t, defaultOutput)
+				rawBestChunks := readWebPChunks(t, rawBestOutput)
+				// RIFF padding can hide a one-byte VP8 frame difference.
+				defaultFrame := defaultChunks[len(defaultChunks)-1].payload
+				rawBestFrame := rawBestChunks[len(rawBestChunks)-1].payload
 				want := rawBestOutput
-				if len(defaultOutput) <= len(rawBestOutput) {
+				if len(defaultFrame) <= len(rawBestFrame) {
 					want = defaultOutput
 				}
 				if !bytes.Equal(guardedOutput, want) {

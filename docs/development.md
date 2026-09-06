@@ -8,7 +8,7 @@ of the repository.
 
 ## Requirements
 
-- Go 1.25.0 or later
+- Go 1.26.0 or later
 - `cwebp` and `dwebp` only for optional libwebp comparison and external decode
   checks
 
@@ -54,12 +54,21 @@ dimensions, non-zero origins, padded strides, deterministic output, and
 RIFF/VP8L/VP8/VP8X/ALPH structure. Images are bounded to 8x8 so
 `ModeBestCompression` remains fast enough for repeated mutation.
 
-Scheduled and manual GitHub Actions runs mutate both fuzz targets for five
+Two focused targets cover larger boundaries with the same image types, origins,
+and strides. `FuzzEncodeNearLossless` uses dimensions 1, 2, 3, 63, 64, and 65 to
+exercise the preprocessing threshold and checks decoded alpha, unchanged border
+pixels, and bounded RGB error. `FuzzEncodeLossyMacroblocks` uses dimensions 15,
+16, 17, 31, 32, and 33 to check deterministic output and container/VP8 structure
+across macroblock boundaries.
+
+Scheduled and manual GitHub Actions runs mutate all four fuzz targets for five
 minutes each with two workers and a 15-minute job timeout. Run them locally
 with:
 
 ```sh
 go test . -run '^$' -fuzz '^FuzzEncodePublicAPI$' -fuzztime=5m -parallel=2
+go test . -run '^$' -fuzz '^FuzzEncodeNearLossless$' -fuzztime=5m -parallel=2
+go test . -run '^$' -fuzz '^FuzzEncodeLossyMacroblocks$' -fuzztime=5m -parallel=2
 go test . -run '^$' -fuzz '^FuzzVP8LLiteralPlanRoundTrip$' -fuzztime=5m -parallel=2
 ```
 
@@ -68,6 +77,14 @@ After fixing a discovered failure, retain its minimized input under
 propagation are covered by a separate table-driven test for every public mode.
 
 ## Go Benchmarks
+
+Keep the Go toolchain version fixed when comparing benchmark corpus results.
+[Go 1.26 changed JPEG decoding](https://go.dev/doc/go1.26#imagejpeg), so the same
+JPEG file can produce different pixels than with Go 1.25. Pixel-derived corpus
+IDs and train/holdout assignments can therefore change too. Preserve existing
+manifests and baselines when upgrading, and verify normalized pixel hashes before
+comparing results. To compare encoder behavior across Go versions, use a fixed
+set of decoded pixels, such as a canonical PNG corpus.
 
 ```sh
 make bench-lossy

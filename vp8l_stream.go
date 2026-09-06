@@ -4,9 +4,10 @@ import (
 	"fmt"
 )
 
-type vp8lPixelStream func(visit func(uint32))
+// Streams stop as soon as visit returns false.
+type vp8lPixelStream func(visit func(uint32) bool)
 
-type vp8lTokenStream func(visit func(vp8lToken))
+type vp8lTokenStream func(visit func(vp8lToken) bool)
 
 type vp8lStreamingPlan struct {
 	width       int
@@ -27,7 +28,10 @@ func (p *vp8lStreamingPlan) writeTo(bits *vp8lBitSink) {
 	bits.writeBits(0, 1) // no color cache
 	bits.writeBits(0, 1) // no meta-prefix image
 	p.group.writeHeaders(bits)
-	p.tokens(func(token vp8lToken) {
+	if bits.err != nil {
+		return
+	}
+	p.tokens(func(token vp8lToken) bool {
 		switch token.kind() {
 		case vp8lTokenLiteral:
 			pixel := token.literal()
@@ -43,7 +47,33 @@ func (p *vp8lStreamingPlan) writeTo(bits *vp8lBitSink) {
 			p.group.distance.writeSymbol(bits, distancePrefix.code)
 			bits.writeBits(distancePrefix.extra, distancePrefix.extraBits)
 		}
+		return bits.err == nil
 	})
+}
+
+type vp8lStreamingSearch struct {
+	source vp8lSource
+	alpha  bool
+	best   *vp8lStreamingPlan
+}
+
+func (s *vp8lStreamingSearch) consider(transforms []vp8lTransform, stream vp8lPixelStream, imageWidth int) {
+	for _, tokens := range []vp8lTokenStream{
+		vp8lLiteralTokenStream(stream),
+		vp8lGreedyTokenStream(stream, imageWidth),
+	} {
+		group, dataBits := vp8lAnalyzeStreamingTokens(tokens)
+		candidate := newVP8LStreamingPlan(s.source.width, s.source.height, s.alpha, transforms, group, dataBits, tokens)
+		if s.best == nil || candidate.payloadBitLen() < s.best.payloadBitLen() {
+			s.best = candidate
+		}
+	}
+}
+
+func (s *vp8lStreamingSearch) considerPredictor(mode uint8) {
+	modes, width, height := vp8lUniformPredictorImage(s.source.width, s.source.height, 9, mode)
+	transform := vp8lPredictorTransform(9, modes, width, height)
+	s.consider([]vp8lTransform{transform}, vp8lPredictorPixelStream(s.source, mode), s.source.width)
 }
 
 func searchVP8LStreaming(source vp8lSource, mode Mode) (*vp8lStreamingPlan, error) {
@@ -52,33 +82,19 @@ func searchVP8LStreaming(source vp8lSource, mode Mode) (*vp8lStreamingPlan, erro
 	}
 
 	alpha, table, paletteOK := vp8lStreamingSourceInfo(source)
-	var best *vp8lStreamingPlan
-	consider := func(transforms []vp8lTransform, stream vp8lPixelStream, imageWidth int) {
-		for _, tokens := range []vp8lTokenStream{
-			vp8lLiteralTokenStream(stream),
-			vp8lGreedyTokenStream(stream, imageWidth),
-		} {
-			group, dataBits := vp8lAnalyzeStreamingTokens(tokens)
-			candidate := newVP8LStreamingPlan(source.width, source.height, alpha, transforms, group, dataBits, tokens)
-			if best == nil || candidate.payloadBitLen() < best.payloadBitLen() {
-				best = candidate
-			}
-		}
-	}
+	search := vp8lStreamingSearch{source: source, alpha: alpha}
 
 	directStream := vp8lSourcePixelStream(source, nil)
-	consider(nil, directStream, source.width)
+	search.consider(nil, directStream, source.width)
 
 	if mode != ModeFast {
-		consider(
+		search.consider(
 			[]vp8lTransform{{kind: vp8lTransformSubtractGreen}},
 			vp8lSourcePixelStream(source, vp8lSubtractGreenPixel),
 			source.width,
 		)
 		for _, predictorMode := range vp8lStreamingPredictorModes(mode) {
-			modes, transformWidth, transformHeight := vp8lUniformPredictorImage(source.width, source.height, 9, predictorMode)
-			transform := vp8lPredictorTransform(9, modes, transformWidth, transformHeight)
-			consider([]vp8lTransform{transform}, vp8lPredictorPixelStream(source, predictorMode), source.width)
+			search.considerPredictor(predictorMode)
 		}
 	}
 
@@ -86,10 +102,10 @@ func searchVP8LStreaming(source vp8lSource, mode Mode) (*vp8lStreamingPlan, erro
 		for _, candidateTable := range vp8lPaletteOrders(table) {
 			transform := vp8lStreamingPaletteTransform(candidateTable)
 			stream, indexedWidth := vp8lPalettePixelStream(source, candidateTable)
-			consider([]vp8lTransform{transform}, stream, indexedWidth)
+			search.consider([]vp8lTransform{transform}, stream, indexedWidth)
 		}
 	}
-	return best, nil
+	return search.best, nil
 }
 
 func newVP8LStreamingPlan(width int, height int, alpha bool, transforms []vp8lTransform, group vp8lCodeGroup, dataBits uint64, tokens vp8lTokenStream) *vp8lStreamingPlan {
@@ -113,7 +129,7 @@ func newVP8LStreamingPlan(width int, height int, alpha bool, transforms []vp8lTr
 func vp8lAnalyzeStreamingTokens(tokens vp8lTokenStream) (vp8lCodeGroup, uint64) {
 	var counts vp8lLiteralCounts
 	var extraBits uint64
-	tokens(func(token vp8lToken) {
+	tokens(func(token vp8lToken) bool {
 		switch token.kind() {
 		case vp8lTokenLiteral:
 			counts.observe(token.literal())
@@ -124,35 +140,40 @@ func vp8lAnalyzeStreamingTokens(tokens vp8lTokenStream) (vp8lCodeGroup, uint64) 
 			counts.distance[distancePrefix.code]++
 			extraBits += uint64(lengthPrefix.extraBits + distancePrefix.extraBits)
 		}
+		return true
 	})
 	group, dataBits := counts.codeGroupAndDataBits()
 	return group, dataBits + extraBits
 }
 
 func vp8lLiteralTokenStream(stream vp8lPixelStream) vp8lTokenStream {
-	return func(visit func(vp8lToken)) {
-		stream(func(pixel uint32) {
-			visit(vp8lLiteralToken(pixel))
+	return func(visit func(vp8lToken) bool) {
+		stream(func(pixel uint32) bool {
+			return visit(vp8lLiteralToken(pixel))
 		})
 	}
 }
 
 func vp8lGreedyTokenStream(stream vp8lPixelStream, width int) vp8lTokenStream {
-	return func(visit func(vp8lToken)) {
+	return func(visit func(vp8lToken) bool) {
 		previous := make([]uint32, width)
 		current := make([]uint32, width)
 		filled := 0
 		hasPrevious := false
-		stream(func(pixel uint32) {
+		stream(func(pixel uint32) bool {
 			current[filled] = pixel
 			filled++
 			if filled != width {
-				return
+				return true
 			}
-			vp8lEmitGreedyRow(current, previous, hasPrevious, width, visit)
-			previous, current = current, previous
+			// Clear the pending row before emission so cancellation cannot emit it again.
 			filled = 0
+			if !vp8lEmitGreedyRow(current, previous, hasPrevious, width, visit) {
+				return false
+			}
+			previous, current = current, previous
 			hasPrevious = true
+			return true
 		})
 		if filled != 0 {
 			vp8lEmitGreedyRow(current[:filled], previous[:filled], hasPrevious, width, visit)
@@ -160,7 +181,7 @@ func vp8lGreedyTokenStream(stream vp8lPixelStream, width int) vp8lTokenStream {
 	}
 }
 
-func vp8lEmitGreedyRow(current []uint32, previous []uint32, hasPrevious bool, distance int, visit func(vp8lToken)) {
+func vp8lEmitGreedyRow(current []uint32, previous []uint32, hasPrevious bool, distance int, visit func(vp8lToken) bool) bool {
 	for x := 0; x < len(current); {
 		maxLength := minInt(vp8lMaxBackwardRefLength, len(current)-x)
 		runLength := 0
@@ -185,18 +206,23 @@ func vp8lEmitGreedyRow(current []uint32, previous []uint32, hasPrevious bool, di
 		if length >= vp8lMinBackwardRefLength {
 			distanceCode, ok := vp8lDistanceCodeForPositionDistance(matchDistance, distance)
 			if ok {
-				visit(vp8lCopyToken(length, distanceCode))
+				if !visit(vp8lCopyToken(length, distanceCode)) {
+					return false
+				}
 				x += length
 				continue
 			}
 		}
-		visit(vp8lLiteralToken(current[x]))
+		if !visit(vp8lLiteralToken(current[x])) {
+			return false
+		}
 		x++
 	}
+	return true
 }
 
 func vp8lSourcePixelStream(source vp8lSource, transform func(uint32) uint32) vp8lPixelStream {
-	return func(visit func(uint32)) {
+	return func(visit func(uint32) bool) {
 		row := make([]uint32, source.width)
 		for y := range source.height {
 			source.readRow(y, row)
@@ -204,7 +230,9 @@ func vp8lSourcePixelStream(source vp8lSource, transform func(uint32) uint32) vp8
 				if transform != nil {
 					pixel = transform(pixel)
 				}
-				visit(pixel)
+				if !visit(pixel) {
+					return
+				}
 			}
 		}
 	}
@@ -219,7 +247,7 @@ func vp8lSubtractGreenPixel(pixel uint32) uint32 {
 }
 
 func vp8lPredictorPixelStream(source vp8lSource, mode uint8) vp8lPixelStream {
-	return func(visit func(uint32)) {
+	return func(visit func(uint32) bool) {
 		previous := make([]uint32, source.width)
 		current := make([]uint32, source.width)
 		for y := range source.height {
@@ -245,7 +273,9 @@ func vp8lPredictorPixelStream(source vp8lSource, mode uint8) vp8lPixelStream {
 						vp8lUnpackPixel(previous[x-1]),
 					))
 				}
-				visit(vp8lSubPixels(pixel, predictor))
+				if !visit(vp8lSubPixels(pixel, predictor)) {
+					return
+				}
 			}
 			previous, current = current, previous
 		}
@@ -322,7 +352,7 @@ func vp8lPalettePixelStream(source vp8lSource, table []uint32) (vp8lPixelStream,
 	groupSize := 1 << widthBits
 	bitsPerIndex := 8 / groupSize
 	indexedWidth := vp8lDivRoundUp(source.width, groupSize)
-	return func(visit func(uint32)) {
+	return func(visit func(uint32) bool) {
 		row := make([]uint32, source.width)
 		for y := range source.height {
 			source.readRow(y, row)
@@ -335,7 +365,9 @@ func vp8lPalettePixelStream(source vp8lSource, table []uint32) (vp8lPixelStream,
 					}
 					packed |= index[row[sourceX]] << uint(i*bitsPerIndex)
 				}
-				visit(0xff000000 | uint32(packed)<<8)
+				if !visit(0xff000000 | uint32(packed)<<8) {
+					return
+				}
 			}
 		}
 	}, indexedWidth

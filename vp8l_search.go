@@ -167,11 +167,19 @@ func vp8lBestStreamingPlan(source vp8lSource) (vp8lEncodedPlan, error) {
 	if err != nil {
 		return nil, err
 	}
-	bestPlan, err := searchVP8LStreaming(source, ModeBestCompression)
-	if err != nil {
-		return nil, err
+	search := vp8lStreamingSearch{source: source, alpha: defaultPlan.alpha, best: defaultPlan}
+	var evaluated [14]bool
+	for _, mode := range vp8lStreamingPredictorModes(ModeDefault) {
+		evaluated[mode] = true
 	}
-	return vp8lSmallerPlan(defaultPlan, bestPlan), nil
+	// Direct, subtract-green, and palette candidates are shared with Default.
+	// Preserve Best's order for its additional predictors and retain Default on ties.
+	for _, mode := range vp8lStreamingPredictorModes(ModeBestCompression) {
+		if !evaluated[mode] {
+			search.considerPredictor(mode)
+		}
+	}
+	return search.best, nil
 }
 
 func vp8lSmallerPlan(left vp8lEncodedPlan, right vp8lEncodedPlan) vp8lEncodedPlan {

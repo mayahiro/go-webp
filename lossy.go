@@ -48,6 +48,7 @@ func encodeLossyConfig(w io.Writer, source encoderSource, lossyConfig vp8LossyCo
 	}
 
 	var defaultFrame []byte
+	var frameSource vp8Source
 	if lossyConfig.defaultFrameIncumbent {
 		defaultConfig := makeVP8LossyConfig(lossyConfig.qualityProfile(), vp8EffortProfileForModeQIndex(ModeDefault, lossyConfig.qIndex))
 		defaultSource := newVP8Source(source, defaultConfig.materializeSource)
@@ -59,11 +60,17 @@ func encodeLossyConfig(w io.Writer, source encoderSource, lossyConfig vp8LossyCo
 		if err != nil {
 			return err
 		}
+		if defaultSource.materialized() && lossyConfig.materializeSource && defaultConfig.sharpYUV == lossyConfig.sharpYUV {
+			// Frame searches only read the prepared plane; matching conversion settings can share it.
+			frameSource = defaultSource
+		}
 	}
 
-	vp8Source := newVP8Source(source, lossyConfig.materializeSource)
-	if lossyConfig.sharpYUV && vp8Source.materialized() {
-		vp8Source.applySharpChroma(instrumentLossyPixelReader(source.pixels()))
+	if !frameSource.materialized() {
+		frameSource = newVP8Source(source, lossyConfig.materializeSource)
+		if lossyConfig.sharpYUV && frameSource.materialized() {
+			frameSource.applySharpChroma(instrumentLossyPixelReader(source.pixels()))
+		}
 	}
 	var alphaAnalysis lossyAlphaAnalysis
 	var readPixel pixelReader
@@ -79,7 +86,7 @@ func encodeLossyConfig(w io.Writer, source encoderSource, lossyConfig vp8LossyCo
 			alphaAnalysis = analyzeLossyAlphaConfig(readPixel, source.bounds, source.width, source.height, alphaConfig)
 		}
 	}
-	frame, err := encodeVP8KeyFrameSource(vp8Source, lossyConfig)
+	frame, err := encodeVP8KeyFrameSource(frameSource, lossyConfig)
 	if alphaDone != nil {
 		alphaAnalysis = <-alphaDone
 	}
@@ -113,7 +120,13 @@ func lossyStandardImageOpaque(m image.Image) bool {
 		return img.Opaque()
 	case *image.RGBA:
 		return img.Opaque()
+	case *image.NRGBA64:
+		return img.Opaque()
+	case *image.RGBA64:
+		return img.Opaque()
 	case *image.Gray:
+		return img.Opaque()
+	case *image.Gray16:
 		return img.Opaque()
 	case *image.YCbCr:
 		return img.Opaque()

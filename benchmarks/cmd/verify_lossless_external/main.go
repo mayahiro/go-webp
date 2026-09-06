@@ -181,7 +181,7 @@ func decodeWithXImage(webpPath string, pngPath string) error {
 	}
 	defer os.RemoveAll(dir)
 
-	module := fmt.Sprintf("module verify\n\ngo 1.25.0\n\nrequire golang.org/x/image %s\n", xImageDecoderVersion)
+	module := fmt.Sprintf("module verify\n\ngo 1.26.0\n\nrequire golang.org/x/image %s\n", xImageDecoderVersion)
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(module), 0o600); err != nil {
 		return err
 	}

@@ -131,6 +131,55 @@ func TestLossyCountersBestCompressionFixture(t *testing.T) {
 	}
 }
 
+func TestLossyCountersBestCompressionReusesHighQualitySource(t *testing.T) {
+	const width, height = 64, 64
+	img := newLossyCounterFixture(width, height, false)
+	resetLossyCountersForTest()
+	encodeLossyCounterFixture(t, img, &Options{Compression: CompressionLossy, Quality: 100, Mode: ModeDefault})
+	defaultCounts := lossyCountersForTest()
+	resetLossyCountersForTest()
+	encodeLossyCounterFixture(t, img, &Options{Compression: CompressionLossy, Quality: 100, Mode: ModeBestCompression})
+	bestCounts := lossyCountersForTest()
+	if bestCounts.PreparedSourceBytes != width*height*3 {
+		t.Fatalf("prepared source bytes = %d, want one plane (%d)", bestCounts.PreparedSourceBytes, width*height*3)
+	}
+	if defaultCounts.SharpChromaCandidates == 0 || bestCounts.SharpChromaCandidates != defaultCounts.SharpChromaCandidates {
+		t.Fatalf("sharp candidates = %d, want one preparation (%d)", bestCounts.SharpChromaCandidates, defaultCounts.SharpChromaCandidates)
+	}
+	if bestCounts.Macroblocks != 2*defaultCounts.Macroblocks {
+		t.Fatalf("macroblocks = %d, want both frame searches (%d)", bestCounts.Macroblocks, 2*defaultCounts.Macroblocks)
+	}
+}
+
+func TestLossyCountersOpaque16BitImagesSkipAlpha(t *testing.T) {
+	const size = 64
+	bounds := image.Rect(-3, 5, size-3, size+5)
+	rgba := image.NewRGBA64(bounds.Inset(-1)).SubImage(bounds).(*image.RGBA64)
+	nrgba := image.NewNRGBA64(bounds.Inset(-1)).SubImage(bounds).(*image.NRGBA64)
+	gray := image.NewGray16(bounds)
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			value := uint16(uint8(x*37+y*13)) * 257
+			rgba.SetRGBA64(x, y, color.RGBA64{R: value, G: value, B: value, A: 65535})
+			nrgba.SetNRGBA64(x, y, color.NRGBA64{R: value, G: value, B: value, A: 65535})
+			gray.SetGray16(x, y, color.Gray16{Y: value})
+		}
+	}
+	for _, img := range []image.Image{rgba, nrgba, gray} {
+		resetLossyCountersForTest()
+		opts := &Options{Compression: CompressionLossy, Mode: ModeBestCompression, Quality: 100}
+		got := encodeLossyCounterFixture(t, img, opts)
+		counts := lossyCountersForTest()
+		if counts.AlphaFilters != 0 || counts.AlphaOptimalRows != 0 {
+			t.Errorf("%T alpha filters/optimal rows = %d/%d, want 0/0", img, counts.AlphaFilters, counts.AlphaOptimalRows)
+		}
+		want := encodeLossyCounterFixture(t, benchmarkImageWrapper{Image: img}, opts)
+		if !bytes.Equal(got, want) {
+			t.Errorf("%T output differs from generic image path", img)
+		}
+	}
+}
+
 func TestLossyCountersExplicitTrellisFixture(t *testing.T) {
 	resetLossyCountersForTest()
 	img := newLossyCounterFixture(64, 64, false)

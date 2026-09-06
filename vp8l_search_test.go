@@ -85,6 +85,49 @@ func TestVP8LUniformSearchSkipsPaletteAnalysis(t *testing.T) {
 	}
 }
 
+func TestVP8LBestStreamingReusesDefaultSearch(t *testing.T) {
+	for _, kind := range []benchmarkImageKind{benchmarkImageFlat, benchmarkImageGradient, benchmarkImageUI, benchmarkImagePhotoLike, benchmarkImageAlpha} {
+		img := newLosslessBenchmarkFixtureImage(losslessBenchmarkCase{kind: kind, width: 41, height: 29})
+		source := newEncoderSource(img)
+		streamSource := newVP8LSource(source, source.pixels())
+		rowsRead := 0
+		readRow := streamSource.readRow
+		streamSource.readRow = func(y int, row []uint32) {
+			rowsRead++
+			readRow(y, row)
+		}
+		defaultPlan, err := searchVP8LStreaming(streamSource, ModeDefault)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bestPlan, err := searchVP8LStreaming(streamSource, ModeBestCompression)
+		if err != nil {
+			t.Fatal(err)
+		}
+		independentReads := rowsRead
+		var want bytes.Buffer
+		if err := writeLosslessVP8L(&want, vp8lSmallerPlan(defaultPlan, bestPlan)); err != nil {
+			t.Fatal(err)
+		}
+		rowsRead = 0
+		plan, err := vp8lBestStreamingPlan(streamSource)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rowsRead >= independentReads {
+			t.Errorf("fixture %d read %d rows, independent searches read %d", kind, rowsRead, independentReads)
+		}
+		var got bytes.Buffer
+		if err := writeLosslessVP8L(&got, plan); err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got.Bytes(), want.Bytes()) {
+			t.Errorf("fixture %d changed streaming output", kind)
+		}
+		assertVP8LRoundTrip(t, got.Bytes(), img)
+	}
+}
+
 func TestVP8LBestWorkspaceFallbackAvoidsSourceMaterialization(t *testing.T) {
 	source := vp8lWorkspaceFallbackSourceForTest()
 	for _, mode := range []Mode{ModeDefault, ModeBestCompression} {

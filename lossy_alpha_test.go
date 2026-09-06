@@ -247,6 +247,22 @@ func TestVP8FirstPartitionWritesTokenProbUpdate(t *testing.T) {
 	}
 }
 
+func TestLossyAlphaOpaqueSourceIsReadOnce(t *testing.T) {
+	const width, height = 64, 64
+	reads := 0
+	readPixel := func(x, y int) color.NRGBA {
+		reads++
+		return color.NRGBA{R: uint8(x), G: uint8(y), A: 255}
+	}
+	analysis := analyzeLossyAlphaConfig(readPixel, image.Rect(0, 0, width, height), width, height, lossyAlphaConfigForMode(ModeBestCompression))
+	if analysis.hasAlpha {
+		t.Fatal("opaque source was reported as transparent")
+	}
+	if reads != width*height {
+		t.Fatalf("source reads = %d, want one pass (%d)", reads, width*height)
+	}
+}
+
 func TestEncodeLossyWithAlphaWritesExtendedChunks(t *testing.T) {
 	img := image.NewNRGBA(image.Rect(4, 5, 7, 7))
 	wantAlpha := []byte{255, 128, 0, 64, 200, 255}

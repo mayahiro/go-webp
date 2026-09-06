@@ -106,11 +106,13 @@ bufferを使うprofileは次の段階的な上限付きsearchを行います
 `ModeFast` と `ModeLowMemory` はcheapなtransformとgreedy matchを持つrow-streaming pathを使用します
 bufferを使うmodeでもsourceまたは推定search workspaceが設定上限を超える場合はstreamingへfallbackします
 `ModeBalanced` はbufferを使う場合もstreamingの場合も `ModeDefault` と同じsearch budgetを使います
+streaming出力中にwriterがerrorを返した場合はsource行の読み取りを中断し、そのerrorを呼び出し元へ返します
 
 `ModeBestCompression` はDefaultの完全planをincumbentとして保持し、同じsearch sessionでbudgetを拡張します
 source pixels、palette解析、candidate score、Default winnerは再利用されます
 拡張結果のexact payloadが小さい場合だけ置き換えるため、同じ入力で `ModeDefault` より大きいlossless payloadを出力しません
 両方のsearchが推定workspace上限を超える場合は、source planeを作らずにstreaming planを選択します
+Defaultのstreaming候補を一度だけ評価し、`ModeBestCompression` 固有のpredictorだけを追加します。同サイズではDefaultのplanを保持します
 
 matcherは制限なしのhash chainを使いません
 各profileはcandidate数、edge数、parse反復、entropy group、worker、workspace推定を制限するため、より広いsearchを行うencoderより出力が大きくなる入力もあります
@@ -133,6 +135,7 @@ lossy encoderは4:2:0 chromaを持つintra-only VP8 key frameを書きます
 `ModeBestCompression` は `ModeDefault` と同じquality objectiveを使い、sharp chromaを常に有効にし、2回目のrate-distortion passとresidual token probability学習後のluma4x4 modeに対する幅2の上限付きrefinementを追加します
 完全な `ModeDefault` VP8 frameをexact-size incumbentとして保持し、追加searchのframeが小さい場合だけ置き換えます
 同じqualityで大きいVP8 frameを防ぐ一方、両planを評価するため大幅に時間がかかる場合があります
+両searchのsource materializationとsharp chroma設定が一致する場合は、前処理済みsource planeを共有します
 
 VP8のfirst partition lengthは19 bitsです
 選択したlossy planが上限を超える場合、encoderはfirst partition signalingを段階的に減らして決定的に再試行します
@@ -148,7 +151,8 @@ encoderはcompressed alphaとraw alphaを比較し、小さい表現を使用し
 compressed lossy alphaはglobal filter、frequency-coded residual、連続runと前行spatial match向けの上限付きbackward referenceを使います
 `ModeFast` はunfiltered alphaと連続runへsearchを限定します
 `ModeLowMemory` はfilter searchを維持しつつ前行候補を省き、`ModeBestCompression` はrunと前行候補へ上限付きoptimal parsingを適用します
-完全にopaqueな標準画像型ではalpha候補解析を省き、custom画像実装では一般的な解析pathを使います
+`image.NRGBA64`、`image.RGBA64`、`image.Gray16` を含む、完全にopaqueな標準画像型ではalpha候補解析を省きます
+custom画像実装では一般的な解析pathを使い、その走査でalphaがないと分かった場合はoptimal alpha parsingを省きます
 
 ## InputとResource特性
 

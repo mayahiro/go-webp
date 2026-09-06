@@ -1,6 +1,6 @@
 module github.com/mayahiro/go-webp/tools
 
-go 1.25.0
+go 1.26.0
 
 tool (
 	github.com/google/pprof

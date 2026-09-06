@@ -17,7 +17,7 @@ encoders.
   low-memory operation
 - Direct support for common standard image types and a general `image.Image`
   fallback
-- Go 1.25.0 or later
+- Go 1.26.0 or later
 
 go-webp intentionally focuses on static image encoding. For decoding, use
 [`golang.org/x/image/webp`](https://pkg.go.dev/golang.org/x/image/webp).
