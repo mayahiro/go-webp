@@ -151,6 +151,45 @@ func TestLossyCountersBestCompressionReusesHighQualitySource(t *testing.T) {
 	}
 }
 
+func TestLossyCountersSharpChromaAvoidsDuplicateCandidates(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		cb, cr     uint8
+		candidates uint64
+	}{
+		{name: "center", cb: 128, cr: 128, candidates: 25},
+		{name: "lower-corner", cb: 0, cr: 0, candidates: 9},
+		{name: "upper-corner", cb: 255, cr: 255, candidates: 9},
+		{name: "opposite-corners", cb: 0, cr: 255, candidates: 9},
+		{name: "near-corners", cb: 1, cr: 254, candidates: 16},
+		{name: "edge", cb: 0, cr: 128, candidates: 15},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			img := image.NewYCbCr(image.Rect(-3, 5, 0, 10), image.YCbCrSubsampleRatio444)
+			for i := range img.Y {
+				img.Y[i], img.Cb[i], img.Cr[i] = 128, tc.cb, tc.cr
+			}
+			source := newEncoderSource(img)
+			prepared := newVP8Source(source, true)
+			// Set VP8 chroma directly so input range conversion cannot hide clipped candidates.
+			for i := range source.width * source.height {
+				prepared.plane.data[prepared.plane.cbBase+i] = tc.cb
+				prepared.plane.data[prepared.plane.crBase+i] = tc.cr
+			}
+			resetLossyCountersForTest()
+			prepared.applySharpChroma(instrumentLossyPixelReader(source.pixels()))
+			got := lossyCountersForTest()
+			// Six chroma blocks share the same two centers, including partial edge blocks.
+			if got.SharpChromaCandidates != 6*tc.candidates {
+				t.Errorf("sharp candidates = %d, want %d unique candidates", got.SharpChromaCandidates, 6*tc.candidates)
+			}
+			if got.SourcePixelReads != 15 {
+				t.Errorf("source reads = %d, want 15", got.SourcePixelReads)
+			}
+		})
+	}
+}
+
 func TestLossyCountersOpaque16BitImagesSkipAlpha(t *testing.T) {
 	const size = 64
 	bounds := image.Rect(-3, 5, size-3, size+5)

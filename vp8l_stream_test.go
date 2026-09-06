@@ -10,6 +10,41 @@ import (
 	"testing"
 )
 
+func TestVP8LStreamingConsiderReadsSourceOnce(t *testing.T) {
+	for _, kind := range []benchmarkImageKind{benchmarkImageFlat, benchmarkImageChecker, benchmarkImagePhotoLike} {
+		img := newBenchmarkFixtureImage(lossyBenchmarkCase{kind: kind, width: 16, height: 7})
+		source := newVP8LSource(newEncoderSource(img), pixelReaderFor(img))
+		rowsRead := 0
+		readRow := source.readRow
+		source.readRow = func(y int, row []uint32) {
+			rowsRead++
+			readRow(y, row)
+		}
+		search := vp8lStreamingSearch{source: source}
+		stream := vp8lSourcePixelStream(source, nil)
+		search.consider(nil, stream, source.width)
+		if rowsRead != source.height {
+			t.Errorf("%v: read %d rows while analyzing candidates, want %d", kind, rowsRead, source.height)
+		}
+		best := search.best
+		search.consider(nil, stream, source.width)
+		if search.best != best {
+			t.Errorf("%v: replaced the incumbent with an equal-size candidate", kind)
+		}
+		for range 2 {
+			rowsRead = 0
+			var output bytes.Buffer
+			if err := writeLosslessVP8L(&output, best); err != nil {
+				t.Fatal(err)
+			}
+			if rowsRead != source.height {
+				t.Errorf("%v: read %d rows while writing, want %d", kind, rowsRead, source.height)
+			}
+			assertVP8LRoundTrip(t, output.Bytes(), img)
+		}
+	}
+}
+
 func TestEncodeStreamingStopsReadingAfterWriterError(t *testing.T) {
 	img := image.NewNRGBA(image.Rect(-3, 5, 125, 133))
 	state := uint32(0x12345678)

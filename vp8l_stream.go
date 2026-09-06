@@ -58,12 +58,21 @@ type vp8lStreamingSearch struct {
 }
 
 func (s *vp8lStreamingSearch) consider(transforms []vp8lTransform, stream vp8lPixelStream, imageWidth int) {
-	for _, tokens := range []vp8lTokenStream{
-		vp8lLiteralTokenStream(stream),
-		vp8lGreedyTokenStream(stream, imageWidth),
+	// Count literal frequencies during greedy analysis to transform and read each pixel once.
+	var literals vp8lLiteralCounts
+	observedStream := func(visit func(uint32) bool) {
+		stream(func(pixel uint32) bool {
+			literals.observe(pixel)
+			return visit(pixel)
+		})
+	}
+	greedyGroup, greedyBits := vp8lAnalyzeStreamingTokens(vp8lGreedyTokenStream(observedStream, imageWidth))
+	literalGroup, literalBits := literals.codeGroupAndDataBits()
+	// Keep literal first for ties, and retain only the original streams for emission.
+	for _, candidate := range [2]*vp8lStreamingPlan{
+		newVP8LStreamingPlan(s.source.width, s.source.height, s.alpha, transforms, literalGroup, literalBits, vp8lLiteralTokenStream(stream)),
+		newVP8LStreamingPlan(s.source.width, s.source.height, s.alpha, transforms, greedyGroup, greedyBits, vp8lGreedyTokenStream(stream, imageWidth)),
 	} {
-		group, dataBits := vp8lAnalyzeStreamingTokens(tokens)
-		candidate := newVP8LStreamingPlan(s.source.width, s.source.height, s.alpha, transforms, group, dataBits, tokens)
 		if s.best == nil || candidate.payloadBitLen() < s.best.payloadBitLen() {
 			s.best = candidate
 		}

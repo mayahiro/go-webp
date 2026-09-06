@@ -176,14 +176,21 @@ func (s *vp8Source) applySharpChroma(readPixel pixelReader) {
 			bestCb, bestCr := baselineCb, baselineCr
 			bestScore := block.score(bestCb, bestCr)
 			centers := [2][2]uint8{{baselineCb, baselineCr}, {meanCb, meanCr}}
-			for _, center := range centers {
-				for cbDelta := -2; cbDelta <= 2; cbDelta++ {
-					cb := uint8(clipInt(int(center[0])+cbDelta, 0, 255))
-					for crDelta := -2; crDelta <= 2; crDelta++ {
-						cr := uint8(clipInt(int(center[1])+crDelta, 0, 255))
-						score := block.score(cb, cr)
+			for centerIndex, center := range centers {
+				minCb, maxCb := max(0, int(center[0])-2), min(255, int(center[0])+2)
+				minCr, maxCr := max(0, int(center[1])-2), min(255, int(center[1])+2)
+				for cb := minCb; cb <= maxCb; cb++ {
+					for cr := minCr; cr <= maxCr; cr++ {
+						// Skip previously scored values without changing the order of distinct candidates.
+						if cb == int(baselineCb) && cr == int(baselineCr) {
+							continue
+						}
+						if centerIndex == 1 && absInt(cb-int(baselineCb)) <= 2 && absInt(cr-int(baselineCr)) <= 2 {
+							continue
+						}
+						score := block.score(uint8(cb), uint8(cr))
 						if score < bestScore {
-							bestCb, bestCr, bestScore = cb, cr, score
+							bestCb, bestCr, bestScore = uint8(cb), uint8(cr), score
 						}
 					}
 				}
