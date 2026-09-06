@@ -289,8 +289,7 @@ func percentile(sorted []int64, percentile int) int64 {
 }
 
 func anonymousEntryError(index int, err error) error {
-	var pathError *os.PathError
-	if errors.As(err, &pathError) {
+	if pathError, ok := errors.AsType[*os.PathError](err); ok {
 		err = pathError.Err
 	}
 	return fmt.Errorf("corpus entry %d: %w", index, err)

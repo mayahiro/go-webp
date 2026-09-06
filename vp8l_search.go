@@ -34,6 +34,8 @@ func searchVP8L(source vp8lSource, budget vp8lBudget) (*vp8lPlan, error) {
 }
 
 func (s *vp8lSearchSession) search(budget vp8lBudget, reuseScoredCandidates bool) (*vp8lPlan, error) {
+	s.source.cancel.check()
+	budget.cancel = s.source.cancel
 	pixelCount := uint64(s.source.width) * uint64(s.source.height)
 	if vp8lBufferedSearchBytes(pixelCount, budget) > budget.maxWorkspaceBytes {
 		return nil, errVP8LSourceLimit
@@ -64,11 +66,12 @@ func (s *vp8lSearchSession) search(budget vp8lBudget, reuseScoredCandidates bool
 		reservoir.seedScoredCandidates(s.reusableKeys)
 	}
 	addCandidate := func(candidate vp8lTransformCandidate) {
+		budget.cancel.check()
 		counters.recordGeneratedCandidate(len(candidate.pixels), len(candidate.transforms) != 0)
 		reservoir.add(candidate)
 	}
 	addCandidate(direct)
-	workspace := &vp8lSearchWorkspace{counters: counters}
+	workspace := &vp8lSearchWorkspace{counters: counters, cancel: budget.cancel}
 	if earlyPalette != nil {
 		vp8lForEachPaletteCandidateWithTable(s.pixels, s.source.width, s.source.height, earlyPalette, budget, &workspace.transform, addCandidate)
 	} else {
@@ -101,6 +104,7 @@ func (s *vp8lSearchSession) search(budget vp8lBudget, reuseScoredCandidates bool
 		}
 	}
 	shortlist := reservoir.finalists(budget.shallowCandidates)
+	budget.cancel.check()
 	finalists := vp8lSelectExactFinalists(s.source.width, s.source.height, s.alpha, shortlist, budget, workspace)
 	budget.counters.recordExactFinalists(len(finalists))
 	plans := vp8lBuildFinalPlans(s.source.width, s.source.height, s.alpha, finalists, budget, workspace)
@@ -125,7 +129,13 @@ func (s *vp8lSearchSession) paletteTable() ([]uint32, bool) {
 }
 
 func vp8lBestPlanOrStreaming(source vp8lSource) (vp8lEncodedPlan, error) {
+	defaultBudget := vp8lBudgetForMode(ModeDefault)
 	bestBudget := vp8lBudgetForMode(ModeBestCompression)
+	pixelCount := uint64(source.width) * uint64(source.height)
+	if vp8lBufferedSearchBytes(pixelCount, defaultBudget) > defaultBudget.maxWorkspaceBytes &&
+		vp8lBufferedSearchBytes(pixelCount, bestBudget) > bestBudget.maxWorkspaceBytes {
+		return vp8lBestStreamingPlan(source)
+	}
 	session, err := newVP8LSearchSession(source, bestBudget.maxSourceBytes)
 	if errors.Is(err, errVP8LSourceLimit) {
 		return vp8lBestStreamingPlan(source)
@@ -161,11 +171,19 @@ func vp8lBestStreamingPlan(source vp8lSource) (vp8lEncodedPlan, error) {
 	if err != nil {
 		return nil, err
 	}
-	bestPlan, err := searchVP8LStreaming(source, ModeBestCompression)
-	if err != nil {
-		return nil, err
+	search := vp8lStreamingSearch{source: source, alpha: defaultPlan.alpha, best: defaultPlan}
+	var evaluated [14]bool
+	for _, mode := range vp8lStreamingPredictorModes(ModeDefault) {
+		evaluated[mode] = true
 	}
-	return vp8lSmallerPlan(defaultPlan, bestPlan), nil
+	// Direct, subtract-green, and palette candidates are shared with Default.
+	// Preserve Best's order for its additional predictors and retain Default on ties.
+	for _, mode := range vp8lStreamingPredictorModes(ModeBestCompression) {
+		if !evaluated[mode] {
+			search.considerPredictor(mode)
+		}
+	}
+	return search.best, nil
 }
 
 func vp8lSmallerPlan(left vp8lEncodedPlan, right vp8lEncodedPlan) vp8lEncodedPlan {

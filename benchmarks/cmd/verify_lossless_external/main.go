@@ -31,6 +31,7 @@ type fixture struct {
 	name         string
 	img          image.Image
 	opts         *webp.Options
+	metadata     *webp.Metadata
 	want         image.Image
 	lossy        bool
 	maxRGBMAE    float64
@@ -105,7 +106,7 @@ func verifyFixture(dir string, decoder decoderKind, f fixture) error {
 	pngPath := filepath.Join(dir, f.name+".png")
 
 	var encoded bytes.Buffer
-	if err := webp.Encode(&encoded, f.img, f.opts); err != nil {
+	if err := webp.EncodeWithMetadata(&encoded, f.img, f.opts, f.metadata); err != nil {
 		return fmt.Errorf("%s: encode failed: %w", f.name, err)
 	}
 	if err := os.WriteFile(webpPath, encoded.Bytes(), 0o600); err != nil {
@@ -181,7 +182,7 @@ func decodeWithXImage(webpPath string, pngPath string) error {
 	}
 	defer os.RemoveAll(dir)
 
-	module := fmt.Sprintf("module verify\n\ngo 1.25.0\n\nrequire golang.org/x/image %s\n", xImageDecoderVersion)
+	module := fmt.Sprintf("module verify\n\ngo 1.26.0\n\nrequire golang.org/x/image %s\n", xImageDecoderVersion)
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(module), 0o600); err != nil {
 		return err
 	}
@@ -318,7 +319,7 @@ func absDiff8(a uint8, b uint8) int {
 }
 
 func fixtures() []fixture {
-	return []fixture{
+	all := []fixture{
 		{name: "flat", img: flatFixture()},
 		{name: "gradient", img: gradientFixture()},
 		{name: "gray-gradient-256", img: grayGradient256Fixture()},
@@ -356,6 +357,26 @@ func fixtures() []fixture {
 			alphaExact:   true,
 		},
 	}
+	// Opaque payloads exercise container handling, not ICC, Exif, or XML parsing.
+	metadata := &webp.Metadata{ICCProfile: []byte{0, 128, 255}, EXIF: []byte("Exif\x00\x00"), XMP: []byte("<x/>")}
+	for _, f := range all {
+		switch f.name {
+		case "flat", "hidden-rgb-alpha", "near-lossless", "lossy-quality":
+			f.name += "-metadata"
+			f.metadata = metadata
+			all = append(all, f)
+		}
+	}
+	alpha := lossyQualityFixture()
+	for i := 3; i < len(alpha.Pix); i += 4 {
+		alpha.Pix[i] = uint8(i)
+	}
+	all = append(all, fixture{
+		name: "lossy-alpha-metadata", img: alpha, metadata: metadata,
+		opts:  &webp.Options{Compression: webp.CompressionLossy, Quality: 75},
+		lossy: true, maxRGBMAE: 24, maxRGBMaxAbs: 96, alphaExact: true,
+	})
+	return all
 }
 
 func hiddenRGBFixture() image.Image {

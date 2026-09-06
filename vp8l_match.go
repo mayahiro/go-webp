@@ -32,6 +32,7 @@ func buildVP8LMatchGraph(pixels []uint32, width int, budget vp8lBudget) vp8lMatc
 }
 
 func buildVP8LMatchGraphWorkspace(pixels []uint32, width int, budget vp8lBudget, workspace *vp8lSearchWorkspace) vp8lMatchGraph {
+	budget.cancel.check()
 	hashBits := vp8lMatchHashBits(len(pixels), budget)
 	head, previous, starts, edges := workspace.resetMatchGraph(len(pixels), 1<<hashBits)
 	graph := vp8lMatchGraph{starts: starts, edges: edges}
@@ -46,6 +47,9 @@ func buildVP8LMatchGraphWorkspace(pixels []uint32, width int, budget vp8lBudget,
 		previous[i] = -1
 	}
 	for position := 0; position+2 < len(pixels); position++ {
+		if position&4095 == 0 {
+			budget.cancel.check()
+		}
 		hash := vp8lHashPixels(pixels, position) >> (vp8lHashBits - hashBits)
 		previous[position] = head[hash]
 		head[hash] = int32(position)
@@ -55,6 +59,9 @@ func buildVP8LMatchGraphWorkspace(pixels []uint32, width int, budget vp8lBudget,
 	matches := make([]vp8lMatch, 0, budget.matchEdges)
 	chainProbes := 0
 	for position := len(pixels) - 1; position >= 0; position-- {
+		if position&4095 == 0 {
+			budget.cancel.check()
+		}
 		matches = matches[:0]
 		matches, best := vp8lSpecialMatchesAt(pixels, width, position, states, matches, budget.matchEdges)
 		var probes int
@@ -65,6 +72,9 @@ func buildVP8LMatchGraphWorkspace(pixels []uint32, width int, budget vp8lBudget,
 
 		for position > 0 && vp8lCanExtendMatchLeft(pixels, position, best) {
 			position--
+			if position&4095 == 0 {
+				budget.cancel.check()
+			}
 			matches = matches[:0]
 			matches, localBest := vp8lSpecialMatchesAt(pixels, width, position, states, matches, budget.matchEdges)
 			best.match.length = uint16(minInt(vp8lMaxBackwardRefLength, int(best.match.length)+1))

@@ -22,7 +22,7 @@ func newNearLosslessReader(source encoderSource, quality int) pixelReader {
 	}
 	scratch := make([]color.NRGBA, source.width*3)
 	for passBits := bits; passBits > 0; passBits-- {
-		applyNearLosslessPass(plane.pixels, source.width, source.height, passBits, scratch)
+		applyNearLosslessPass(plane.pixels, source.width, source.height, passBits, scratch, source.cancel)
 	}
 	return plane.pixel
 }
@@ -31,7 +31,7 @@ func nearLosslessKeepsSmallImage(width int, height int) bool {
 	return width < nearLosslessMinDimension && height < nearLosslessMinDimension || height < 3
 }
 
-func applyNearLosslessPass(pixels []color.NRGBA, width int, height int, bits int, scratch []color.NRGBA) {
+func applyNearLosslessPass(pixels []color.NRGBA, width int, height int, bits int, scratch []color.NRGBA, cancel *encodeCancellation) {
 	if width == 0 || height == 0 {
 		return
 	}
@@ -46,6 +46,7 @@ func applyNearLosslessPass(pixels []color.NRGBA, width int, height int, bits int
 	limit := 1 << bits
 	step := uint8(limit)
 	for y := 0; y < height; y++ {
+		cancel.check()
 		if y > 0 && y < height-1 {
 			copy(next, pixels[(y+1)*width:(y+2)*width])
 			for x := 1; x < width-1; x++ {

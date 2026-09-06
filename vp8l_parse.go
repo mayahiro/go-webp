@@ -21,6 +21,7 @@ func buildVP8LImagePlan(pixels []uint32, width int, height int, budget vp8lBudge
 }
 
 func buildVP8LImagePlanWorkspace(pixels []uint32, width int, height int, budget vp8lBudget, workspace *vp8lSearchWorkspace) vp8lImagePlan {
+	budget.cancel.check()
 	budget.counters.recordHuffmanEmissionBuilds(5)
 	literalGroup, literalDataBits := vp8lLiteralCodeGroupAndDataBits(pixels)
 	literalCounter := vp8lBitCounter()
@@ -44,6 +45,7 @@ func buildVP8LImagePlanWorkspace(pixels []uint32, width int, height int, budget 
 
 	seed := best
 	for range budget.optimalPasses {
+		budget.cancel.check()
 		tokens := vp8lOptimalTokensWorkspace(pixels, graph, seed.group, nil, workspace)
 		budget.counters.recordHuffmanEmissionBuilds(5)
 		candidate := vp8lImagePlan{
@@ -77,6 +79,7 @@ func vp8lRefineEntropyPlanWorkspace(pixels []uint32, graph vp8lMatchGraph, best 
 
 func vp8lReparseEntropyPlanWorkspace(pixels []uint32, graph vp8lMatchGraph, best vp8lImagePlan, budget vp8lBudget, workspace *vp8lSearchWorkspace) vp8lImagePlan {
 	for range budget.entropyIterations {
+		budget.cancel.check()
 		if best.meta == nil {
 			break
 		}
@@ -370,13 +373,23 @@ func vp8lOptimalTokensForImageWorkspace(pixels []uint32, graph vp8lMatchGraph, i
 }
 
 func vp8lOptimalTokensWithGroups(pixels []uint32, graph vp8lMatchGraph, cacheHits []int32, groupAt func(int) *vp8lCodeGroup, workspace *vp8lSearchWorkspace) []vp8lToken {
+	var cancel *encodeCancellation
+	if workspace != nil {
+		cancel = workspace.cancel
+	}
+	cancel.check()
 	costs, selected := workspace.resetDP(len(pixels))
 	costs[0] = 0
 	for i := 1; i < len(costs); i++ {
 		costs[i] = vp8lInfiniteCost
 	}
 	relaxations := 0
+	var lastGroup *vp8lCodeGroup
+	var lengthCosts [nLengthCodes]uint16
 	for position, pixel := range pixels {
+		if position&4095 == 0 {
+			cancel.check()
+		}
 		if costs[position] == vp8lInfiniteCost {
 			continue
 		}
@@ -390,14 +403,32 @@ func vp8lOptimalTokensWithGroups(pixels []uint32, graph vp8lMatchGraph, cacheHit
 			relaxations++
 			vp8lRelaxToken(costs, selected, position+1, costs[position]+cacheCost, cache)
 		}
-		for _, match := range graph.at(position) {
+		matches := graph.at(position)
+		if len(matches) == 0 {
+			continue
+		}
+		// Trees stay immutable during a parse. Cache only length symbols
+		// used by this group. Zero means not computed;
+		// cached costs include one so zero-bit symbols remain distinguishable.
+		if group != lastGroup {
+			clear(lengthCosts[:])
+			lastGroup = group
+		}
+		for _, match := range matches {
 			var lengths [32]uint16
 			lengthCount := vp8lCandidateMatchLengths(int(match.length), &lengths)
 			relaxations += lengthCount
+			copyDistanceCost := group.distance.symbolCost(int(match.distanceSymbol), 7) + uint64(match.distanceExtraBits)
 			for _, rawLength := range lengths[:lengthCount] {
 				length := int(rawLength)
 				end := position + length
-				copyCost := group.copyCost(length, match)
+				prefix := vp8lLengthPrefixCosts[length]
+				lengthCost := lengthCosts[prefix.symbol]
+				if lengthCost == 0 {
+					lengthCost = uint16(group.green.symbolCost(nLiteralCodes+int(prefix.symbol), 10)) + 1
+					lengthCosts[prefix.symbol] = lengthCost
+				}
+				copyCost := uint64(lengthCost-1) + uint64(prefix.extraBits) + copyDistanceCost
 				vp8lRelaxToken(costs, selected, end, costs[position]+copyCost, vp8lCopyToken(length, int(match.distanceCode)))
 			}
 		}
@@ -454,12 +485,6 @@ func (group *vp8lCodeGroup) literalCost(pixel uint32) uint64 {
 		group.red.symbolCost(int(uint8(pixel>>16)), 9) +
 		group.blue.symbolCost(int(uint8(pixel)), 9) +
 		group.alpha.symbolCost(int(uint8(pixel>>24)), 9)
-}
-
-func (group *vp8lCodeGroup) copyCost(length int, match vp8lMatch) uint64 {
-	lengthPrefix := vp8lLengthPrefixCosts[length]
-	return group.green.symbolCost(nLiteralCodes+int(lengthPrefix.symbol), 10) + uint64(lengthPrefix.extraBits) +
-		group.distance.symbolCost(int(match.distanceSymbol), 7) + uint64(match.distanceExtraBits)
 }
 
 func (tree *vp8lHuffmanTree) symbolCost(symbol int, fallback uint64) uint64 {

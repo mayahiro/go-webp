@@ -7,7 +7,7 @@ private corpusとprivate benchmark reportはrepositoryに含めません
 
 ## 必要環境
 
-- Go 1.25.0以上
+- Go 1.26.0以上
 - `cwebp` と `dwebp` は任意のlibwebp比較と外部decode確認でのみ必要
 
 ## 標準検証
@@ -28,7 +28,8 @@ make verify-external ARGS='-decoder ximage'
 ```
 
 このコマンドはlossless fixtureをpixel完全一致で確認し、lossy fixtureをRGB誤差の上限で確認します
-generated setにはalpha 0かつhidden RGBが非ゼロのpixelを含みます
+generated setにはalpha 0かつhidden RGBが非ゼロのpixelと、metadata付きのlossless、near-lossless、opaque lossy、alpha付きlossy画像を含みます
+metadata fixtureは不透明なpayloadを使ってcontainerとpixelの互換性を確認し、payloadの形式の妥当性は検証しません
 CIはlibwebp `dwebp` 1.6.0と `golang.org/x/image/webp` v0.41.0を独立jobで実行し、各decoder versionをreportします
 dwebp archiveは公式WebM release siteから取得し、SHA-256を検証します
 decoder更新はencoder変更と分離し、conformance差分を個別にreviewします
@@ -42,12 +43,20 @@ decoderが受理したことだけをformat conformanceの根拠にはしませ�
 通常の `go test` ではcommit済みseed corpusを毎回実行します
 public `Encode` targetは全public mode、quality 1から100、NRGBA、RGBA、Gray、YCbCr、Paletted、opaqueとalpha、odd dimensions、non-zero origin、padding付きstride、決定的output、RIFF、VP8L、VP8、VP8X、ALPH構造を確認します
 `ModeBestCompression` を繰り返し実行できるように画像を8x8以下へ制限します
+同じtargetで、有効なcontextを渡した `EncodeContext` の出力一致と、画像の読み取り中にキャンセルした際の `context.Canceled` の返却も確認します
+`EncodeWithMetadataContext` に渡すICC、Exif、XMP payloadも変化させ、chunk順序、flag、padding、画像payloadの不変性を確認します
 
-scheduledまたはmanual GitHub Actionsでは2 workers、targetごとに5分、job timeout 15分で両fuzz targetを変異実行します
+追加の2 targetは同じ画像型、origin、strideを使って大きい境界を検証します
+`FuzzEncodeNearLossless` は寸法1、2、3、63、64、65で前処理の閾値を通り、decode後のalpha、境界画素の保持、RGB誤差の上限を確認します
+`FuzzEncodeLossyMacroblocks` は寸法15、16、17、31、32、33でmacroblock境界をまたぐ決定的outputとcontainer、VP8構造を確認します
+
+scheduledまたはmanual GitHub Actionsでは2 workers、targetごとに5分、job timeout 15分で全4 fuzz targetを変異実行します
 localでは次を実行します
 
 ```sh
 go test . -run '^$' -fuzz '^FuzzEncodePublicAPI$' -fuzztime=5m -parallel=2
+go test . -run '^$' -fuzz '^FuzzEncodeNearLossless$' -fuzztime=5m -parallel=2
+go test . -run '^$' -fuzz '^FuzzEncodeLossyMacroblocks$' -fuzztime=5m -parallel=2
 go test . -run '^$' -fuzz '^FuzzVP8LLiteralPlanRoundTrip$' -fuzztime=5m -parallel=2
 ```
 
@@ -55,6 +64,12 @@ go test . -run '^$' -fuzz '^FuzzVP8LLiteralPlanRoundTrip$' -fuzztime=5m -paralle
 writer failureとerror propagationは全public modeを対象とする独立table-driven testで確認します
 
 ## Go Benchmark
+
+benchmark corpusの結果を比較する際はGo toolchainのversionを固定します
+[Go 1.26ではJPEG decodeが変更された](https://go.dev/doc/go1.26#imagejpeg)ため、同じJPEG fileでもGo 1.25とは画素が変わる場合があります
+その結果、pixel由来のcorpus IDやtrain、holdoutの割り当ても変わる場合があります
+更新時は既存manifestとbaselineを保存し、normalized pixel hashを確認してから結果を比較します
+Go versionをまたいでencoderの挙動を比較する場合は、基準となるPNG corpusなどでdecode済み画素を固定します
 
 ```sh
 make bench-lossy

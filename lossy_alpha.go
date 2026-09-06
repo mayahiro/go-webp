@@ -450,7 +450,7 @@ func analyzeLossyAlphaConfig(readPixel pixelReader, bounds image.Rectangle, widt
 			analysis.lz77Residuals[i].flushRLE()
 		}
 	}
-	if cfg.optimalPasses > 0 && uint64(width)*uint64(height) <= uint64(cfg.optimalPixels) {
+	if analysis.hasAlpha && cfg.optimalPasses > 0 && uint64(width)*uint64(height) <= uint64(cfg.optimalPixels) {
 		optimizeLossyAlphaPlans(readPixel, bounds, width, height, cfg, &analysis)
 	}
 	return analysis
@@ -490,16 +490,15 @@ func alphaBestSpatialMatch(current []uint8, previous []uint8, start int, hasPrev
 		return alphaSpatialMatch{}
 	}
 	best := alphaSpatialMatch{}
-	for i, offset := range vp8lDistanceMap {
-		if offset.y != 1 {
-			continue
-		}
-		previousStart := start - offset.x
-		if previousStart < 0 || previousStart >= len(previous) {
-			continue
-		}
+	// Row 1 contains all previous-row offsets, from -7 through +8.
+	// Clip the indices so start + 7 - index stays inside the previous row.
+	first := max(0, start+8-len(previous))
+	end := min(len(vp8lSpecialDistanceCodeByOffset[1]), start+8)
+	for index := first; index < end; index++ {
+		previousStart := start + 7 - index
+		code := vp8lSpecialDistanceCodeByOffset[1][index]
 		match := alphaMatchLength(current, previous, start, previousStart)
-		distanceCode := i + 1
+		distanceCode := int(code)
 		if match > best.length || match == best.length && distanceCode < best.distanceCode {
 			best = alphaSpatialMatch{length: match, distanceCode: distanceCode}
 		}

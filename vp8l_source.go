@@ -14,15 +14,23 @@ type vp8lSource struct {
 	height   int
 	paletted bool
 	readRow  func(y int, dst []uint32)
+	cancel   *encodeCancellation
 }
 
 func newVP8LSource(source encoderSource, readPixel pixelReader) vp8lSource {
 	_, paletted := source.image.(*image.Paletted)
+	// Standard readers finish each row without calling user code. Check once per
+	// row there, and before each pixel for potentially slow custom image methods.
+	if source.cancel != nil && !standardImageSupportsConcurrentRead(source.image) {
+		readPixel = source.cancel.pixels(readPixel)
+	}
 	return vp8lSource{
 		width:    source.width,
 		height:   source.height,
 		paletted: paletted,
+		cancel:   source.cancel,
 		readRow: func(y int, dst []uint32) {
+			source.cancel.check()
 			sourceY := source.bounds.Min.Y + y
 			for x := range source.width {
 				dst[x] = vp8lPackPixel(readPixel(source.bounds.Min.X+x, sourceY))

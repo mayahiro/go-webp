@@ -67,12 +67,14 @@ func encodeVP8KeyFrameConfig(readLuma lumaReader, readChroma chromaReader, bound
 }
 
 func encodeVP8KeyFrameSource(source vp8Source, cfg vp8LossyConfig) ([]byte, error) {
+	source.cancel.check()
 	cfg = cfg.withAdjustedLoopFilter()
 	mbw := (source.width + 15) >> 4
 	mbh := (source.height + 15) >> 4
 	work := newVP8EncodeBuffers(mbw, mbh)
 	plan := makeVP8FramePlan(source, cfg, work)
 	firstPart, residualPart, err := encodeVP8FramePartitions(source, cfg, work, plan)
+	source.cancel.check()
 	if err != nil {
 		return nil, err
 	}
@@ -115,6 +117,7 @@ func makeVP8FramePlan(source vp8Source, cfg vp8LossyConfig, work *vp8EncodeBuffe
 	pass := runVP8ModePass(source, cfg, work, mbw, mbh, &segmentation, nil, useResidualBuffer)
 	tokenProbs, skipMap := analyzeVP8ModePassEntropy(source, cfg, work, mbw, mbh, &segmentation, pass)
 	for rdPass := 1; rdPass < cfg.rdPasses && (tokenProbs != vp8DefaultTokenProbs || cfg.trellis || cfg.dcDiffusion); rdPass++ {
+		source.cancel.check()
 		pass = runVP8ModePass(source, cfg, work, mbw, mbh, &segmentation, &tokenProbs, useResidualBuffer)
 		tokenProbs, skipMap = analyzeVP8ModePassEntropy(source, cfg, work, mbw, mbh, &segmentation, pass)
 	}

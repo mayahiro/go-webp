@@ -2,6 +2,7 @@ package webp
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"image"
 	"image/color"
@@ -68,6 +69,35 @@ func FuzzEncodePublicAPI(f *testing.F) {
 		if !bytes.Equal(second, first) {
 			t.Fatalf("non-deterministic output: first=%d bytes second=%d bytes", len(first), len(second))
 		}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		var cancellable bytes.Buffer
+		if err := EncodeContext(ctx, &cancellable, img, opts); err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(cancellable.Bytes(), first) {
+			t.Fatal("cancellable encoding changed the output")
+		}
+		metadata := &Metadata{}
+		payload := pixelBytes[:min(len(pixelBytes), 64)]
+		if rawQuality&1 != 0 {
+			metadata.ICCProfile = payload
+		}
+		if rawQuality&2 != 0 {
+			metadata.EXIF = payload
+		}
+		if rawQuality&4 != 0 {
+			metadata.XMP = payload
+		}
+		var withMetadata bytes.Buffer
+		if err := EncodeWithMetadataContext(ctx, &withMetadata, img, opts, metadata); err != nil {
+			t.Fatal(err)
+		}
+		assertMetadataEncoding(t, first, withMetadata.Bytes(), metadata, width, height)
+		readImage := &contextReadImage{Image: img, at: int(rawQuality)%(width*height) + 1, onAt: cancel}
+		if err := EncodeContext(ctx, io.Discard, readImage, opts); err != context.Canceled {
+			t.Fatalf("cancelled encode error = %v", err)
+		}
 		validateFuzzWebP(t, first, img.Bounds().Dx(), img.Bounds().Dy())
 	})
 }
@@ -95,6 +125,41 @@ func TestEncodePropagatesBoundedWriterFailuresForPublicModes(t *testing.T) {
 				err := Encode(writer, img, opts)
 				if !errors.Is(err, errBoundedWriter) {
 					t.Fatalf("limit %d error = %v, want %v", limit, err, errBoundedWriter)
+				}
+			}
+		})
+	}
+}
+
+func TestEncodeLosslessPropagatesMidstreamWriterFailures(t *testing.T) {
+	img := image.NewNRGBA(image.Rect(0, 0, 64, 64))
+	state := uint32(0x12345678)
+	for i := range img.Pix {
+		state ^= state << 13
+		state ^= state >> 17
+		state ^= state << 5
+		img.Pix[i] = uint8(state)
+	}
+	for _, mode := range []Mode{
+		ModeDefault,
+		ModeFast,
+		ModeBalanced,
+		ModeBestCompression,
+		ModeLowMemory,
+		ModeNearLossless,
+		ModeAuto,
+	} {
+		t.Run(modeNameForTest(mode), func(t *testing.T) {
+			opts := &Options{Mode: mode, Quality: 75}
+			encoded := encodeFuzzImage(t, img, opts)
+			// Force writes before the final Flush of the 4 KiB output buffer.
+			if len(encoded) <= 8192 {
+				t.Fatalf("encoded size = %d, want more than 8192 bytes", len(encoded))
+			}
+			for _, limit := range []int{0, 4096, len(encoded) / 2, len(encoded) - 1} {
+				writer := &boundedErrorWriter{remaining: limit}
+				if err := Encode(writer, img, opts); !errors.Is(err, errBoundedWriter) {
+					t.Errorf("limit %d error = %v, want %v", limit, err, errBoundedWriter)
 				}
 			}
 		})

@@ -30,11 +30,15 @@ const (
 )
 
 func vp8lAutoLosslessMode(m image.Image, readPixel pixelReader, bounds image.Rectangle, width int, height int) Mode {
-	mode, _ := vp8lAutoLosslessProfile(m, readPixel, bounds, width, height)
+	mode, _ := vp8lSelectAutoLossless(m, readPixel, bounds, width, height, false)
 	return mode
 }
 
 func vp8lAutoLosslessProfile(m image.Image, readPixel pixelReader, bounds image.Rectangle, width int, height int) (Mode, vp8lAutoLosslessReason) {
+	return vp8lSelectAutoLossless(m, readPixel, bounds, width, height, true)
+}
+
+func vp8lSelectAutoLossless(m image.Image, readPixel pixelReader, bounds image.Rectangle, width int, height int, explain bool) (Mode, vp8lAutoLosslessReason) {
 	total := width * height
 	if total >= 4096*4096 {
 		return ModeLowMemory, vp8lAutoLosslessReasonHugeImage
@@ -52,6 +56,10 @@ func vp8lAutoLosslessProfile(m image.Image, readPixel pixelReader, bounds image.
 				return ModeFast, vp8lAutoLosslessReasonLargeLowColor
 			}
 		}
+	}
+	// Diagnostic image classification does not affect the selected encoding mode.
+	if !explain {
+		return ModeBalanced, vp8lAutoLosslessReasonBalanced
 	}
 	return ModeBalanced, vp8lAutoLosslessBalancedReason(m, readPixel, bounds, width, sampledLowColor, verifiedLowColor)
 }

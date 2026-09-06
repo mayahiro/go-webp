@@ -383,6 +383,32 @@ func TestVP8LAutoLosslessModeClassifiesLargeLowColorImagesAsFast(t *testing.T) {
 	if gotReason != vp8lAutoLosslessReasonLargeLowColor {
 		t.Fatalf("vp8lAutoLosslessProfile reason = %d, want large low-color", gotReason)
 	}
+	if got := vp8lAutoLosslessMode(img, readPixel, bounds, bounds.Dx(), bounds.Dy()); got != gotMode {
+		t.Fatalf("mode-only selection = %d, profile selection = %d", got, gotMode)
+	}
+}
+
+func TestVP8LAutoLosslessModeSkipsDiagnosticReads(t *testing.T) {
+	for _, size := range []image.Point{{X: 32, Y: 32}, {X: 511, Y: 512}} {
+		bounds := image.Rect(-3, 5, size.X-3, size.Y+5)
+		img := image.NewNRGBA(bounds)
+		reads := 0
+		readPixel := func(x, y int) color.NRGBA {
+			reads++
+			return img.NRGBAAt(x, y)
+		}
+		if got := vp8lAutoLosslessMode(img, readPixel, bounds, size.X, size.Y); got != ModeBalanced {
+			t.Fatalf("%v: mode = %d, want ModeBalanced", size, got)
+		}
+		if reads != 0 {
+			t.Errorf("%v: read %d pixels for a mode fixed by image size", size, reads)
+		}
+		reads = 0
+		mode, reason := vp8lAutoLosslessProfile(img, readPixel, bounds, size.X, size.Y)
+		if mode != ModeBalanced || reason != vp8lAutoLosslessReasonAlphaHeavy || reads == 0 {
+			t.Errorf("%v: diagnostic profile = (%d, %d) with %d reads, want Balanced/AlphaHeavy and sampled pixels", size, mode, reason, reads)
+		}
+	}
 }
 
 func TestVP8LAutoLosslessModeKeepsSmallLowColorImagesBalanced(t *testing.T) {
@@ -425,6 +451,9 @@ func TestVP8LAutoLosslessModeAvoidsFastWhenIndexedPayloadIsLarge(t *testing.T) {
 	if gotReason != vp8lAutoLosslessReasonUILike {
 		t.Fatalf("vp8lAutoLosslessProfile reason = %d, want UI-like", gotReason)
 	}
+	if got := vp8lAutoLosslessMode(img, readPixel, bounds, width, height); got != gotMode {
+		t.Fatalf("mode-only selection = %d, profile selection = %d", got, gotMode)
+	}
 }
 
 func TestVP8LAutoLosslessModeRejectsSampledLowColorFalsePositive(t *testing.T) {
@@ -459,6 +488,9 @@ func TestVP8LAutoLosslessModeRejectsSampledLowColorFalsePositive(t *testing.T) {
 	}
 	if gotReason != vp8lAutoLosslessReasonBalanced {
 		t.Fatalf("vp8lAutoLosslessProfile reason = %d, want balanced", gotReason)
+	}
+	if got := vp8lAutoLosslessMode(img, readPixel, bounds, bounds.Dx(), bounds.Dy()); got != gotMode {
+		t.Fatalf("mode-only selection = %d, profile selection = %d", got, gotMode)
 	}
 }
 
@@ -528,6 +560,9 @@ func TestVP8LAutoLosslessModeClassifiesBalancedImageTypes(t *testing.T) {
 			}
 			if gotReason != tc.wantReason {
 				t.Fatalf("reason = %d, want %d", gotReason, tc.wantReason)
+			}
+			if got := vp8lAutoLosslessMode(tc.img, pixelReaderFor(tc.img), bounds, bounds.Dx(), bounds.Dy()); got != gotMode {
+				t.Fatalf("mode-only selection = %d, profile selection = %d", got, gotMode)
 			}
 		})
 	}

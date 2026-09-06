@@ -59,6 +59,7 @@ func (t vp8lToken) cacheIndex() int {
 }
 
 type vp8lPlan struct {
+	cancel      *encodeCancellation
 	width       int
 	height      int
 	alpha       bool
@@ -105,7 +106,12 @@ func (p *vp8lPlan) payloadBitLen() uint64 {
 	return p.payloadBits
 }
 
+func (p *vp8lPlan) imageInfo() (width, height int, alpha bool) {
+	return p.width, p.height, p.alpha
+}
+
 type vp8lBudget struct {
+	cancel                   *encodeCancellation
 	maxSourceBytes           uint64
 	predictorModes           []uint8
 	predictorSizeBits        []uint8
@@ -357,6 +363,7 @@ func vp8lBuildFinalistPlans(width int, height int, alpha bool, finalists []vp8lT
 	budget.counters.recordWorkers(workerCount)
 	if workerCount == 1 {
 		for i, candidate := range finalists {
+			budget.cancel.check()
 			plans[i] = vp8lBuildCandidatePlan(width, height, alpha, candidate, vp8lBudgetForFinalist(budget, finalists, i), firstWorkspace)
 		}
 		return plans
@@ -365,7 +372,7 @@ func vp8lBuildFinalistPlans(width int, height int, alpha bool, finalists []vp8lT
 	workspaces := make([]*vp8lSearchWorkspace, workerCount)
 	workspaces[0] = firstWorkspace
 	for i := 1; i < workerCount; i++ {
-		workspaces[i] = &vp8lSearchWorkspace{counters: budget.counters}
+		workspaces[i] = &vp8lSearchWorkspace{counters: budget.counters, cancel: budget.cancel}
 	}
 	jobs := make(chan int, len(finalists))
 	var wait sync.WaitGroup
@@ -373,9 +380,12 @@ func vp8lBuildFinalistPlans(width int, height int, alpha bool, finalists []vp8lT
 	for worker := range workerCount {
 		go func(workspace *vp8lSearchWorkspace) {
 			defer wait.Done()
-			for index := range jobs {
-				plans[index] = vp8lBuildCandidatePlan(width, height, alpha, finalists[index], vp8lBudgetForFinalist(budget, finalists, index), workspace)
-			}
+			budget.cancel.run(func() {
+				for index := range jobs {
+					budget.cancel.check()
+					plans[index] = vp8lBuildCandidatePlan(width, height, alpha, finalists[index], vp8lBudgetForFinalist(budget, finalists, index), workspace)
+				}
+			})
 		}(workspaces[worker])
 	}
 	for index := range finalists {
@@ -383,6 +393,7 @@ func vp8lBuildFinalistPlans(width int, height int, alpha bool, finalists []vp8lT
 	}
 	close(jobs)
 	wait.Wait()
+	budget.cancel.check()
 	return plans
 }
 
@@ -395,6 +406,7 @@ func vp8lBudgetForFinalist(budget vp8lBudget, finalists []vp8lTransformCandidate
 }
 
 func vp8lBuildCandidatePlan(width int, height int, alpha bool, candidate vp8lTransformCandidate, budget vp8lBudget, workspace *vp8lSearchWorkspace) *vp8lPlan {
+	budget.cancel.check()
 	pixels := candidate.pixels
 	if workspace != nil && candidate.materializeWorkspace != nil {
 		pixels = candidate.materializeWorkspace(&workspace.transform, 0)
@@ -444,13 +456,16 @@ func newVP8LPlan(width int, height int, alpha bool, transforms []vp8lTransform, 
 }
 
 func newVP8LPlanWorkspace(width int, height int, alpha bool, transforms []vp8lTransform, pixels []uint32, imageWidth int, imageHeight int, budget vp8lBudget, workspace *vp8lSearchWorkspace) *vp8lPlan {
-	if workspace == nil && budget.counters != nil {
+	if workspace == nil && (budget.counters != nil || budget.cancel != nil) {
 		workspace = &vp8lSearchWorkspace{}
 	}
 	if workspace != nil {
 		workspace.counters = budget.counters
+		workspace.cancel = budget.cancel
 	}
-	return newVP8LPlanForImage(width, height, alpha, transforms, buildVP8LImagePlanWorkspace(pixels, imageWidth, imageHeight, budget, workspace))
+	plan := newVP8LPlanForImage(width, height, alpha, transforms, buildVP8LImagePlanWorkspace(pixels, imageWidth, imageHeight, budget, workspace))
+	plan.cancel = budget.cancel
+	return plan
 }
 
 func newVP8LPlanForImage(width int, height int, alpha bool, transforms []vp8lTransform, image vp8lImagePlan) *vp8lPlan {

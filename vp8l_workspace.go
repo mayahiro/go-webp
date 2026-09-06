@@ -5,6 +5,7 @@ type vp8lTransformWorkspace struct {
 }
 
 type vp8lSearchWorkspace struct {
+	cancel    *encodeCancellation
 	transform vp8lTransformWorkspace
 	huffman   vp8lHuffmanWorkspace
 	counters  *vp8lSearchCounters

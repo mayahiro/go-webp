@@ -52,6 +52,7 @@ type encoderSource struct {
 	bounds image.Rectangle
 	width  int
 	height int
+	cancel *encodeCancellation
 }
 
 func newEncoderSource(m image.Image) encoderSource {
@@ -65,15 +66,15 @@ func newEncoderSource(m image.Image) encoderSource {
 }
 
 func (s encoderSource) pixels() pixelReader {
-	return pixelReaderFor(s.image)
+	return s.cancel.pixels(pixelReaderFor(s.image))
 }
 
 func (s encoderSource) readLuma() lumaReader {
-	return lumaReaderFor(s.image)
+	return s.cancel.luma(lumaReaderFor(s.image))
 }
 
 func (s encoderSource) readChroma() chromaReader {
-	return chromaReaderFor(s.image)
+	return s.cancel.chroma(chromaReaderFor(s.image))
 }
 
 type vp8Source struct {
@@ -83,6 +84,7 @@ type vp8Source struct {
 	readLuma   lumaReader
 	readChroma chromaReader
 	plane      vp8SourcePlane
+	cancel     *encodeCancellation
 }
 
 type vp8SourcePlane struct {
@@ -99,6 +101,7 @@ func newVP8Source(source encoderSource, materialize bool) vp8Source {
 		bounds: source.bounds,
 		width:  source.width,
 		height: source.height,
+		cancel: source.cancel,
 	}
 	total := source.width * source.height
 	if !materialize || total <= 0 || total > vp8SourcePlaneMaxBytes/3 {
@@ -140,8 +143,8 @@ func newVP8Source(source encoderSource, materialize bool) vp8Source {
 		}
 	}
 	result.plane = plane
-	result.readLuma = plane.luma
-	result.readChroma = plane.chroma
+	result.readLuma = source.cancel.luma(plane.luma)
+	result.readChroma = source.cancel.chroma(plane.chroma)
 	return result
 }
 
@@ -167,22 +170,31 @@ func (s *vp8Source) applySharpChroma(readPixel pixelReader) {
 	selected := make([]uint8, halfWidth*halfHeight*2)
 	selectedCr := selected[halfWidth*halfHeight:]
 	for by := 0; by < halfHeight; by++ {
+		s.cancel.check()
 		for bx := 0; bx < halfWidth; bx++ {
 			x := bx * 2
 			y := by * 2
 			baselineCb, baselineCr := chromaSamplePair(s.readChroma, s.bounds, x, y)
 			meanCb, meanCr := s.meanChroma2x2(x, y)
+			block := s.chromaRGBBlock(readPixel, x, y)
 			bestCb, bestCr := baselineCb, baselineCr
-			bestScore := s.chromaRGBScore2x2(readPixel, x, y, bestCb, bestCr)
+			bestScore := block.score(bestCb, bestCr)
 			centers := [2][2]uint8{{baselineCb, baselineCr}, {meanCb, meanCr}}
-			for _, center := range centers {
-				for cbDelta := -2; cbDelta <= 2; cbDelta++ {
-					cb := uint8(clipInt(int(center[0])+cbDelta, 0, 255))
-					for crDelta := -2; crDelta <= 2; crDelta++ {
-						cr := uint8(clipInt(int(center[1])+crDelta, 0, 255))
-						score := s.chromaRGBScore2x2(readPixel, x, y, cb, cr)
+			for centerIndex, center := range centers {
+				minCb, maxCb := max(0, int(center[0])-2), min(255, int(center[0])+2)
+				minCr, maxCr := max(0, int(center[1])-2), min(255, int(center[1])+2)
+				for cb := minCb; cb <= maxCb; cb++ {
+					for cr := minCr; cr <= maxCr; cr++ {
+						// Skip previously scored values without changing the order of distinct candidates.
+						if cb == int(baselineCb) && cr == int(baselineCr) {
+							continue
+						}
+						if centerIndex == 1 && absInt(cb-int(baselineCb)) <= 2 && absInt(cr-int(baselineCr)) <= 2 {
+							continue
+						}
+						score := block.score(uint8(cb), uint8(cr))
 						if score < bestScore {
-							bestCb, bestCr, bestScore = cb, cr, score
+							bestCb, bestCr, bestScore = uint8(cb), uint8(cr), score
 						}
 					}
 				}
@@ -193,6 +205,7 @@ func (s *vp8Source) applySharpChroma(readPixel pixelReader) {
 		}
 	}
 	for y := 0; y < s.height; y++ {
+		s.cancel.check()
 		for x := 0; x < s.width; x++ {
 			selectedIndex := (y>>1)*halfWidth + (x >> 1)
 			planeIndex := y*s.width + x
@@ -214,19 +227,35 @@ func (s *vp8Source) meanChroma2x2(x int, y int) (uint8, uint8) {
 	return uint8((cbSum + 2) >> 2), uint8((crSum + 2) >> 2)
 }
 
-func (s *vp8Source) chromaRGBScore2x2(readPixel pixelReader, x int, y int, cb uint8, cr uint8) uint64 {
-	countLossyCounter(lossyCounterSharpChromaCandidates, 1)
-	var score uint64
+type vp8ChromaRGBBlock struct {
+	pixels [4]color.NRGBA
+	luma   [4]uint8
+	n      int
+}
+
+func (s *vp8Source) chromaRGBBlock(readPixel pixelReader, x int, y int) vp8ChromaRGBBlock {
+	var block vp8ChromaRGBBlock
 	for yy := 0; yy < 2 && y+yy < s.height; yy++ {
 		for xx := 0; xx < 2 && x+xx < s.width; xx++ {
 			planeIndex := (y+yy)*s.width + x + xx
-			r, g, b := vp8YUVToRGB(s.plane.data[planeIndex], cb, cr)
-			pixel := readPixel(s.bounds.Min.X+x+xx, s.bounds.Min.Y+y+yy)
-			dr := int(r) - int(pixel.R)
-			dg := int(g) - int(pixel.G)
-			db := int(b) - int(pixel.B)
-			score += uint64(dr*dr + dg*dg + db*db)
+			block.luma[block.n] = s.plane.data[planeIndex]
+			block.pixels[block.n] = readPixel(s.bounds.Min.X+x+xx, s.bounds.Min.Y+y+yy)
+			block.n++
 		}
+	}
+	return block
+}
+
+func (block *vp8ChromaRGBBlock) score(cb uint8, cr uint8) uint64 {
+	countLossyCounter(lossyCounterSharpChromaCandidates, 1)
+	var score uint64
+	for i := range block.n {
+		r, g, b := vp8YUVToRGB(block.luma[i], cb, cr)
+		pixel := block.pixels[i]
+		dr := int(r) - int(pixel.R)
+		dg := int(g) - int(pixel.G)
+		db := int(b) - int(pixel.B)
+		score += uint64(dr*dr + dg*dg + db*db)
 	}
 	return score
 }

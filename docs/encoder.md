@@ -16,10 +16,13 @@ animations. WebP decoding is available from
 
 ```go
 func Encode(w io.Writer, m image.Image, o *Options) error
+func EncodeContext(ctx context.Context, w io.Writer, m image.Image, o *Options) error
 ```
 
 `Encode` writes the encoded image to `w`. A nil `Options` value and the zero
 value both select lossless WebP.
+Write errors from `w` are returned unchanged, including failures during
+buffered output. If writing fails, `w` may contain a partial image.
 
 ```go
 type Options struct {
@@ -38,7 +41,76 @@ type Encoder struct {
 }
 
 func (enc *Encoder) Encode(w io.Writer, m image.Image) error
+func (enc *Encoder) EncodeContext(ctx context.Context, w io.Writer, m image.Image) error
 ```
+
+## Metadata
+
+Dedicated entry points attach optional ICC, Exif, and XMP payloads without
+adding fields to `Options` or `Encoder`:
+
+```go
+type Metadata struct {
+	ICCProfile []byte
+	EXIF       []byte
+	XMP        []byte
+}
+
+func EncodeWithMetadata(w io.Writer, m image.Image, o *Options, metadata *Metadata) error
+func EncodeWithMetadataContext(ctx context.Context, w io.Writer, m image.Image, o *Options, metadata *Metadata) error
+func (enc *Encoder) EncodeWithMetadata(w io.Writer, m image.Image, metadata *Metadata) error
+func (enc *Encoder) EncodeWithMetadataContext(ctx context.Context, w io.Writer, m image.Image, metadata *Metadata) error
+```
+
+Supply raw chunk payloads without RIFF chunk headers or padding. Each nonempty
+slice is written verbatim to one `ICCP`, `EXIF`, or `XMP ` chunk, respectively.
+A nil or empty slice omits that chunk; nil or entirely empty metadata produces
+the same bytes as `Encode` with the same image and options.
+
+Nonempty metadata uses the extended WebP container for every compression
+family. The encoder writes `VP8X`, optional `ICCP`, image chunks, optional
+`EXIF`, then optional `XMP `, with the corresponding feature flags and zero
+padding for odd chunk sizes. The VP8L, VP8, and ALPH payloads are unchanged.
+The combined file must fit the [RFC 9649 container limit](https://www.rfc-editor.org/rfc/rfc9649.html#section-2.4)
+of 4 GiB minus 2 bytes; oversized metadata or combined output returns an error
+before any output is written.
+
+The encoder does not validate ICC, Exif, or XML formats, convert colors, apply
+orientation, or extract metadata from `image.Image`. Callers must supply
+payloads appropriate for the encoded pixels and must not modify them until
+the call returns. Metadata is written from the supplied slices without an
+extra buffer for the complete image or a copy of all metadata bytes.
+
+Writer errors and partial output follow the `Encode` contract. The context
+variants also follow the cancellation contract below, including checks between
+metadata writes. Without cancellation their bytes match `EncodeWithMetadata`.
+
+## Cancellation
+
+`EncodeContext`, `EncodeWithMetadataContext`, and their `Encoder` methods accept a
+[`context.Context`](https://pkg.go.dev/context) as their first argument.
+When cancellation interrupts encoding, they return `ctx.Err()`:
+`context.Canceled` or `context.DeadlineExceeded`. A custom cancellation cause
+is available separately through `context.Cause(ctx)`.
+A nil context returns `webp: nil context`. A context that is already cancelled
+returns its error before reading the image or writing output.
+
+Cancellation is cooperative: the encoder checks during image processing,
+between search stages, within match and parse loops, and before and after
+output writes. It waits for internal workers to finish before returning.
+It cannot interrupt a blocked image method or `io.Writer.Write` call, and it
+does not guarantee a fixed cancellation latency.
+
+Write errors are returned unchanged, including when a write both cancels the
+context and returns an error. Cancellation can leave partial output and can
+also be observed just after the final write. No further image reads or writes
+occur after the call returns.
+
+Without cancellation, the encoded bytes match the corresponding ordinary
+encoding function for the same input, options, and metadata.
+`context.Background()` and other contexts with no `Done` channel use the
+ordinary encoding path. Existing `Encode`, `Options`, and `Encoder` fields
+retain their behavior.
 
 ## Compression Families
 
@@ -121,12 +193,20 @@ feature independently. Buffered profiles use a staged bounded search:
 `ModeFast` and `ModeLowMemory` use a row-streaming path with inexpensive
 transforms and greedy matches. Buffered modes also fall back to streaming when
 the source or estimated search workspace exceeds its configured limit.
+`ModeBalanced` uses the same search budget as `ModeDefault` in both buffered
+and streaming encoding.
+Streaming emission stops reading source rows when the output writer reports an
+error and returns that error to the caller.
 
 `ModeBestCompression` retains the complete default plan as an incumbent and
 expands the budget in the same search session. Source pixels, palette analysis,
 candidate scores, and the default winner remain reusable. The expanded result
 is selected only when its exact payload is smaller, so it does not produce a
 larger lossless payload than `ModeDefault` for the same input.
+If both searches exceed their estimated workspace limits, the encoder selects
+streaming plans without materializing the source plane. It evaluates the default
+streaming candidates once, then adds only the predictors unique to
+`ModeBestCompression`, retaining the default plan on ties.
 
 The matcher does not use unbounded hash chains, and every profile limits
 candidate counts, edges, parse iterations, entropy groups, workers, and
@@ -157,7 +237,8 @@ to luma4x4 modes after learning residual token probabilities. It retains the
 complete `ModeDefault` VP8 frame as an exact-size incumbent and emits the
 expanded-search frame only when it is smaller. This prevents a larger VP8
 frame at the same quality, but can take substantially longer because both
-plans are evaluated.
+plans are evaluated. When both searches use the same source materialization and
+sharp-chroma settings, they share the prepared source plane.
 
 VP8 stores the first-partition length in 19 bits. If a selected lossy plan
 exceeds that limit, the encoder retries deterministically with progressively
@@ -178,8 +259,9 @@ matches. `ModeFast` limits search to unfiltered alpha and repeated runs.
 `ModeLowMemory` retains filter search but omits previous-row candidates, while
 `ModeBestCompression` applies bounded optimal parsing to its run and
 previous-row candidates. Fully opaque standard image types skip alpha
-candidate analysis; custom image implementations use the general analysis
-path.
+candidate analysis, including `image.NRGBA64`, `image.RGBA64`, and `image.Gray16`.
+Custom image implementations use the general analysis path; if that scan finds
+no alpha, the encoder skips optimal alpha parsing.
 
 ## Input and Resource Behavior
 
@@ -227,7 +309,7 @@ behavior and public API.
 - Lossless dimensions must be from 1 to 16384 pixels on each axis
 - Lossy dimensions must be from 1 to 16383 pixels on each axis
 - Only static images are encoded
-- Image metadata is not preserved by the `image.Image` API
+- `image.Image` does not expose metadata; pass it explicitly with the metadata API
 - Lossy alpha does not use general hash-chain LZ77 search or block-adaptive
   alpha entropy coding
 - Lossy loop-filter settings remain conservative and are not selected by an

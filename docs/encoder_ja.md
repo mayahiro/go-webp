@@ -14,10 +14,13 @@ WebPのdecodeには [`golang.org/x/image/webp`](https://pkg.go.dev/golang.org/x/
 
 ```go
 func Encode(w io.Writer, m image.Image, o *Options) error
+func EncodeContext(ctx context.Context, w io.Writer, m image.Image, o *Options) error
 ```
 
 `Encode` はencode結果を `w` へ書き込みます
 `Options` がnilの場合とzero valueの場合はlossless WebPを選択します
+buffer出力中の失敗を含め、`w` の書き込みエラーはそのまま返します
+書き込みが失敗すると、`w` に不完全な画像が残る場合があります
 
 ```go
 type Options struct {
@@ -35,7 +38,63 @@ type Encoder struct {
 }
 
 func (enc *Encoder) Encode(w io.Writer, m image.Image) error
+func (enc *Encoder) EncodeContext(ctx context.Context, w io.Writer, m image.Image) error
 ```
+
+## Metadata
+
+`Options` や `Encoder` にフィールドを追加せず、専用のAPIで任意のICC、Exif、XMP payloadを付与します
+
+```go
+type Metadata struct {
+	ICCProfile []byte
+	EXIF       []byte
+	XMP        []byte
+}
+
+func EncodeWithMetadata(w io.Writer, m image.Image, o *Options, metadata *Metadata) error
+func EncodeWithMetadataContext(ctx context.Context, w io.Writer, m image.Image, o *Options, metadata *Metadata) error
+func (enc *Encoder) EncodeWithMetadata(w io.Writer, m image.Image, metadata *Metadata) error
+func (enc *Encoder) EncodeWithMetadataContext(ctx context.Context, w io.Writer, m image.Image, metadata *Metadata) error
+```
+
+RIFF chunk headerとpaddingを含まない生のchunk payloadを渡します
+空でないsliceを、それぞれ1個の `ICCP`、`EXIF`、`XMP ` chunkへそのまま格納します
+nilまたは空のsliceはそのchunkを省略し、metadataがnilまたは全フィールドが空の場合は、同じ画像とoptionsの `Encode` と同じbytesを出力します
+
+空でないmetadataがある場合は、すべてのcompression familyでextended WebP containerを使います
+`VP8X`、任意の `ICCP`、画像chunk、任意の `EXIF`、任意の `XMP ` の順に書き込み、対応するfeature flagと奇数長chunkのゼロpaddingを設定します
+VP8L、VP8、ALPHのpayloadは変更しません
+全体のfile sizeは [RFC 9649のcontainer上限](https://www.rfc-editor.org/rfc/rfc9649.html#section-2.4) である4 GiBから2 bytesを引いた値以内である必要があります
+metadata単体または画像を含めた全体が上限を超える場合は、出力を書き込む前にエラーを返します
+
+encoderはICC、Exif、XMLの形式検証、色変換、orientationの適用、`image.Image` からのmetadata抽出を行いません
+呼び出し元はencodeする画素に適したpayloadを渡し、呼び出しから返るまで変更しないでください
+metadataは渡されたsliceから書き込み、画像全体の追加bufferやmetadata全体のbytesのコピーは作りません
+
+writerエラーと不完全な出力の扱いは `Encode` と同じです
+context版は、metadataの書き込み間の確認を含め、次のキャンセル仕様にも従います
+キャンセルがなければ、出力bytesは `EncodeWithMetadata` と一致します
+
+## キャンセル
+
+`EncodeContext`、`EncodeWithMetadataContext` と対応する `Encoder` メソッドは第1引数に [`context.Context`](https://pkg.go.dev/context) を受け取ります
+キャンセルでエンコードを中断した場合は、`ctx.Err()` が返す `context.Canceled` または `context.DeadlineExceeded` を返します
+独自のキャンセル原因は `context.Cause(ctx)` で別途取得できます
+nilのcontextには `webp: nil context` を返します
+呼び出し時点でキャンセル済みの場合は、画像の読み取りや出力の書き込みを行う前にそのエラーを返します
+
+キャンセルは協調的に処理します
+画像処理中、探索段階の境界、matchとparseのループ内、出力の書き込み前後でキャンセルを確認し、内部workerの終了を待ってから返ります
+ブロック中の画像メソッドや `io.Writer.Write` の呼び出しは中断できず、キャンセルから返却までの時間に固定の上限はありません
+
+書き込みがcontextをキャンセルしてエラーも返す場合を含め、書き込みエラーはそのまま返します
+キャンセル時は出力が不完全な状態で残る場合があり、最後の書き込み直後にキャンセルを検出する場合もあります
+呼び出しから返った後に、画像の読み取りや書き込みが継続することはありません
+
+キャンセルがなければ、同じ入力、options、metadataに対する出力bytesは、対応する通常のエンコード関数と一致します
+`context.Background()` など `Done` channelを持たないcontextでは、通常のエンコード経路を使います
+既存の `Encode`、`Options`、`Encoder` のフィールドの挙動は維持します
 
 ## Compression Family
 
@@ -103,10 +162,14 @@ bufferを使うprofileは次の段階的な上限付きsearchを行います
 
 `ModeFast` と `ModeLowMemory` はcheapなtransformとgreedy matchを持つrow-streaming pathを使用します
 bufferを使うmodeでもsourceまたは推定search workspaceが設定上限を超える場合はstreamingへfallbackします
+`ModeBalanced` はbufferを使う場合もstreamingの場合も `ModeDefault` と同じsearch budgetを使います
+streaming出力中にwriterがerrorを返した場合はsource行の読み取りを中断し、そのerrorを呼び出し元へ返します
 
 `ModeBestCompression` はDefaultの完全planをincumbentとして保持し、同じsearch sessionでbudgetを拡張します
 source pixels、palette解析、candidate score、Default winnerは再利用されます
 拡張結果のexact payloadが小さい場合だけ置き換えるため、同じ入力で `ModeDefault` より大きいlossless payloadを出力しません
+両方のsearchが推定workspace上限を超える場合は、source planeを作らずにstreaming planを選択します
+Defaultのstreaming候補を一度だけ評価し、`ModeBestCompression` 固有のpredictorだけを追加します。同サイズではDefaultのplanを保持します
 
 matcherは制限なしのhash chainを使いません
 各profileはcandidate数、edge数、parse反復、entropy group、worker、workspace推定を制限するため、より広いsearchを行うencoderより出力が大きくなる入力もあります
@@ -129,6 +192,7 @@ lossy encoderは4:2:0 chromaを持つintra-only VP8 key frameを書きます
 `ModeBestCompression` は `ModeDefault` と同じquality objectiveを使い、sharp chromaを常に有効にし、2回目のrate-distortion passとresidual token probability学習後のluma4x4 modeに対する幅2の上限付きrefinementを追加します
 完全な `ModeDefault` VP8 frameをexact-size incumbentとして保持し、追加searchのframeが小さい場合だけ置き換えます
 同じqualityで大きいVP8 frameを防ぐ一方、両planを評価するため大幅に時間がかかる場合があります
+両searchのsource materializationとsharp chroma設定が一致する場合は、前処理済みsource planeを共有します
 
 VP8のfirst partition lengthは19 bitsです
 選択したlossy planが上限を超える場合、encoderはfirst partition signalingを段階的に減らして決定的に再試行します
@@ -144,7 +208,8 @@ encoderはcompressed alphaとraw alphaを比較し、小さい表現を使用し
 compressed lossy alphaはglobal filter、frequency-coded residual、連続runと前行spatial match向けの上限付きbackward referenceを使います
 `ModeFast` はunfiltered alphaと連続runへsearchを限定します
 `ModeLowMemory` はfilter searchを維持しつつ前行候補を省き、`ModeBestCompression` はrunと前行候補へ上限付きoptimal parsingを適用します
-完全にopaqueな標準画像型ではalpha候補解析を省き、custom画像実装では一般的な解析pathを使います
+`image.NRGBA64`、`image.RGBA64`、`image.Gray16` を含む、完全にopaqueな標準画像型ではalpha候補解析を省きます
+custom画像実装では一般的な解析pathを使い、その走査でalphaがないと分かった場合はoptimal alpha parsingを省きます
 
 ## InputとResource特性
 
@@ -180,6 +245,6 @@ encoder versionによって異なる有効なVP8LまたはVP8 planを選択す�
 - lossless画像の各軸は1から16384 pixels
 - lossy画像の各軸は1から16383 pixels
 - 静止画だけをencodeする
-- `image.Image` APIでは画像metadataを保持しない
+- `image.Image` はmetadataを公開しないため、metadata APIで明示的に渡す
 - lossy alphaではgeneral hash-chain LZ77 searchやblock-adaptive alpha entropy codingを行わない
 - lossy loop-filter設定は保守的で、画像固有のperceptual optimization passでは選択していない
