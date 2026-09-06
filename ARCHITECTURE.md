@@ -20,6 +20,13 @@ returns. Only that value is recovered; caller panics propagate. Parallel
 codec work is joined before the public call returns. Contexts without a
 cancellation channel use the ordinary encoding path.
 
+`EncodeWithMetadata` and its context variant keep metadata separate from
+compression options and source pixels. `metadata_write.go` owns extended
+container flags, metadata chunk ordering, and combined size validation. Both
+codecs write their existing image payloads directly into that container;
+attaching metadata needs no additional full-image buffer. Payloads remain
+caller-owned and are written in bounded blocks for cooperative cancellation.
+
 Direct readers cover `image.NRGBA`, `image.NRGBA64`, `image.RGBA`,
 `image.RGBA64`, `image.Gray`, `image.YCbCr`, `image.Paletted`, and
 `image.Uniform`. Other implementations use conversion through

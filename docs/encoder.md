@@ -44,9 +44,50 @@ func (enc *Encoder) Encode(w io.Writer, m image.Image) error
 func (enc *Encoder) EncodeContext(ctx context.Context, w io.Writer, m image.Image) error
 ```
 
+## Metadata
+
+Dedicated entry points attach optional ICC, Exif, and XMP payloads without
+adding fields to `Options` or `Encoder`:
+
+```go
+type Metadata struct {
+	ICCProfile []byte
+	EXIF       []byte
+	XMP        []byte
+}
+
+func EncodeWithMetadata(w io.Writer, m image.Image, o *Options, metadata *Metadata) error
+func EncodeWithMetadataContext(ctx context.Context, w io.Writer, m image.Image, o *Options, metadata *Metadata) error
+func (enc *Encoder) EncodeWithMetadata(w io.Writer, m image.Image, metadata *Metadata) error
+func (enc *Encoder) EncodeWithMetadataContext(ctx context.Context, w io.Writer, m image.Image, metadata *Metadata) error
+```
+
+Supply raw chunk payloads without RIFF chunk headers or padding. Each nonempty
+slice is written verbatim to one `ICCP`, `EXIF`, or `XMP ` chunk, respectively.
+A nil or empty slice omits that chunk; nil or entirely empty metadata produces
+the same bytes as `Encode` with the same image and options.
+
+Nonempty metadata uses the extended WebP container for every compression
+family. The encoder writes `VP8X`, optional `ICCP`, image chunks, optional
+`EXIF`, then optional `XMP `, with the corresponding feature flags and zero
+padding for odd chunk sizes. The VP8L, VP8, and ALPH payloads are unchanged.
+The combined file must fit the [RFC 9649 container limit](https://www.rfc-editor.org/rfc/rfc9649.html#section-2.4)
+of 4 GiB minus 2 bytes; oversized metadata or combined output returns an error
+before any output is written.
+
+The encoder does not validate ICC, Exif, or XML formats, convert colors, apply
+orientation, or extract metadata from `image.Image`. Callers must supply
+payloads appropriate for the encoded pixels and must not modify them until
+the call returns. Metadata is written from the supplied slices without an
+extra buffer for the complete image or a copy of all metadata bytes.
+
+Writer errors and partial output follow the `Encode` contract. The context
+variants also follow the cancellation contract below, including checks between
+metadata writes. Without cancellation their bytes match `EncodeWithMetadata`.
+
 ## Cancellation
 
-`EncodeContext` and `Encoder.EncodeContext` accept a
+`EncodeContext`, `EncodeWithMetadataContext`, and their `Encoder` methods accept a
 [`context.Context`](https://pkg.go.dev/context) as their first argument.
 When cancellation interrupts encoding, they return `ctx.Err()`:
 `context.Canceled` or `context.DeadlineExceeded`. A custom cancellation cause
@@ -65,9 +106,10 @@ context and returns an error. Cancellation can leave partial output and can
 also be observed just after the final write. No further image reads or writes
 occur after the call returns.
 
-Without cancellation, the encoded bytes match `Encode` for the same input and
-options. `context.Background()` and other contexts with no `Done` channel use
-the ordinary `Encode` path. Existing `Encode`, `Options`, and `Encoder` fields
+Without cancellation, the encoded bytes match the corresponding ordinary
+encoding function for the same input, options, and metadata.
+`context.Background()` and other contexts with no `Done` channel use the
+ordinary encoding path. Existing `Encode`, `Options`, and `Encoder` fields
 retain their behavior.
 
 ## Compression Families
@@ -267,7 +309,7 @@ behavior and public API.
 - Lossless dimensions must be from 1 to 16384 pixels on each axis
 - Lossy dimensions must be from 1 to 16383 pixels on each axis
 - Only static images are encoded
-- Image metadata is not preserved by the `image.Image` API
+- `image.Image` does not expose metadata; pass it explicitly with the metadata API
 - Lossy alpha does not use general hash-chain LZ77 search or block-adaptive
   alpha entropy coding
 - Lossy loop-filter settings remain conservative and are not selected by an

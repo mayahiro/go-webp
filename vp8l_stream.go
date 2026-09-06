@@ -23,6 +23,10 @@ func (p *vp8lStreamingPlan) payloadBitLen() uint64 {
 	return p.payloadBits
 }
 
+func (p *vp8lStreamingPlan) imageInfo() (width, height int, alpha bool) {
+	return p.width, p.height, p.alpha
+}
+
 func (p *vp8lStreamingPlan) writeTo(bits *vp8lBitSink) {
 	writeVP8LPrefix(bits, p.width, p.height, p.alpha, p.transforms)
 	bits.writeBits(0, 1) // no color cache

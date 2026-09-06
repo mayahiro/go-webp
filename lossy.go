@@ -38,11 +38,15 @@ const (
 	alphaCodeLengthRepeatZeroBig  = 18
 )
 
-func encodeLossy(w io.Writer, source encoderSource, quality int, mode Mode) error {
-	return encodeLossyConfig(w, source, vp8LossyConfigForModeQuality(mode, quality), lossyAlphaConfigForMode(mode))
+func encodeLossyMetadata(w io.Writer, source encoderSource, quality int, mode Mode, metadata *webpMetadata) error {
+	return encodeLossyConfigMetadata(w, source, vp8LossyConfigForModeQuality(mode, quality), lossyAlphaConfigForMode(mode), metadata)
 }
 
 func encodeLossyConfig(w io.Writer, source encoderSource, lossyConfig vp8LossyConfig, alphaConfig lossyAlphaConfig) error {
+	return encodeLossyConfigMetadata(w, source, lossyConfig, alphaConfig, nil)
+}
+
+func encodeLossyConfigMetadata(w io.Writer, source encoderSource, lossyConfig vp8LossyConfig, alphaConfig lossyAlphaConfig, metadata *webpMetadata) error {
 	if source.width > maxVP8Dimension || source.height > maxVP8Dimension {
 		return fmt.Errorf("webp: image dimensions %dx%d exceed VP8 limit %dx%d", source.width, source.height, maxVP8Dimension, maxVP8Dimension)
 	}
@@ -109,9 +113,9 @@ func encodeLossyConfig(w io.Writer, source encoderSource, lossyConfig vp8LossyCo
 	}
 	setLossyCounter(lossyCounterFirstPartitionBits, uint64(vp8FrameFirstPartitionBytes(frame))*8)
 	if alphaAnalysis.hasAlpha {
-		return writeLossyExtended(w, readPixel, source.bounds, source.width, source.height, frame, alphaAnalysis, alphaConfig)
+		return writeLossyExtendedMetadata(w, readPixel, source.bounds, source.width, source.height, frame, alphaAnalysis, alphaConfig, metadata)
 	}
-	return writeLossySimple(w, frame)
+	return writeLossySimpleMetadata(w, frame, source.width, source.height, metadata)
 }
 
 func lossyCanParallelizeAlpha(source encoderSource, cfg vp8LossyConfig) bool {
@@ -151,15 +155,32 @@ func lossyStandardImageOpaque(m image.Image) bool {
 }
 
 func writeLossySimple(w io.Writer, frame []byte) error {
+	return writeLossySimpleMetadata(w, frame, 0, 0, nil)
+}
+
+func writeLossySimpleMetadata(w io.Writer, frame []byte, width, height int, metadata *webpMetadata) error {
 	payloadSize := uint64(len(frame))
 	riffSize := uint64(4) + riffChunkSize(payloadSize)
 	if riffSize > math.MaxUint32 {
 		return fmt.Errorf("webp: encoded image is too large")
 	}
+	riffSize, err := metadataRIFFSize(riffSize, false, metadata)
+	if err != nil {
+		return err
+	}
 
 	bw := bufio.NewWriter(w)
-	if err := writeWebPHeader(bw, "VP8 ", uint32(riffSize), uint32(payloadSize)); err != nil {
-		return err
+	if metadata == nil {
+		if err := writeWebPHeader(bw, "VP8 ", uint32(riffSize), uint32(payloadSize)); err != nil {
+			return err
+		}
+	} else {
+		if err := writeExtendedWebPHeader(bw, width, height, false, uint32(riffSize), metadata); err != nil {
+			return err
+		}
+		if err := writeChunkHeader(bw, "VP8 ", uint32(payloadSize)); err != nil {
+			return err
+		}
 	}
 	if _, err := bw.Write(frame); err != nil {
 		return err
@@ -167,10 +188,17 @@ func writeLossySimple(w io.Writer, frame []byte) error {
 	if err := writeChunkPadding(bw, payloadSize); err != nil {
 		return err
 	}
+	if err := writeMetadataTrailer(bw, metadata); err != nil {
+		return err
+	}
 	return bw.Flush()
 }
 
 func writeLossyExtended(w io.Writer, readPixel pixelReader, bounds image.Rectangle, width int, height int, frame []byte, alphaAnalysis lossyAlphaAnalysis, alphaConfig lossyAlphaConfig) error {
+	return writeLossyExtendedMetadata(w, readPixel, bounds, width, height, frame, alphaAnalysis, alphaConfig, nil)
+}
+
+func writeLossyExtendedMetadata(w io.Writer, readPixel pixelReader, bounds image.Rectangle, width int, height int, frame []byte, alphaAnalysis lossyAlphaAnalysis, alphaConfig lossyAlphaConfig, metadata *webpMetadata) error {
 	framePayloadSize := uint64(len(frame))
 	alphaPayload, err := makeAlphaPayload(readPixel, bounds, width, height, alphaAnalysis, alphaConfig)
 	if err != nil {
@@ -184,12 +212,13 @@ func writeLossyExtended(w io.Writer, readPixel pixelReader, bounds image.Rectang
 	if riffSize > math.MaxUint32 {
 		return fmt.Errorf("webp: encoded image is too large")
 	}
-
-	bw := bufio.NewWriter(w)
-	if err := writeRIFFHeader(bw, uint32(riffSize)); err != nil {
+	riffSize, err = metadataRIFFSize(riffSize, true, metadata)
+	if err != nil {
 		return err
 	}
-	if err := writeVP8XChunk(bw, width, height); err != nil {
+
+	bw := bufio.NewWriter(w)
+	if err := writeExtendedWebPHeader(bw, width, height, true, uint32(riffSize), metadata); err != nil {
 		return err
 	}
 	if err := writeAlphaChunk(bw, readPixel, bounds, alphaPayload); err != nil {
@@ -204,14 +233,17 @@ func writeLossyExtended(w io.Writer, readPixel pixelReader, bounds image.Rectang
 	if err := writeChunkPadding(bw, framePayloadSize); err != nil {
 		return err
 	}
+	if err := writeMetadataTrailer(bw, metadata); err != nil {
+		return err
+	}
 	return bw.Flush()
 }
 
-func writeVP8XChunk(w *bufio.Writer, width int, height int) error {
+func writeVP8XChunk(w *bufio.Writer, width int, height int, flags byte) error {
 	if err := writeChunkHeader(w, "VP8X", vp8xPayloadSize); err != nil {
 		return err
 	}
-	if err := w.WriteByte(vp8xAlphaFlag); err != nil {
+	if err := w.WriteByte(flags); err != nil {
 		return err
 	}
 	if err := w.WriteByte(0); err != nil {

@@ -41,9 +41,44 @@ func (enc *Encoder) Encode(w io.Writer, m image.Image) error
 func (enc *Encoder) EncodeContext(ctx context.Context, w io.Writer, m image.Image) error
 ```
 
+## Metadata
+
+`Options` や `Encoder` にフィールドを追加せず、専用のAPIで任意のICC、Exif、XMP payloadを付与します
+
+```go
+type Metadata struct {
+	ICCProfile []byte
+	EXIF       []byte
+	XMP        []byte
+}
+
+func EncodeWithMetadata(w io.Writer, m image.Image, o *Options, metadata *Metadata) error
+func EncodeWithMetadataContext(ctx context.Context, w io.Writer, m image.Image, o *Options, metadata *Metadata) error
+func (enc *Encoder) EncodeWithMetadata(w io.Writer, m image.Image, metadata *Metadata) error
+func (enc *Encoder) EncodeWithMetadataContext(ctx context.Context, w io.Writer, m image.Image, metadata *Metadata) error
+```
+
+RIFF chunk headerとpaddingを含まない生のchunk payloadを渡します
+空でないsliceを、それぞれ1個の `ICCP`、`EXIF`、`XMP ` chunkへそのまま格納します
+nilまたは空のsliceはそのchunkを省略し、metadataがnilまたは全フィールドが空の場合は、同じ画像とoptionsの `Encode` と同じbytesを出力します
+
+空でないmetadataがある場合は、すべてのcompression familyでextended WebP containerを使います
+`VP8X`、任意の `ICCP`、画像chunk、任意の `EXIF`、任意の `XMP ` の順に書き込み、対応するfeature flagと奇数長chunkのゼロpaddingを設定します
+VP8L、VP8、ALPHのpayloadは変更しません
+全体のfile sizeは [RFC 9649のcontainer上限](https://www.rfc-editor.org/rfc/rfc9649.html#section-2.4) である4 GiBから2 bytesを引いた値以内である必要があります
+metadata単体または画像を含めた全体が上限を超える場合は、出力を書き込む前にエラーを返します
+
+encoderはICC、Exif、XMLの形式検証、色変換、orientationの適用、`image.Image` からのmetadata抽出を行いません
+呼び出し元はencodeする画素に適したpayloadを渡し、呼び出しから返るまで変更しないでください
+metadataは渡されたsliceから書き込み、画像全体の追加bufferやmetadata全体のbytesのコピーは作りません
+
+writerエラーと不完全な出力の扱いは `Encode` と同じです
+context版は、metadataの書き込み間の確認を含め、次のキャンセル仕様にも従います
+キャンセルがなければ、出力bytesは `EncodeWithMetadata` と一致します
+
 ## キャンセル
 
-`EncodeContext` と `Encoder.EncodeContext` は第1引数に [`context.Context`](https://pkg.go.dev/context) を受け取ります
+`EncodeContext`、`EncodeWithMetadataContext` と対応する `Encoder` メソッドは第1引数に [`context.Context`](https://pkg.go.dev/context) を受け取ります
 キャンセルでエンコードを中断した場合は、`ctx.Err()` が返す `context.Canceled` または `context.DeadlineExceeded` を返します
 独自のキャンセル原因は `context.Cause(ctx)` で別途取得できます
 nilのcontextには `webp: nil context` を返します
@@ -57,8 +92,8 @@ nilのcontextには `webp: nil context` を返します
 キャンセル時は出力が不完全な状態で残る場合があり、最後の書き込み直後にキャンセルを検出する場合もあります
 呼び出しから返った後に、画像の読み取りや書き込みが継続することはありません
 
-キャンセルがなければ、同じ入力とoptionsに対する出力bytesは `Encode` と一致します
-`context.Background()` など `Done` channelを持たないcontextでは、通常の `Encode` 経路を使います
+キャンセルがなければ、同じ入力、options、metadataに対する出力bytesは、対応する通常のエンコード関数と一致します
+`context.Background()` など `Done` channelを持たないcontextでは、通常のエンコード経路を使います
 既存の `Encode`、`Options`、`Encoder` のフィールドの挙動は維持します
 
 ## Compression Family
@@ -210,6 +245,6 @@ encoder versionによって異なる有効なVP8LまたはVP8 planを選択す�
 - lossless画像の各軸は1から16384 pixels
 - lossy画像の各軸は1から16383 pixels
 - 静止画だけをencodeする
-- `image.Image` APIでは画像metadataを保持しない
+- `image.Image` はmetadataを公開しないため、metadata APIで明示的に渡す
 - lossy alphaではgeneral hash-chain LZ77 searchやblock-adaptive alpha entropy codingを行わない
 - lossy loop-filter設定は保守的で、画像固有のperceptual optimization passでは選択していない

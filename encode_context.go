@@ -18,6 +18,10 @@ import (
 // It cannot interrupt a blocked image method or Write call. All encoding workers
 // finish before EncodeContext returns.
 func EncodeContext(ctx context.Context, w io.Writer, m image.Image, o *Options) error {
+	return encodeContext(ctx, w, m, o, nil)
+}
+
+func encodeContext(ctx context.Context, w io.Writer, m image.Image, o *Options, metadata *Metadata) error {
 	if ctx == nil {
 		return errors.New("webp: nil context")
 	}
@@ -25,12 +29,12 @@ func EncodeContext(ctx context.Context, w io.Writer, m image.Image, o *Options) 
 		return err
 	}
 	if ctx.Done() == nil {
-		return Encode(w, m, o)
+		return EncodeWithMetadata(w, m, o, metadata)
 	}
 	cancel := &encodeCancellation{done: ctx.Done()}
 	var err error
 	if !cancel.run(func() {
-		err = encode(w, m, o, cancel)
+		err = encodeWithMetadata(w, m, o, cancel, metadata)
 		if err == nil {
 			cancel.check()
 			// The cancellation wrapper hides an existing buffer from the codec.

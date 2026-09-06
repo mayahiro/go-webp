@@ -33,7 +33,10 @@ make verify-external ARGS='-decoder ximage'
 
 The command checks lossless fixtures for exact pixels and lossy fixtures for
 bounded RGB error. The generated set includes fully transparent pixels with
-non-zero hidden RGB. CI runs libwebp `dwebp` 1.6.0 and
+non-zero hidden RGB, plus metadata-bearing lossless, near-lossless, opaque
+lossy, and alpha lossy images. These metadata fixtures check container and
+pixel compatibility using opaque payloads, not payload format validity.
+CI runs libwebp `dwebp` 1.6.0 and
 `golang.org/x/image/webp` v0.41.0 as independent jobs and reports each decoder
 version. The dwebp archive is downloaded from the official WebM release site
 and verified by SHA-256. Decoder upgrades are made separately from encoder
@@ -55,6 +58,8 @@ RIFF/VP8L/VP8/VP8X/ALPH structure. Images are bounded to 8x8 so
 `ModeBestCompression` remains fast enough for repeated mutation.
 The same target checks that `EncodeContext` produces identical output with a
 live context and returns `context.Canceled` when cancelled during image reads.
+It also varies ICC, Exif, and XMP payloads through `EncodeWithMetadataContext`,
+checking chunk order, flags, padding, and unchanged image payloads.
 
 Two focused targets cover larger boundaries with the same image types, origins,
 and strides. `FuzzEncodeNearLossless` uses dimensions 1, 2, 3, 63, 64, and 65 to

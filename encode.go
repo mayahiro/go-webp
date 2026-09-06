@@ -90,15 +90,19 @@ type Encoder struct {
 // Write errors from w are returned unchanged. If writing fails, w may contain
 // a partial image.
 func Encode(w io.Writer, m image.Image, o *Options) error {
-	return encode(w, m, o, nil)
+	return encodeWithMetadata(w, m, o, nil, nil)
 }
 
-func encode(w io.Writer, m image.Image, o *Options, cancel *encodeCancellation) error {
+func encodeWithMetadata(w io.Writer, m image.Image, o *Options, cancel *encodeCancellation, metadata *Metadata) error {
 	if w == nil {
 		return errors.New("webp: nil writer")
 	}
 	if m == nil {
 		return errors.New("webp: nil image")
+	}
+	preparedMetadata, err := prepareMetadata(metadata)
+	if err != nil {
+		return err
 	}
 
 	source := newEncoderSource(m)
@@ -116,15 +120,15 @@ func encode(w io.Writer, m image.Image, o *Options, cancel *encodeCancellation) 
 	}
 	switch mode {
 	case ModeNearLossless:
-		return encodeNearLossless(w, source, nearLosslessQuality(o))
+		return encodeNearLosslessMetadata(w, source, nearLosslessQuality(o), preparedMetadata)
 	case ModeLossyQuality:
-		return encodeLossy(w, source, lossyQuality(o), mode)
+		return encodeLossyMetadata(w, source, lossyQuality(o), mode, preparedMetadata)
 	}
 	switch compression(o) {
 	case CompressionLossless:
-		return encodeLossless(w, source, mode)
+		return encodeLosslessMetadata(w, source, mode, preparedMetadata)
 	case CompressionLossy:
-		return encodeLossy(w, source, lossyQuality(o), mode)
+		return encodeLossyMetadata(w, source, lossyQuality(o), mode, preparedMetadata)
 	default:
 		return fmt.Errorf("webp: unsupported compression mode %d", compression(o))
 	}

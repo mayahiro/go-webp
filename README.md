@@ -13,6 +13,7 @@ encoders.
   architecture-specific assembly
 - Lossless, near-lossless, and true VP8 lossy encoding
 - Alpha preservation for every compression family
+- Optional ICC, Exif, and XMP metadata through dedicated encoding functions
 - Compression profiles for fast, balanced, best-compression, automatic, and
   low-memory operation
 - Direct support for common standard image types and a general `image.Image`
@@ -85,6 +86,21 @@ err := webp.EncodeContext(ctx, dst, img, nil)
 
 Cancellation returns `ctx.Err()` and may leave partial output. See the
 [cancellation contract](docs/encoder.md#cancellation) for details.
+
+To attach metadata, pass chunk payloads obtained separately from the image:
+
+```go
+err := webp.EncodeWithMetadata(dst, img, nil, &webp.Metadata{
+	ICCProfile: iccBytes,
+	EXIF:       exifBytes,
+	XMP:        xmpBytes,
+})
+```
+
+Payloads are stored verbatim; the encoder does not extract metadata from
+`image.Image` or apply color profiles or orientation. Nil or empty metadata
+produces the same bytes as `Encode`. See [Metadata](docs/encoder.md#metadata)
+for payload requirements and the cancellable API.
 
 ## Performance
 

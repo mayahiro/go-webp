@@ -78,6 +78,22 @@ func FuzzEncodePublicAPI(f *testing.F) {
 		if !bytes.Equal(cancellable.Bytes(), first) {
 			t.Fatal("cancellable encoding changed the output")
 		}
+		metadata := &Metadata{}
+		payload := pixelBytes[:min(len(pixelBytes), 64)]
+		if rawQuality&1 != 0 {
+			metadata.ICCProfile = payload
+		}
+		if rawQuality&2 != 0 {
+			metadata.EXIF = payload
+		}
+		if rawQuality&4 != 0 {
+			metadata.XMP = payload
+		}
+		var withMetadata bytes.Buffer
+		if err := EncodeWithMetadataContext(ctx, &withMetadata, img, opts, metadata); err != nil {
+			t.Fatal(err)
+		}
+		assertMetadataEncoding(t, first, withMetadata.Bytes(), metadata, width, height)
 		readImage := &contextReadImage{Image: img, at: int(rawQuality)%(width*height) + 1, onAt: cancel}
 		if err := EncodeContext(ctx, io.Discard, readImage, opts); err != context.Canceled {
 			t.Fatalf("cancelled encode error = %v", err)

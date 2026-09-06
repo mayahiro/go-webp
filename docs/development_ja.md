@@ -28,7 +28,8 @@ make verify-external ARGS='-decoder ximage'
 ```
 
 このコマンドはlossless fixtureをpixel完全一致で確認し、lossy fixtureをRGB誤差の上限で確認します
-generated setにはalpha 0かつhidden RGBが非ゼロのpixelを含みます
+generated setにはalpha 0かつhidden RGBが非ゼロのpixelと、metadata付きのlossless、near-lossless、opaque lossy、alpha付きlossy画像を含みます
+metadata fixtureは不透明なpayloadを使ってcontainerとpixelの互換性を確認し、payloadの形式の妥当性は検証しません
 CIはlibwebp `dwebp` 1.6.0と `golang.org/x/image/webp` v0.41.0を独立jobで実行し、各decoder versionをreportします
 dwebp archiveは公式WebM release siteから取得し、SHA-256を検証します
 decoder更新はencoder変更と分離し、conformance差分を個別にreviewします
@@ -43,6 +44,7 @@ decoderが受理したことだけをformat conformanceの根拠にはしませ�
 public `Encode` targetは全public mode、quality 1から100、NRGBA、RGBA、Gray、YCbCr、Paletted、opaqueとalpha、odd dimensions、non-zero origin、padding付きstride、決定的output、RIFF、VP8L、VP8、VP8X、ALPH構造を確認します
 `ModeBestCompression` を繰り返し実行できるように画像を8x8以下へ制限します
 同じtargetで、有効なcontextを渡した `EncodeContext` の出力一致と、画像の読み取り中にキャンセルした際の `context.Canceled` の返却も確認します
+`EncodeWithMetadataContext` に渡すICC、Exif、XMP payloadも変化させ、chunk順序、flag、padding、画像payloadの不変性を確認します
 
 追加の2 targetは同じ画像型、origin、strideを使って大きい境界を検証します
 `FuzzEncodeNearLossless` は寸法1、2、3、63、64、65で前処理の閾値を通り、decode後のalpha、境界画素の保持、RGB誤差の上限を確認します

@@ -106,6 +106,10 @@ func (p *vp8lPlan) payloadBitLen() uint64 {
 	return p.payloadBits
 }
 
+func (p *vp8lPlan) imageInfo() (width, height int, alpha bool) {
+	return p.width, p.height, p.alpha
+}
+
 type vp8lBudget struct {
 	cancel                   *encodeCancellation
 	maxSourceBytes           uint64
