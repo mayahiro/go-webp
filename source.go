@@ -52,6 +52,7 @@ type encoderSource struct {
 	bounds image.Rectangle
 	width  int
 	height int
+	cancel *encodeCancellation
 }
 
 func newEncoderSource(m image.Image) encoderSource {
@@ -65,15 +66,15 @@ func newEncoderSource(m image.Image) encoderSource {
 }
 
 func (s encoderSource) pixels() pixelReader {
-	return pixelReaderFor(s.image)
+	return s.cancel.pixels(pixelReaderFor(s.image))
 }
 
 func (s encoderSource) readLuma() lumaReader {
-	return lumaReaderFor(s.image)
+	return s.cancel.luma(lumaReaderFor(s.image))
 }
 
 func (s encoderSource) readChroma() chromaReader {
-	return chromaReaderFor(s.image)
+	return s.cancel.chroma(chromaReaderFor(s.image))
 }
 
 type vp8Source struct {
@@ -83,6 +84,7 @@ type vp8Source struct {
 	readLuma   lumaReader
 	readChroma chromaReader
 	plane      vp8SourcePlane
+	cancel     *encodeCancellation
 }
 
 type vp8SourcePlane struct {
@@ -99,6 +101,7 @@ func newVP8Source(source encoderSource, materialize bool) vp8Source {
 		bounds: source.bounds,
 		width:  source.width,
 		height: source.height,
+		cancel: source.cancel,
 	}
 	total := source.width * source.height
 	if !materialize || total <= 0 || total > vp8SourcePlaneMaxBytes/3 {
@@ -140,8 +143,8 @@ func newVP8Source(source encoderSource, materialize bool) vp8Source {
 		}
 	}
 	result.plane = plane
-	result.readLuma = plane.luma
-	result.readChroma = plane.chroma
+	result.readLuma = source.cancel.luma(plane.luma)
+	result.readChroma = source.cancel.chroma(plane.chroma)
 	return result
 }
 
@@ -167,6 +170,7 @@ func (s *vp8Source) applySharpChroma(readPixel pixelReader) {
 	selected := make([]uint8, halfWidth*halfHeight*2)
 	selectedCr := selected[halfWidth*halfHeight:]
 	for by := 0; by < halfHeight; by++ {
+		s.cancel.check()
 		for bx := 0; bx < halfWidth; bx++ {
 			x := bx * 2
 			y := by * 2
@@ -201,6 +205,7 @@ func (s *vp8Source) applySharpChroma(readPixel pixelReader) {
 		}
 	}
 	for y := 0; y < s.height; y++ {
+		s.cancel.check()
 		for x := 0; x < s.width; x++ {
 			selectedIndex := (y>>1)*halfWidth + (x >> 1)
 			planeIndex := y*s.width + x

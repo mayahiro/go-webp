@@ -1,16 +1,24 @@
 # Architecture
 
-go-webp exposes one public encoding entry point and keeps VP8L lossless and
-VP8 lossy encoding as independent pipelines. Shared code validates requests,
-adapts `image.Image`, and writes the WebP container; each codec owns its search
-and bitstream state.
+go-webp exposes ordinary and cancellable encoding entry points and keeps VP8L
+lossless and VP8 lossy encoding as independent pipelines. Shared code validates
+requests, adapts `image.Image`, and writes the WebP container; each codec owns
+its search and bitstream state.
 
 ## Entry Point and Source Boundary
 
 `Encode` validates dimensions and options, creates an immutable
 `encoderSource`, and dispatches to the selected codec. `encode.go` contains
-the public API and WebP container primitives. `pixel_reader.go` contains the
-specialized image readers, while `source.go` defines the shared source types.
+the ordinary public API and WebP container primitives. `pixel_reader.go`
+contains the specialized image readers, while `source.go` defines the shared
+source types.
+
+`EncodeContext` adds cooperative cancellation at the source, search, and
+writer boundaries. `encode_context.go` owns the cancellation lifetime and
+uses a private per-call value to unwind internal callbacks without error
+returns. Only that value is recovered; caller panics propagate. Parallel
+codec work is joined before the public call returns. Contexts without a
+cancellation channel use the ordinary encoding path.
 
 Direct readers cover `image.NRGBA`, `image.NRGBA64`, `image.RGBA`,
 `image.RGBA64`, `image.Gray`, `image.YCbCr`, `image.Paletted`, and

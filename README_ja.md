@@ -12,6 +12,7 @@ Go標準の画像encoderに近い小さなAPIで、静止画のVP8L lossless、V
 - すべてのcompression familyでalphaを保持
 - fast、balanced、best-compression、auto、low-memoryのcompression profile
 - 主要な標準画像型の専用経路と、一般的な `image.Image` fallback
+- `EncodeContext` と `Encoder.EncodeContext` による協調的なキャンセル
 - Go 1.26.0以上
 
 go-webpは静止画encodingに責務を限定しています
@@ -70,6 +71,15 @@ lossless WebPを書き出す場合はoptionsへnilを渡します
 ```go
 err := webp.Encode(dst, img, nil)
 ```
+
+リクエストのcontextを渡すと、エンコードをキャンセルできます
+
+```go
+err := webp.EncodeContext(ctx, dst, img, nil)
+```
+
+キャンセル時は `ctx.Err()` を返し、出力が不完全な状態で残る場合があります
+詳細は [キャンセルの仕様](docs/encoder_ja.md#キャンセル) を参照してください
 
 ## 性能
 

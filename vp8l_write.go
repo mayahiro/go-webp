@@ -32,9 +32,9 @@ func encodeLossless(w io.Writer, source encoderSource, mode Mode) error {
 	if source.width > maxVP8LDimension || source.height > maxVP8LDimension {
 		return fmt.Errorf("webp: image dimensions %dx%d exceed VP8L limit %dx%d", source.width, source.height, maxVP8LDimension, maxVP8LDimension)
 	}
-	readPixel := source.pixels()
+	readPixel := pixelReaderFor(source.image)
 	if mode == ModeAuto {
-		mode = vp8lAutoLosslessMode(source.image, readPixel, source.bounds, source.width, source.height)
+		mode = vp8lAutoLosslessMode(source.image, source.cancel.pixels(readPixel), source.bounds, source.width, source.height)
 	}
 	vp8lSource := newVP8LSource(source, readPixel)
 	plan, err := vp8lPlanForMode(vp8lSource, mode)
@@ -112,8 +112,9 @@ func writeLosslessVP8L(w io.Writer, plan vp8lEncodedPlan) error {
 }
 
 func (p *vp8lPlan) writeTo(bits *vp8lBitSink) {
+	p.cancel.check()
 	p.writePrefixTo(bits)
-	p.image.writeTo(bits, true)
+	p.image.writeToCancellation(bits, true, p.cancel)
 }
 
 func (p *vp8lPlan) writePrefixTo(bits *vp8lBitSink) {
@@ -137,6 +138,10 @@ func writeVP8LPrefix(bits *vp8lBitSink, width int, height int, alpha bool, trans
 }
 
 func (image *vp8lImagePlan) writeTo(bits *vp8lBitSink, allowMetaPrefix bool) {
+	image.writeToCancellation(bits, allowMetaPrefix, nil)
+}
+
+func (image *vp8lImagePlan) writeToCancellation(bits *vp8lBitSink, allowMetaPrefix bool, cancel *encodeCancellation) {
 	if image.cacheBits != 0 {
 		bits.writeBits(1, 1)
 		bits.writeBits(uint32(image.cacheBits), 4)
@@ -147,7 +152,7 @@ func (image *vp8lImagePlan) writeTo(bits *vp8lBitSink, allowMetaPrefix bool) {
 		if image.meta != nil {
 			bits.writeBits(1, 1)
 			bits.writeBits(uint32(image.meta.prefixBits-2), 3)
-			image.meta.image.writeTo(bits, false)
+			image.meta.image.writeToCancellation(bits, false, cancel)
 		} else {
 			bits.writeBits(0, 1)
 		}
@@ -161,7 +166,10 @@ func (image *vp8lImagePlan) writeTo(bits *vp8lBitSink, allowMetaPrefix bool) {
 	}
 
 	position := 0
-	for _, token := range image.tokens {
+	for index, token := range image.tokens {
+		if index&4095 == 0 {
+			cancel.check()
+		}
 		group := image.codeGroupAt(position)
 		switch token.kind() {
 		case vp8lTokenLiteral:

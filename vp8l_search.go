@@ -34,6 +34,8 @@ func searchVP8L(source vp8lSource, budget vp8lBudget) (*vp8lPlan, error) {
 }
 
 func (s *vp8lSearchSession) search(budget vp8lBudget, reuseScoredCandidates bool) (*vp8lPlan, error) {
+	s.source.cancel.check()
+	budget.cancel = s.source.cancel
 	pixelCount := uint64(s.source.width) * uint64(s.source.height)
 	if vp8lBufferedSearchBytes(pixelCount, budget) > budget.maxWorkspaceBytes {
 		return nil, errVP8LSourceLimit
@@ -64,11 +66,12 @@ func (s *vp8lSearchSession) search(budget vp8lBudget, reuseScoredCandidates bool
 		reservoir.seedScoredCandidates(s.reusableKeys)
 	}
 	addCandidate := func(candidate vp8lTransformCandidate) {
+		budget.cancel.check()
 		counters.recordGeneratedCandidate(len(candidate.pixels), len(candidate.transforms) != 0)
 		reservoir.add(candidate)
 	}
 	addCandidate(direct)
-	workspace := &vp8lSearchWorkspace{counters: counters}
+	workspace := &vp8lSearchWorkspace{counters: counters, cancel: budget.cancel}
 	if earlyPalette != nil {
 		vp8lForEachPaletteCandidateWithTable(s.pixels, s.source.width, s.source.height, earlyPalette, budget, &workspace.transform, addCandidate)
 	} else {
@@ -101,6 +104,7 @@ func (s *vp8lSearchSession) search(budget vp8lBudget, reuseScoredCandidates bool
 		}
 	}
 	shortlist := reservoir.finalists(budget.shallowCandidates)
+	budget.cancel.check()
 	finalists := vp8lSelectExactFinalists(s.source.width, s.source.height, s.alpha, shortlist, budget, workspace)
 	budget.counters.recordExactFinalists(len(finalists))
 	plans := vp8lBuildFinalPlans(s.source.width, s.source.height, s.alpha, finalists, budget, workspace)

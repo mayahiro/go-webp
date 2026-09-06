@@ -90,6 +90,10 @@ type Encoder struct {
 // Write errors from w are returned unchanged. If writing fails, w may contain
 // a partial image.
 func Encode(w io.Writer, m image.Image, o *Options) error {
+	return encode(w, m, o, nil)
+}
+
+func encode(w io.Writer, m image.Image, o *Options, cancel *encodeCancellation) error {
 	if w == nil {
 		return errors.New("webp: nil writer")
 	}
@@ -98,6 +102,11 @@ func Encode(w io.Writer, m image.Image, o *Options) error {
 	}
 
 	source := newEncoderSource(m)
+	source.cancel = cancel
+	cancel.check()
+	if cancel != nil {
+		w = cancellingWriter{writer: w, cancel: cancel}
+	}
 	if source.width <= 0 || source.height <= 0 {
 		return fmt.Errorf("webp: invalid image dimensions %dx%d", source.width, source.height)
 	}

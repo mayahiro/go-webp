@@ -79,8 +79,17 @@ func encodeLossyConfig(w io.Writer, source encoderSource, lossyConfig vp8LossyCo
 		readPixel = instrumentLossyPixelReader(source.pixels())
 		if lossyCanParallelizeAlpha(source, lossyConfig) {
 			alphaDone = make(chan lossyAlphaAnalysis, 1)
-			go func() {
-				alphaDone <- analyzeLossyAlphaConfig(readPixel, source.bounds, source.width, source.height, alphaConfig)
+			go func(done chan<- lossyAlphaAnalysis) {
+				var analysis lossyAlphaAnalysis
+				source.cancel.run(func() {
+					analysis = analyzeLossyAlphaConfig(readPixel, source.bounds, source.width, source.height, alphaConfig)
+				})
+				done <- analysis
+			}(alphaDone)
+			defer func() {
+				if alphaDone != nil {
+					<-alphaDone
+				}
 			}()
 		} else {
 			alphaAnalysis = analyzeLossyAlphaConfig(readPixel, source.bounds, source.width, source.height, alphaConfig)
@@ -89,7 +98,9 @@ func encodeLossyConfig(w io.Writer, source encoderSource, lossyConfig vp8LossyCo
 	frame, err := encodeVP8KeyFrameSource(frameSource, lossyConfig)
 	if alphaDone != nil {
 		alphaAnalysis = <-alphaDone
+		alphaDone = nil
 	}
+	source.cancel.check()
 	if err != nil {
 		return err
 	}

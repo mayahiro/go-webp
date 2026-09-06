@@ -16,6 +16,7 @@ animations. WebP decoding is available from
 
 ```go
 func Encode(w io.Writer, m image.Image, o *Options) error
+func EncodeContext(ctx context.Context, w io.Writer, m image.Image, o *Options) error
 ```
 
 `Encode` writes the encoded image to `w`. A nil `Options` value and the zero
@@ -40,7 +41,34 @@ type Encoder struct {
 }
 
 func (enc *Encoder) Encode(w io.Writer, m image.Image) error
+func (enc *Encoder) EncodeContext(ctx context.Context, w io.Writer, m image.Image) error
 ```
+
+## Cancellation
+
+`EncodeContext` and `Encoder.EncodeContext` accept a
+[`context.Context`](https://pkg.go.dev/context) as their first argument.
+When cancellation interrupts encoding, they return `ctx.Err()`:
+`context.Canceled` or `context.DeadlineExceeded`. A custom cancellation cause
+is available separately through `context.Cause(ctx)`.
+A nil context returns `webp: nil context`. A context that is already cancelled
+returns its error before reading the image or writing output.
+
+Cancellation is cooperative: the encoder checks during image processing,
+between search stages, within match and parse loops, and before and after
+output writes. It waits for internal workers to finish before returning.
+It cannot interrupt a blocked image method or `io.Writer.Write` call, and it
+does not guarantee a fixed cancellation latency.
+
+Write errors are returned unchanged, including when a write both cancels the
+context and returns an error. Cancellation can leave partial output and can
+also be observed just after the final write. No further image reads or writes
+occur after the call returns.
+
+Without cancellation, the encoded bytes match `Encode` for the same input and
+options. `context.Background()` and other contexts with no `Done` channel use
+the ordinary `Encode` path. Existing `Encode`, `Options`, and `Encoder` fields
+retain their behavior.
 
 ## Compression Families
 

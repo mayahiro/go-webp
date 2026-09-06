@@ -17,6 +17,7 @@ encoders.
   low-memory operation
 - Direct support for common standard image types and a general `image.Image`
   fallback
+- Cooperative cancellation through `EncodeContext` and `Encoder.EncodeContext`
 - Go 1.26.0 or later
 
 go-webp intentionally focuses on static image encoding. For decoding, use
@@ -75,6 +76,15 @@ Pass `nil` options to write lossless WebP:
 ```go
 err := webp.Encode(dst, img, nil)
 ```
+
+Pass a request context to make encoding cancellable:
+
+```go
+err := webp.EncodeContext(ctx, dst, img, nil)
+```
+
+Cancellation returns `ctx.Err()` and may leave partial output. See the
+[cancellation contract](docs/encoder.md#cancellation) for details.
 
 ## Performance
 

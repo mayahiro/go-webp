@@ -14,6 +14,7 @@ WebPのdecodeには [`golang.org/x/image/webp`](https://pkg.go.dev/golang.org/x/
 
 ```go
 func Encode(w io.Writer, m image.Image, o *Options) error
+func EncodeContext(ctx context.Context, w io.Writer, m image.Image, o *Options) error
 ```
 
 `Encode` はencode結果を `w` へ書き込みます
@@ -37,7 +38,28 @@ type Encoder struct {
 }
 
 func (enc *Encoder) Encode(w io.Writer, m image.Image) error
+func (enc *Encoder) EncodeContext(ctx context.Context, w io.Writer, m image.Image) error
 ```
+
+## キャンセル
+
+`EncodeContext` と `Encoder.EncodeContext` は第1引数に [`context.Context`](https://pkg.go.dev/context) を受け取ります
+キャンセルでエンコードを中断した場合は、`ctx.Err()` が返す `context.Canceled` または `context.DeadlineExceeded` を返します
+独自のキャンセル原因は `context.Cause(ctx)` で別途取得できます
+nilのcontextには `webp: nil context` を返します
+呼び出し時点でキャンセル済みの場合は、画像の読み取りや出力の書き込みを行う前にそのエラーを返します
+
+キャンセルは協調的に処理します
+画像処理中、探索段階の境界、matchとparseのループ内、出力の書き込み前後でキャンセルを確認し、内部workerの終了を待ってから返ります
+ブロック中の画像メソッドや `io.Writer.Write` の呼び出しは中断できず、キャンセルから返却までの時間に固定の上限はありません
+
+書き込みがcontextをキャンセルしてエラーも返す場合を含め、書き込みエラーはそのまま返します
+キャンセル時は出力が不完全な状態で残る場合があり、最後の書き込み直後にキャンセルを検出する場合もあります
+呼び出しから返った後に、画像の読み取りや書き込みが継続することはありません
+
+キャンセルがなければ、同じ入力とoptionsに対する出力bytesは `Encode` と一致します
+`context.Background()` など `Done` channelを持たないcontextでは、通常の `Encode` 経路を使います
+既存の `Encode`、`Options`、`Encoder` のフィールドの挙動は維持します
 
 ## Compression Family
 

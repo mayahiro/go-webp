@@ -42,6 +42,7 @@ decoderが受理したことだけをformat conformanceの根拠にはしませ�
 通常の `go test` ではcommit済みseed corpusを毎回実行します
 public `Encode` targetは全public mode、quality 1から100、NRGBA、RGBA、Gray、YCbCr、Paletted、opaqueとalpha、odd dimensions、non-zero origin、padding付きstride、決定的output、RIFF、VP8L、VP8、VP8X、ALPH構造を確認します
 `ModeBestCompression` を繰り返し実行できるように画像を8x8以下へ制限します
+同じtargetで、有効なcontextを渡した `EncodeContext` の出力一致と、画像の読み取り中にキャンセルした際の `context.Canceled` の返却も確認します
 
 追加の2 targetは同じ画像型、origin、strideを使って大きい境界を検証します
 `FuzzEncodeNearLossless` は寸法1、2、3、63、64、65で前処理の閾値を通り、decode後のalpha、境界画素の保持、RGB誤差の上限を確認します

@@ -21,6 +21,7 @@ func buildVP8LImagePlan(pixels []uint32, width int, height int, budget vp8lBudge
 }
 
 func buildVP8LImagePlanWorkspace(pixels []uint32, width int, height int, budget vp8lBudget, workspace *vp8lSearchWorkspace) vp8lImagePlan {
+	budget.cancel.check()
 	budget.counters.recordHuffmanEmissionBuilds(5)
 	literalGroup, literalDataBits := vp8lLiteralCodeGroupAndDataBits(pixels)
 	literalCounter := vp8lBitCounter()
@@ -44,6 +45,7 @@ func buildVP8LImagePlanWorkspace(pixels []uint32, width int, height int, budget 
 
 	seed := best
 	for range budget.optimalPasses {
+		budget.cancel.check()
 		tokens := vp8lOptimalTokensWorkspace(pixels, graph, seed.group, nil, workspace)
 		budget.counters.recordHuffmanEmissionBuilds(5)
 		candidate := vp8lImagePlan{
@@ -77,6 +79,7 @@ func vp8lRefineEntropyPlanWorkspace(pixels []uint32, graph vp8lMatchGraph, best 
 
 func vp8lReparseEntropyPlanWorkspace(pixels []uint32, graph vp8lMatchGraph, best vp8lImagePlan, budget vp8lBudget, workspace *vp8lSearchWorkspace) vp8lImagePlan {
 	for range budget.entropyIterations {
+		budget.cancel.check()
 		if best.meta == nil {
 			break
 		}
@@ -370,6 +373,11 @@ func vp8lOptimalTokensForImageWorkspace(pixels []uint32, graph vp8lMatchGraph, i
 }
 
 func vp8lOptimalTokensWithGroups(pixels []uint32, graph vp8lMatchGraph, cacheHits []int32, groupAt func(int) *vp8lCodeGroup, workspace *vp8lSearchWorkspace) []vp8lToken {
+	var cancel *encodeCancellation
+	if workspace != nil {
+		cancel = workspace.cancel
+	}
+	cancel.check()
 	costs, selected := workspace.resetDP(len(pixels))
 	costs[0] = 0
 	for i := 1; i < len(costs); i++ {
@@ -377,6 +385,9 @@ func vp8lOptimalTokensWithGroups(pixels []uint32, graph vp8lMatchGraph, cacheHit
 	}
 	relaxations := 0
 	for position, pixel := range pixels {
+		if position&4095 == 0 {
+			cancel.check()
+		}
 		if costs[position] == vp8lInfiniteCost {
 			continue
 		}

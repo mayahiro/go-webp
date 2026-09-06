@@ -53,6 +53,8 @@ RGBA, Gray, YCbCr, and Paletted images, opaque and alpha inputs, odd
 dimensions, non-zero origins, padded strides, deterministic output, and
 RIFF/VP8L/VP8/VP8X/ALPH structure. Images are bounded to 8x8 so
 `ModeBestCompression` remains fast enough for repeated mutation.
+The same target checks that `EncodeContext` produces identical output with a
+live context and returns `context.Canceled` when cancelled during image reads.
 
 Two focused targets cover larger boundaries with the same image types, origins,
 and strides. `FuzzEncodeNearLossless` uses dimensions 1, 2, 3, 63, 64, and 65 to

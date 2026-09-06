@@ -2,6 +2,7 @@ package webp
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"image"
 	"image/color"
@@ -67,6 +68,19 @@ func FuzzEncodePublicAPI(f *testing.F) {
 		second := encodeFuzzImage(t, img, opts)
 		if !bytes.Equal(second, first) {
 			t.Fatalf("non-deterministic output: first=%d bytes second=%d bytes", len(first), len(second))
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		var cancellable bytes.Buffer
+		if err := EncodeContext(ctx, &cancellable, img, opts); err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(cancellable.Bytes(), first) {
+			t.Fatal("cancellable encoding changed the output")
+		}
+		readImage := &contextReadImage{Image: img, at: int(rawQuality)%(width*height) + 1, onAt: cancel}
+		if err := EncodeContext(ctx, io.Discard, readImage, opts); err != context.Canceled {
+			t.Fatalf("cancelled encode error = %v", err)
 		}
 		validateFuzzWebP(t, first, img.Bounds().Dx(), img.Bounds().Dy())
 	})
