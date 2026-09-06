@@ -384,6 +384,8 @@ func vp8lOptimalTokensWithGroups(pixels []uint32, graph vp8lMatchGraph, cacheHit
 		costs[i] = vp8lInfiniteCost
 	}
 	relaxations := 0
+	var lastGroup *vp8lCodeGroup
+	var lengthCosts [nLengthCodes]uint16
 	for position, pixel := range pixels {
 		if position&4095 == 0 {
 			cancel.check()
@@ -401,14 +403,32 @@ func vp8lOptimalTokensWithGroups(pixels []uint32, graph vp8lMatchGraph, cacheHit
 			relaxations++
 			vp8lRelaxToken(costs, selected, position+1, costs[position]+cacheCost, cache)
 		}
-		for _, match := range graph.at(position) {
+		matches := graph.at(position)
+		if len(matches) == 0 {
+			continue
+		}
+		// Trees stay immutable during a parse. Cache only length symbols
+		// used by this group. Zero means not computed;
+		// cached costs include one so zero-bit symbols remain distinguishable.
+		if group != lastGroup {
+			clear(lengthCosts[:])
+			lastGroup = group
+		}
+		for _, match := range matches {
 			var lengths [32]uint16
 			lengthCount := vp8lCandidateMatchLengths(int(match.length), &lengths)
 			relaxations += lengthCount
+			copyDistanceCost := group.distance.symbolCost(int(match.distanceSymbol), 7) + uint64(match.distanceExtraBits)
 			for _, rawLength := range lengths[:lengthCount] {
 				length := int(rawLength)
 				end := position + length
-				copyCost := group.copyCost(length, match)
+				prefix := vp8lLengthPrefixCosts[length]
+				lengthCost := lengthCosts[prefix.symbol]
+				if lengthCost == 0 {
+					lengthCost = uint16(group.green.symbolCost(nLiteralCodes+int(prefix.symbol), 10)) + 1
+					lengthCosts[prefix.symbol] = lengthCost
+				}
+				copyCost := uint64(lengthCost-1) + uint64(prefix.extraBits) + copyDistanceCost
 				vp8lRelaxToken(costs, selected, end, costs[position]+copyCost, vp8lCopyToken(length, int(match.distanceCode)))
 			}
 		}
@@ -465,12 +485,6 @@ func (group *vp8lCodeGroup) literalCost(pixel uint32) uint64 {
 		group.red.symbolCost(int(uint8(pixel>>16)), 9) +
 		group.blue.symbolCost(int(uint8(pixel)), 9) +
 		group.alpha.symbolCost(int(uint8(pixel>>24)), 9)
-}
-
-func (group *vp8lCodeGroup) copyCost(length int, match vp8lMatch) uint64 {
-	lengthPrefix := vp8lLengthPrefixCosts[length]
-	return group.green.symbolCost(nLiteralCodes+int(lengthPrefix.symbol), 10) + uint64(lengthPrefix.extraBits) +
-		group.distance.symbolCost(int(match.distanceSymbol), 7) + uint64(match.distanceExtraBits)
 }
 
 func (tree *vp8lHuffmanTree) symbolCost(symbol int, fallback uint64) uint64 {
